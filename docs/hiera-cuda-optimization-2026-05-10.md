@@ -226,6 +226,10 @@ Rejected follow-up experiments:
   current CUDA path. Latest f16 measurements are `37.2 ms/frame` at 512 and
   `110.0 ms/frame` at 1024, both slower than q4_0. Latest q8_0 checks were also
   slower (`33.6 ms/frame` at 512, `92.1 ms/frame` at 1024).
+- Changing the NVIDIA FP32 `head_dim=56` FlashAttention tile config from
+  `nbatch_K=56` to `28` compiled, but did not improve speed. The measured rows
+  were `24.8 ms/frame` at 512 and `89.1 ms/frame` at 1024, effectively equal to
+  the current baseline.
 
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
@@ -702,6 +706,8 @@ outputs/hiera-free-prev-state/f16_512_summary.json
 outputs/hiera-free-prev-state/f16_1024_summary.json
 outputs/hiera-free-prev-state/q8_0_512_summary.json
 outputs/hiera-free-prev-state/q8_0_1024_summary.json
+outputs/fattn56-nbatchK28/q4_0_512_summary.json
+outputs/fattn56-nbatchK28/q4_0_1024_summary.json
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 outputs/model-matrix-free-prev-state-1024-trackrange/summary.json

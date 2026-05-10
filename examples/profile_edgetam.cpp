@@ -28,9 +28,9 @@ int main(int argc, char** argv) {
     std::string model_path = "models/edgetam_f16.ggml";
     std::string image_path = "data/test_image.jpg";
     int n_threads = 4;
-    int n_warmup  = 2;
-    int n_iter    = 5;
-    bool use_gpu  = true;
+    int n_warmup = 2;
+    int n_iter = 5;
+    bool use_gpu = true;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
@@ -47,32 +47,35 @@ int main(int argc, char** argv) {
             use_gpu = false;
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
-            fprintf(stderr, "Usage: %s [--model <path>] [--image <path>] "
-                    "[--n-threads <n>] [--n-warmup <n>] [--n-iter <n>] [--cpu]\n", argv[0]);
+            fprintf(stderr,
+                    "Usage: %s [--model <path>] [--image <path>] "
+                    "[--n-threads <n>] [--n-warmup <n>] [--n-iter <n>] [--cpu]\n",
+                    argv[0]);
             return 1;
         }
     }
 
     fprintf(stderr, "Loading model: %s\n", model_path.c_str());
     fprintf(stderr, "Test image:    %s\n", image_path.c_str());
-    fprintf(stderr, "Backend:       %s\n", use_gpu ? "Metal (GPU)" : "CPU");
+    fprintf(stderr, "Backend request: %s\n", use_gpu ? "GPU" : "CPU");
     fprintf(stderr, "\n");
 
     // Load model
     sam3_params params;
     params.model_path = model_path;
-    params.use_gpu    = use_gpu;
-    params.n_threads  = n_threads;
+    params.use_gpu = use_gpu;
+    params.n_threads = n_threads;
 
     auto model = sam3_load_model(params);
     if (!model) {
         fprintf(stderr, "ERROR: failed to load model\n");
         return 1;
     }
+    fprintf(stderr, "Backend actual:  %s\n", sam3_backend_name(*model));
 
     if (sam3_get_model_type(*model) != SAM3_MODEL_EDGETAM) {
-        fprintf(stderr, "ERROR: model is not EdgeTAM (model_type=%d)\n",
-                sam3_get_model_type(*model));
+        fprintf(
+            stderr, "ERROR: model is not EdgeTAM (model_type=%d)\n", sam3_get_model_type(*model));
         return 1;
     }
 

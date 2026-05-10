@@ -3,8 +3,11 @@
 
 # Build
 build/
+build-cuda*/
 cmake-build-*/
 .cache/
+.xmake/
+compile_commands.json
 
 # Models/weights
 models/
@@ -33,6 +36,7 @@ tests/cpp_*
 tests/debug_*
 tests/ref*/
 raw_weights/
+outputs/
 
 # Test data
 data/

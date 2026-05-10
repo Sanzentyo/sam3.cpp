@@ -1,0 +1,32 @@
+# clang-format for sam3.cpp
+BasedOnStyle: Google
+Language: Cpp
+Standard: Latest
+ColumnLimit: 100
+IndentWidth: 4
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Attach
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^"sam3\.h"'
+    Priority: 1
+  - Regex: '^"'
+    Priority: 2
+  - Regex: '^<.*\.h(pp)?>'
+    Priority: 3
+  - Regex: '^<[^/]*>'
+    Priority: 4
+SortIncludes: true
+SpaceAfterCStyleCast: true
+NamespaceIndentation: None
+FixNamespaceComments: true

@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 project(sam3.cpp VERSION 1.0.0 LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -18,6 +19,10 @@ endif()
 
 add_subdirectory(ggml)
 
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # sam3 static library
 add_library(sam3 STATIC sam3.cpp sam3.h)
 target_include_directories(sam3 PUBLIC
@@ -25,7 +30,12 @@ target_include_directories(sam3 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/stb
 )
 target_link_libraries(sam3 PUBLIC ggml)
-target_compile_features(sam3 PUBLIC cxx_std_14)
+target_compile_features(sam3 PUBLIC cxx_std_23)
+set_target_properties(sam3 PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
 
 # Examples (only when top-level)
 option(SAM3_BUILD_EXAMPLES "Build example executables" ON)

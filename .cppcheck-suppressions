@@ -1,0 +1,29 @@
+# Cppcheck suppressions for sam3.cpp.
+#
+# Rationale per entry kept inline.
+
+# cppcheck cannot reliably find all C++23/system includes in local toolchains.
+missingIncludeSystem
+
+# Public APIs are intentionally unused inside the translation unit.
+unusedFunction
+
+# Some inline suppressions are build/config dependent.
+unmatchedSuppression
+
+# Keep the default branch-limit analysis fast; this informational diagnostic
+# should not fail the lint gate.
+normalCheckLevelMaxBranches
+
+# clang-tidy covers this with better context.
+noExplicitConstructor
+
+# Platform-conditional headers and ggml integration can trip this noisily.
+preprocessorErrorDirective
+
+# Raw loops over fixed tensor shapes are often clearer and more cache-aware here.
+useStlAlgorithm
+
+# Do not analyze vendored/submodule code from this project-level recipe.
+*:ggml/*
+*:stb/*

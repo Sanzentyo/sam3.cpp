@@ -419,6 +419,13 @@ changed full-mask output (`mask_hash_equal_rows=0/10`, `min_bbox_iou=0.9645`,
 as a parity-preserving optimization, so the default 32-col tile path remains in
 place.
 
+Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
+`nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
+1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change
+was not meaningful: bbox-only was `94.4 -> 93.7 ms/frame` in a single A/B pair
+and full-mask stayed `94.1 -> 94.1 ms/frame`. This was reverted and is not a
+priority unless a larger paired run shows a real effect.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -549,4 +556,5 @@ outputs/conv-transpose-k2s2/paired_summary.json
 outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
 outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
+outputs/fattn56-nbatch64/fullmask_parity.json
 ```

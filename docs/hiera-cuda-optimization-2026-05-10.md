@@ -195,6 +195,25 @@ This makes the remaining target larger: matching PyTorch requires roughly a
 2x reduction in the steady C++ tracking path, not just removing the previous
 short-run outliers.
 
+Official PyTorch was also instrumented with synchronized wrappers around
+`forward_image`, `track_step`, and `_run_memory_encoder`. These wrapper timings
+add synchronization overhead and are not the speed baseline, but they identify
+where the official implementation spends time:
+
+| Encode size | Instrumented PyTorch track ms/frame | `forward_image` mean | `track_step` mean | Memory encoder | Evidence |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1024 | 47.62 | 30.41 | 15.35 | 1.75 | `outputs/python-official-profile/base_plus_1024.json` |
+| 512 | 23.22 | 15.92 | 6.60 | 3.03 | `outputs/python-official-profile/base_plus_512.json` |
+
+The comparable C++ synchronized profile still spends much more time in Hiera:
+latest 1024 `hiera_encode` steady values are about `65-69 ms/frame`, with
+`propagate_single` around `11-12 ms/frame`; latest 512 `hiera_encode` steady
+values are about `16.7-17.0 ms/frame`, with `propagate_single` around
+`3.7-3.9 ms/frame`. The priority remains Hiera encode kernels, especially
+`head_dim=56` FlashAttention and q4 MLP matmul shapes. Propagation and memory
+encoding are secondary unless Hiera is first brought closer to the PyTorch
+`forward_image` range.
+
 Rejected follow-up experiments:
 
 - `GGML_CUDA_FORCE_CUBLAS=1` for q4_0 matmuls did not improve the remaining
@@ -679,4 +698,7 @@ outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 outputs/model-matrix-free-prev-state-1024-trackrange/summary.json
 outputs/model-matrix-free-prev-state-512-trackrange/summary.json
+outputs/python-official-profile/base_plus_1024.json
+outputs/python-official-profile/base_plus_512.json
+outputs/hiera-free-prev-state/q4_0_1024_profile_summary.json
 ```

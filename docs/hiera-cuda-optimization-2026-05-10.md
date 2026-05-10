@@ -129,6 +129,21 @@ lower encode-size rows above are still useful for understanding scaling, but
 they must not be used to claim a speed win over the official 1024 PyTorch
 baseline.
 
+Re-running the same comparison after the input-resolution contract update gives
+the same conclusion. The 2026-05-10 rerun used the same decoded `1008x568`
+source frames, 10-frame range, point prompt, model family, and explicit encode
+size in both implementations:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio |
+| --- | ---: | ---: | ---: |
+| 1024 | 93.6 | 57.65 | 0.616 |
+| 512 | 25.0 | 20.08 | 0.803 |
+
+The 512 gap is now about `4.9 ms/frame`, but it is still not a win. The next
+accepted optimization must either remove the short-run Hiera encode outliers or
+reduce steady Hiera kernel time enough to make the comparable 512 row exceed
+the PyTorch baseline.
+
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
 kernel position for every output element even though this shape has exactly one
@@ -587,4 +602,6 @@ outputs/preprocess-norm-lut/fullmask_parity.json
 outputs/preprocess-norm-lut/lut_profile_summary.json
 outputs/hiera-inplace-bias/q4_0_1024_parity.json
 outputs/hiera-inplace-bias/q4_0_512_parity.json
+outputs/model-matrix-current-rerun-1024/summary.json
+outputs/model-matrix-current-rerun-512/summary.json
 ```

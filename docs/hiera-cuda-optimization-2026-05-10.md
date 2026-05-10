@@ -162,6 +162,23 @@ windowed Hiera blocks in stage 2, especially their QKV/projection/MLP `mul_mat`,
 window partition/unpartition, and normalization/add chains. FPN work is no
 longer a first-priority target for Base+ 1024 latency.
 
+Adding stage-2 block-group cuts for Base+ narrows the largest region further.
+The model's actual stage 2 covers block 5 through block 20. The profiler records
+cumulative cut points after blocks 10, 16, and 20:
+
+| Cut | Cumulative ms | Incremental ms | Nodes |
+| --- | ---: | ---: | ---: |
+| `hiera_stage_1` | 26.4 | 14.0 | 333 |
+| `hiera_stage_2_block_10` | 40.7 | 14.2 | 730 |
+| `hiera_stage_2_block_16` | 60.9 | 20.2 | 1088 |
+| `hiera_stage_2_block_20` | 70.8 | 9.9 | 1331 |
+
+The heaviest block group is therefore the middle of stage 2, roughly blocks
+11-16. These are windowed Hiera blocks at the 64x64 feature resolution, so the
+best next optimization candidate is reducing the per-block overhead of repeated
+window partition/attention projection/MLP sequences rather than tuning late
+global blocks or FPN.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -254,4 +271,5 @@ outputs/sam2-official-quality-512-metadata-q4_0/summary.json
 outputs/hiera-pos-backend-cache/summary.json
 outputs/hiera-pos-backend-cache/parity.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_cuts_fpn_all_summary.json
+outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_blocks_summary.json
 ```

@@ -5255,7 +5255,8 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
 static void sam2_build_hiera_graph(struct ggml_context* ctx,
                                    struct ggml_tensor* input,
                                    const sam3_model& model,
-                                   struct ggml_tensor* stage_outs[4]) {
+                                   struct ggml_tensor* stage_outs[4],
+                                   std::vector<struct ggml_tensor*>* block_outs = nullptr) {
     const auto& hp = model.hparams;
     const auto& hiera = model.hiera;
 
@@ -5294,6 +5295,9 @@ static void sam2_build_hiera_graph(struct ggml_context* ctx,
         const auto& blk = hiera.blocks[i];
 
         x = sam2_hiera_block_forward(ctx, x, blk, spatial_H, spatial_W, i);
+        if (block_outs != nullptr && std::cmp_less(i, block_outs->size())) {
+            (*block_outs)[static_cast<size_t>(i)] = x;
+        }
 
         // Mark key block outputs for debugging
         if (i == 0 || i == 1 || i == 2 || i == 5 || i == 21) {
@@ -6746,7 +6750,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     // ── Build graph ──────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(hiera_encode_graph_build);
     const bool profile_hiera_cuts = sam3_getenv("SAM3_PROFILE_HIERA_CUTS").has_value();
-    const size_t graph_slots = profile_hiera_cuts ? 64 : 2;
+    const size_t graph_slots = profile_hiera_cuts ? 128 : 2;
     const size_t buf_size =
         (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * graph_slots);
     struct ggml_init_params gparams = {
@@ -6766,7 +6770,12 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // Build Hiera backbone
     struct ggml_tensor* stage_outs[4] = {};
-    sam2_build_hiera_graph(ctx0.get(), inp, model, stage_outs);
+    std::vector<struct ggml_tensor*> block_outs;
+    if (profile_hiera_cuts) {
+        block_outs.resize(static_cast<size_t>(hp.hiera_total_blocks()));
+    }
+    sam2_build_hiera_graph(
+        ctx0.get(), inp, model, stage_outs, profile_hiera_cuts ? &block_outs : nullptr);
 
     // Build FPN neck
     struct ggml_tensor* fpn_outs[4] = {};
@@ -6874,6 +6883,18 @@ static bool sam2_encode_image_hiera(sam3_state& state,
         cuts.reserve(5);
         for (int i = 0; i < 4; ++i) {
             cuts.push_back({std::format("hiera_stage_{}", i), {stage_outs[i]}});
+        }
+        if (hp.hiera_num_stages >= 3) {
+            const int stage2_begin = model.hiera.stage_ends[1] + 1;
+            const int stage2_end = model.hiera.stage_ends[2];
+            for (int block = stage2_begin + 5; block <= stage2_end; block += 6) {
+                cuts.push_back({std::format("hiera_stage_2_block_{}", block),
+                                {block_outs[static_cast<size_t>(block)]}});
+            }
+            if ((stage2_end - stage2_begin + 1) % 6 != 0) {
+                cuts.push_back({std::format("hiera_stage_2_block_{}", stage2_end),
+                                {block_outs[static_cast<size_t>(stage2_end)]}});
+            }
         }
         std::vector<struct ggml_tensor*> all_fpn_outs;
         all_fpn_outs.reserve(static_cast<size_t>(n_fpn));

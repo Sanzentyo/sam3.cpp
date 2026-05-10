@@ -4924,6 +4924,7 @@ static bool sam3_flash_attn_head_dim_supported(int64_t head_dim) {
         case 16:
         case 32:
         case 40:
+        case 56:
         case 64:
         case 72:
         case 80:

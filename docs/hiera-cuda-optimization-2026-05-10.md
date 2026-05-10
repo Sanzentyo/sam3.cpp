@@ -25,6 +25,7 @@ Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 | Before PE caching | 547.3 | 544.8 | 559.4 | Base+ fallback only |
 | After CPU PE caching | 136.1 | 133.3 | 148.9 | removed repeated Hiera/neck PE generation |
 | After backend neck PE reuse | 129.8 | 127.3 | 139.7 | avoids repeated neck PE backend upload |
+| After `head_dim=56` FA tile | 120.1 | 119.0 | 127.1 | avoids fallback attention for Base+ |
 
 Encode-size sweep after PE caching. This is a scaling sweep, not an
 apples-to-apples comparison against the official PyTorch baseline unless the
@@ -93,6 +94,19 @@ This is not quality parity. The official SAM2 mask selected by the same point is
 much larger than the current C++ mask. PyTorch-level speed is not sufficient by
 itself until this semantic mismatch is understood.
 
+After enabling ggml CUDA FlashAttention tile kernels for `head_dim=56`, the
+same q4_0 run improves substantially:
+
+| Encode size | C++ track ms/frame | PyTorch ms/frame | Mean mask IoU | Min mask IoU | Note |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1024 | 126.8 | 43.7 | 0.4745 | 0.0000 | frame 8 official output is empty |
+| 512 | 39.9 | 21.1 | 0.7798 | 0.7743 | same-resolution comparison |
+
+This indicates the previous no-mask attention fallback was both slower and
+semantically weak for SAM2.1 Base+. The implementation is still slower than
+official PyTorch at the same input encode size, but the quality gap is much
+smaller with the CUDA FA tile path.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -137,15 +151,18 @@ size:
    this sample. The f32/f16/q8/q4 sweep shows this is not primarily a
    quantization issue, and the multimask prompt experiment does not close the
    gap at 1024.
-2. Reduce Hiera encode graph compute. After caching fixed PE, the remaining
-   dominant steady-state cost is the 80-90 ms ggml CUDA graph compute.
+2. Reduce Hiera encode graph compute. After caching fixed PE and enabling
+   `head_dim=56` tile FlashAttention, the remaining dominant steady-state cost
+   is still the Hiera CUDA graph compute, now roughly 72-76 ms after warmup.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
    official PyTorch 512, C++ 640 with official PyTorch 640, and so on.
 4. Reduce CPU preprocessing cost. Resize/normalize still costs roughly
    14-18 ms/frame.
 5. Treat `head_dim=56` FlashAttention support as a secondary optimization. The
-   fallback is no longer the main measured cost after PE caching.
+   tile path is now enabled and gives a modest 1024 speedup plus a large quality
+   improvement. MMA support for 56 did not compile and should be treated as a
+   separate ggml kernel-design task, not a simple allowlist change.
 
 ## Artifacts
 
@@ -165,4 +182,8 @@ outputs/sam2-official-quality-10-precision-q8_0/summary.json
 outputs/sam2-official-quality-10-precision-q4_0/summary.json
 outputs/sam2-official-quality-10-multimask-fullmask/summary.json
 outputs/sam2-official-quality-512-multimask-fullmask-same-res/summary.json
+outputs/hiera-head56-tile/base_plus_q4_0_noprofile.log
+outputs/hiera-head56-tile/summary.json
+outputs/sam2-official-quality-10-head56-tile-q4_0/summary.json
+outputs/sam2-official-quality-512-head56-tile-q4_0/summary.json
 ```

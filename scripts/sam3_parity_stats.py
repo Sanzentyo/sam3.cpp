@@ -10,18 +10,9 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import statistics
 import subprocess
 import sys
-
-
-TABLE_ROW_RE = re.compile(
-    r"\|\s+edgetam_q4_0\s+\|.*?\|\s*CUDA\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|"
-    r"\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|\s*([0-9.]+)\s*\|"
-    r"\s*([0-9.]+)\s*\|\s*([0-9]+)\s*\|\s*OK",
-    re.S,
-)
 
 
 def run_command(cmd: list[str], log_path: Path, env: dict[str, str] | None = None) -> None:
@@ -39,7 +30,13 @@ def run_command(cmd: list[str], log_path: Path, env: dict[str, str] | None = Non
 
 
 def read_jsonl(path: Path) -> list[dict[str, object]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    return [
+        row
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line
+        for row in [json.loads(line)]
+        if "offset" in row
+    ]
 
 
 def compare_parity(lhs: list[dict[str, object]], rhs: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -69,13 +66,17 @@ def compare_parity(lhs: list[dict[str, object]], rhs: list[dict[str, object]]) -
     return diffs
 
 
-def parse_log(path: Path) -> dict[str, float]:
-    text = path.read_text(encoding="utf-8", errors="replace")
-    match = TABLE_ROW_RE.search(text)
-    if not match:
-        raise RuntimeError(f"could not parse benchmark row from {path}")
-    names = ["load", "init", "track", "p50", "p95", "total", "rss", "det"]
-    return {name: float(value) for name, value in zip(names, match.groups(), strict=True)}
+def parse_log(path: Path, model_filter: str) -> dict[str, float]:
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if model_filter not in line or "| OK" not in line or "|    CUDA" not in line:
+            continue
+        cols = [col.strip() for col in line.strip().strip("|").split("|")]
+        if len(cols) < 13:
+            continue
+        names = ["load", "init", "track", "p50", "p95", "total", "rss", "det"]
+        values = cols[4:12]
+        return {name: float(value) for name, value in zip(names, values, strict=True)}
+    raise RuntimeError(f"could not parse benchmark row matching {model_filter!r} from {path}")
 
 
 def summary(values: list[float]) -> dict[str, float]:
@@ -104,6 +105,9 @@ def main() -> int:
     parser.add_argument("--out-dir", default="outputs/parity-stats")
     parser.add_argument("--runs", type=int, default=15)
     parser.add_argument("--frames", type=int, default=10)
+    parser.add_argument("--filter", default="edgetam")
+    parser.add_argument("--encode-img-size", type=int, default=0)
+    parser.add_argument("--recondition-every", type=int, default=16)
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -117,16 +121,20 @@ def main() -> int:
         args.video,
         "--gpu-only",
         "--filter",
-        "edgetam",
+        args.filter,
         "--n-frames",
         str(args.frames),
         "--recondition-every",
-        "16",
+        str(args.recondition_every),
     ]
+    if args.encode_img_size > 0:
+        base_cmd.extend(["--encode-img-size", str(args.encode_img_size)])
 
     default_jsonl = out_dir / "default_fullmask.jsonl"
     shape_jsonl = out_dir / "shape_fullmask.jsonl"
-    run_command(base_cmd + ["--output-jsonl", str(default_jsonl)], out_dir / "default_fullmask.log")
+    pointer_env = os.environ.copy()
+    pointer_env["GGML_CUDA_GRAPH_PTR_KEY"] = "1"
+    run_command(base_cmd + ["--output-jsonl", str(default_jsonl)], out_dir / "default_fullmask.log", env=pointer_env)
     shape_env = os.environ.copy()
     shape_env["GGML_CUDA_GRAPH_SHAPE_KEY"] = "1"
     run_command(
@@ -142,10 +150,10 @@ def main() -> int:
     for index in range(1, args.runs + 1):
         default_log = out_dir / f"default_{index:02d}.log"
         shape_log = out_dir / f"shape_{index:02d}.log"
-        run_command(perf_cmd, default_log)
+        run_command(perf_cmd, default_log, env=pointer_env)
         run_command(perf_cmd, shape_log, env=shape_env)
-        default = parse_log(default_log)
-        shape = parse_log(shape_log)
+        default = parse_log(default_log, args.filter)
+        shape = parse_log(shape_log, args.filter)
         paired.append(
             {
                 "run": float(index),

@@ -304,6 +304,21 @@ improve the 1024 full-mask run (`109.2 ms/frame` versus the current
 and does not buy speed, it should not be used as a parity-preserving
 optimization.
 
+Making the ggml CUDA graph cache shape-keyed by default is parity-preserving
+and gives a measurable Base+ improvement. The legacy pointer-key behavior is
+kept behind `GGML_CUDA_GRAPH_PTR_KEY=1` for debugging. Five paired runs comparing
+legacy pointer-key against shape-key default produced:
+
+| Encode size | Legacy mean ms/frame | Shape-key mean ms/frame | Mean saved | Speedup | Parity |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1024 | 107.62 | 105.86 | 1.76 | 1.66% | 0 diff rows |
+| 512 | 30.00 | 26.22 | 3.78 | 14.42% | 0 diff rows |
+
+The larger 512 gain indicates graph recapture/launch overhead is more visible
+when the Hiera compute itself is smaller. This does not close the 1024 PyTorch
+gap, but it is a low-risk default improvement and removes the need for callers
+to remember `GGML_CUDA_GRAPH_SHAPE_KEY=1`.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -417,4 +432,6 @@ outputs/hiera-force-mmq/summary.json
 outputs/hiera-window-matmul-flatten/parity.json
 outputs/model-matrix-sam2-base-plus-current-1024/summary.json
 outputs/model-matrix-sam2-base-plus-current-512/summary.json
+outputs/parity-sam2-base-plus-q4-1024-shape-key-default/summary.json
+outputs/parity-sam2-base-plus-q4-512-shape-key-default/summary.json
 ```

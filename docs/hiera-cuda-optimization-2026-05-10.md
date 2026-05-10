@@ -107,12 +107,12 @@ SAM2 input encode size:
 
 | Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Note |
 | --- | ---: | ---: | ---: | --- |
-| 1024 | 105.5 | 57.5 | 0.545 | same `--encode-img-size` / `model.image_size` |
-| 512 | 29.9 | 20.2 | 0.675 | same `--encode-img-size` / `model.image_size` |
+| 1024 | 105.3 | 56.8 | 0.539 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
+| 512 | 27.7 | 20.4 | 0.736 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
 
 Values below `1.0` in the ratio column mean official PyTorch is faster. The
-current C++ CUDA path is therefore still about `1.83x` slower than official
-PyTorch at 1024 and about `1.48x` slower at 512 for this prompt/video. The
+current C++ CUDA path is therefore still about `1.85x` slower than official
+PyTorch at 1024 and about `1.36x` slower at 512 for this prompt/video. The
 lower encode-size rows above are still useful for understanding scaling, but
 they must not be used to claim a speed win over the official 1024 PyTorch
 baseline.
@@ -454,4 +454,6 @@ outputs/parity-sam2-base-plus-q4-1024-shape-key-default/summary.json
 outputs/parity-sam2-base-plus-q4-512-shape-key-default/summary.json
 outputs/hiera-shape-key-profile-current/q4_0_512_labeled_profile_summary.json
 outputs/propagate-profile-current/q4_0_512_graph_ops_summary.json
+outputs/model-matrix-sam2-base-plus-q4-quiet-1024/summary.json
+outputs/model-matrix-sam2-base-plus-q4-quiet-512/summary.json
 ```

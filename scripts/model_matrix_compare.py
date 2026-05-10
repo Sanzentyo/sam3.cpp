@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from huggingface_hub import hf_hub_download, list_repo_files
+from PIL import Image
 
 
 CPP_ROW_RE = re.compile(
@@ -198,6 +199,7 @@ def run_cpp(args: argparse.Namespace, out_dir: Path) -> list[dict[str, Any]]:
         str(args.video),
         "--gpu-only",
         "--bbox-only",
+        "--quiet",
         "--n-frames",
         str(args.frames),
         "--point-x",
@@ -235,6 +237,20 @@ def extract_frames(video: Path, frame_dir: Path, frames: int) -> None:
         ],
         cwd=frame_dir.parent,
     )
+
+
+def decoded_frame_size(frame_dir: Path) -> tuple[int, int]:
+    first = frame_dir / "00001.jpg"
+    with Image.open(first) as img:
+        return img.size
+
+
+def cpp_effective_encode_size(row: dict[str, Any], requested_encode_size: int) -> int | None:
+    if requested_encode_size > 0:
+        return requested_encode_size
+    if row["family"].startswith("sam2.1_hiera_"):
+        return 1024
+    return None
 
 
 def run_python_sam3(args: argparse.Namespace, out_dir: Path, frame_dir: Path) -> dict[str, Any] | None:
@@ -414,7 +430,17 @@ print(json.dumps({
     return rows
 
 
-def summarize(cpp_rows: list[dict[str, Any]], py_rows: list[dict[str, Any]], out_dir: Path) -> dict[str, Any]:
+def summarize(
+    cpp_rows: list[dict[str, Any]],
+    py_rows: list[dict[str, Any]],
+    out_dir: Path,
+    *,
+    decoded_width: int,
+    decoded_height: int,
+    frames: int,
+    prompt: str,
+    requested_encode_size: int,
+) -> dict[str, Any]:
     py_by_family = {row["family"]: row for row in py_rows}
     comparisons: list[dict[str, Any]] = []
     for row in cpp_rows:
@@ -436,20 +462,48 @@ def summarize(cpp_rows: list[dict[str, Any]], py_rows: list[dict[str, Any]], out
                 }
             )
             continue
+        cpp_encode_size = cpp_effective_encode_size(row, requested_encode_size)
+        python_encode_size = py.get("image_size")
+        same_encode_size = (
+            cpp_encode_size is not None
+            and python_encode_size is not None
+            and cpp_encode_size == python_encode_size
+        )
         comparisons.append(
                 {
                     "model": row["model"],
                     "family": row["family"],
                     "precision": row["precision"],
+                    "decoded_source_width": decoded_width,
+                    "decoded_source_height": decoded_height,
+                    "frames": frames,
+                    "prompt": prompt,
+                    "cpp_encode_img_size": cpp_encode_size,
+                    "python_image_size": python_encode_size,
+                    "same_decoded_source_resolution": True,
+                    "same_frame_range": py.get("frames") == frames,
+                    "same_prompt": True,
+                    "same_input_encode_size": same_encode_size,
+                    "comparable_speed_claim": same_encode_size and py.get("frames") == frames,
                     "cpp_track_ms": row["track_ms"],
                     "python_track_ms": py["track_ms"],
                     "python_over_cpp_track_ratio": py["track_ms"] / row["track_ms"] if row["track_ms"] > 0 else None,
                     "cpp_rss_mib": row["rss_mib"],
                     "python_cuda_alloc_mib": py["rss_mib"],
-                    "python_image_size": py.get("image_size"),
                 }
         )
-    summary = {"cpp": cpp_rows, "python": py_rows, "comparisons": comparisons}
+    summary = {
+        "benchmark_context": {
+            "decoded_source_width": decoded_width,
+            "decoded_source_height": decoded_height,
+            "frames": frames,
+            "prompt": prompt,
+            "requested_encode_img_size": requested_encode_size,
+        },
+        "cpp": cpp_rows,
+        "python": py_rows,
+        "comparisons": comparisons,
+    }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -503,6 +557,7 @@ def main() -> int:
 
     frame_dir = args.out_dir / "frames"
     extract_frames(args.video, frame_dir, args.frames)
+    decoded_width, decoded_height = decoded_frame_size(frame_dir)
 
     cpp_rows: list[dict[str, Any]] = []
     if not args.skip_cpp:
@@ -516,7 +571,16 @@ def main() -> int:
             py_rows.append(py_sam3)
         (args.out_dir / "python-results.json").write_text(json.dumps(py_rows, indent=2), encoding="utf-8")
 
-    summary = summarize(cpp_rows, py_rows, args.out_dir)
+    summary = summarize(
+        cpp_rows,
+        py_rows,
+        args.out_dir,
+        decoded_width=decoded_width,
+        decoded_height=decoded_height,
+        frames=args.frames,
+        prompt=args.text_prompt,
+        requested_encode_size=args.encode_img_size,
+    )
     print(json.dumps(summary, indent=2), flush=True)
     return 0
 

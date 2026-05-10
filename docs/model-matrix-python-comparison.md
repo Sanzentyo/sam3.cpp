@@ -127,6 +127,8 @@ uv run scripts/model_matrix_compare.py \
   the local machine.
 - C++ vs Python speed/quality claims use the same decoded source-frame
   resolution, frame range, prompt, model family, and SAM input encode size.
+- `summary.json` records the decoded source-frame size, requested encode size,
+  and a `comparable_speed_claim` flag for each C++/Python comparison row.
 - Quantized C++ rows are compared only against a family-level Python baseline,
   not treated as precision-equivalent PyTorch rows.
 - The output includes track latency, total latency, and memory columns.

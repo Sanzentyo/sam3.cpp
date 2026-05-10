@@ -618,7 +618,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       bool multimask,
                                       int recondition_every,
                                       const std::string& output_jsonl,
-                                      const std::string& output_mask_dir) {
+                                      const std::string& output_mask_dir,
+                                      bool quiet) {
     BenchWire wire = {};
 
     auto fail = [&](const char* msg) {
@@ -754,12 +755,14 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         track_times.push_back(dt);
         wire.n_track_frames++;
 
-        fprintf(stderr,
-                "    frame %d/%d  %.0f ms  (%zu det)\n",
-                f,
-                n_frames - 1,
-                dt,
-                last_result.detections.size());
+        if (!quiet) {
+            fprintf(stderr,
+                    "    frame %d/%d  %.0f ms  (%zu det)\n",
+                    f,
+                    n_frames - 1,
+                    dt,
+                    last_result.detections.size());
+        }
     }
 
     if (n_frames > 1) {
@@ -799,6 +802,7 @@ static void child_benchmark(const std::string& model_path,
                             int recondition_every,
                             const std::string& output_jsonl,
                             const std::string& output_mask_dir,
+                            bool quiet,
                             int write_fd) {
     BenchWire wire = run_single_benchmark(model_path,
                                           use_gpu,
@@ -812,7 +816,8 @@ static void child_benchmark(const std::string& model_path,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
-                                          output_mask_dir);
+                                          output_mask_dir,
+                                          quiet);
     const auto bytes = std::as_bytes(std::span{&wire, 1});
     if (!write_full(write_fd, bytes)) {
         fprintf(stderr, "child_benchmark: failed to write result pipe\n");
@@ -834,7 +839,8 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           bool multimask = false,
                                           int recondition_every = 16,
                                           const std::string& output_jsonl = "",
-                                          const std::string& output_mask_dir = "") {
+                                          const std::string& output_mask_dir = "",
+                                          bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -854,7 +860,8 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
-                                          output_mask_dir);
+                                          output_mask_dir,
+                                          quiet);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
         res.t_frame0_ms = wire.t_frame0_ms;
@@ -902,6 +909,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                         recondition_every,
                         output_jsonl,
                         output_mask_dir,
+                        quiet,
                         write_fd);
         _exit(1);
     }
@@ -953,7 +961,8 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                         bool multimask = false,
                                         int recondition_every = 16,
                                         const std::string& output_jsonl = "",
-                                        const std::string& output_mask_dir = "") {
+                                        const std::string& output_mask_dir = "",
+                                        bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -971,7 +980,8 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
-                                          output_mask_dir);
+                                          output_mask_dir,
+                                          quiet);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
         res.t_frame0_ms = wire.t_frame0_ms;
@@ -1097,6 +1107,7 @@ int main(int argc, char** argv) {
     bool bbox_only = false;
     bool multimask = false;
     bool no_isolation = false;
+    bool quiet = false;
     std::string filter;
     std::string output_jsonl;
     std::string output_mask_dir;
@@ -1129,6 +1140,8 @@ int main(int argc, char** argv) {
             multimask = true;
         } else if (arg == "--no-isolation") {
             no_isolation = true;
+        } else if (arg == "--quiet") {
+            quiet = true;
         } else if (arg == "--filter" && i + 1 < argc) {
             filter = argv[++i];
         } else if (arg == "--output-jsonl" && i + 1 < argc) {
@@ -1153,7 +1166,8 @@ int main(int argc, char** argv) {
                 "  --filter <substr>     Filter model filenames\n"
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
                 "  --output-mask-dir <path> Write first-run target masks as PNG files\n"
-                "  --no-isolation        Run in-process for profiler capture\n",
+                "  --no-isolation        Run in-process for profiler capture\n"
+                "  --quiet               Suppress per-frame progress lines\n",
                 argv[0]);
             return 0;
         } else {
@@ -1272,7 +1286,8 @@ int main(int argc, char** argv) {
                                                        multimask,
                                                        recondition_every,
                                                        (i == 0) ? output_jsonl : "",
-                                                       (i == 0) ? output_mask_dir : "")
+                                                       (i == 0) ? output_mask_dir : "",
+                                                       quiet)
                                 : run_benchmark_isolated(*run.entry,
                                                          run.use_gpu,
                                                          video_path,
@@ -1285,7 +1300,8 @@ int main(int argc, char** argv) {
                                                          multimask,
                                                          recondition_every,
                                                          (i == 0) ? output_jsonl : "",
-                                                         (i == 0) ? output_mask_dir : "");
+                                                         (i == 0) ? output_mask_dir : "",
+                                                         quiet);
         results.push_back(res);
 
         if (res.success) {

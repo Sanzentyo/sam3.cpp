@@ -746,6 +746,25 @@ semantically close but not hash-identical to the tile path:
 `max_abs_mask_area_rel_delta=0.0208719`. Treat this as a fast numeric path, not
 as a bit-exact replacement.
 
+The follow-up optimization kept Q as padded f32, but packed K/V directly into
+padded f16 buffers before calling the existing D64 MMA path. This removes the
+generic f32-contiguous K/V pad followed by the generic f32-to-f16 conversion in
+`launch_fattn`. With the same 10-frame Base+ q4_0 1024 bbox-only setup:
+
+| Path | Track ms/frame runs | Mean | Stdev | P50 mean | P95 mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Tile baseline | `89.0, 89.0, 90.0` | `89.33` | `0.58` | `87.00` | `99.67` |
+| ggml D56->D64 MMA, direct K/V f16 pack | `78.0, 78.0, 78.0` | `78.00` | `0.00` | `76.00` | `85.00` |
+
+That raises the measured improvement to `12.69%` on this sample. The direct
+attention parity checks are unchanged from the previous D56-to-D64 MMA path, and
+the full-mask semantic delta is also unchanged:
+`mask_hash_equal_rows=0/10`, `min_bbox_iou=0.9957537155`,
+`max_bbox_delta_px=4.0`, `max_score_abs_delta=0.009795`, and
+`max_abs_mask_area_rel_delta=0.0208719`. The important acceptance point is that
+this is a faster non-bit-exact numeric path; official PyTorch quality and speed
+remain the primary gate for keeping it enabled by default.
+
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
 1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change
@@ -974,6 +993,8 @@ build/xmake-release-cuda/examples/sam3_fattn_parity --cuda --d 56 --n 4096 --hea
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/fattn56-pad-mma/final/bbox_stats.json
 outputs/fattn56-pad-mma/final/fullmask_parity_summary.json
+outputs/fattn56-pad-mma/kv-f16/bbox_stats.json
+outputs/fattn56-pad-mma/kv-f16/fullmask_summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

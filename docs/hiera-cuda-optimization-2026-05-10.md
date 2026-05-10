@@ -308,6 +308,18 @@ So the immediate path is not to force MMQ globally. The remaining speed work
 should either reduce the number of stage-2 matmuls/layout transitions or improve
 the dequantize-plus-GEMM path for these medium-width Hiera shapes.
 
+A separate `GGML_CUDA_FORCE_CUBLAS=ON` build is also worse after threaded
+preprocessing:
+
+| Encode size | Default track ms/frame | Force cuBLAS track ms/frame | Result |
+| --- | ---: | ---: | --- |
+| 1024 | 102.2 | 182.9 | much slower, higher RSS |
+| 512 | 25.0 | 46.9 | much slower, higher RSS |
+
+This rules out global dispatch forcing as the next path. The remaining CUDA
+work needs shape-specific improvement for the existing quantized matmul path or
+graph-level reductions that remove repeated stage-2 layout/matmul work.
+
 Flattening non-q-stride window-attention QKV/projection matmuls from
 `[C, N, B_win]` into `[C, N * B_win]` was tested and rejected. It did not
 improve the 1024 full-mask run (`109.2 ms/frame` versus the current
@@ -473,4 +485,6 @@ outputs/preprocess-threaded/q4_0_1024_profile_summary.json
 outputs/preprocess-threaded/paired_threads_stats/summary.json
 outputs/model-matrix-sam2-base-plus-q4-threaded-1024/summary.json
 outputs/model-matrix-sam2-base-plus-q4-threaded-512/summary.json
+outputs/preprocess-threaded/q4_0_1024_force_cublas.log
+outputs/preprocess-threaded/q4_0_512_force_cublas.log
 ```

@@ -24,6 +24,7 @@
  *   --bbox-only           Track/output bbox rows without full-res masks
  *   --filter <substr>     Only run models whose filename contains <substr>
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
+ *   --output-mask-dir <path> Write first-run target masks as PNG files
  *   --no-isolation        Run in-process for profilers that do not follow fork
  */
 
@@ -40,6 +41,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <expected>
+#include <filesystem>
+#include <format>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -348,13 +351,15 @@ static double percentile(std::vector<double> values, double p) {
 static void write_detection_row(FILE* out,
                                 int offset,
                                 int expected_frame_index,
-                                const sam3_result& result) {
+                                const sam3_result& result,
+                                std::string_view mask_path = {}) {
     if (!out)
         return;
     if (result.detections.empty()) {
         fprintf(out,
                 "{\"offset\":%d,\"expected_frame_index\":%d,\"bbox_xyxy\":null,"
                 "\"score\":0,\"mask_area\":0,\"mask_fnv1a64\":\"0000000000000000\","
+                "\"mask_path\":null,"
                 "\"source\":\"sam3cpp-missing\"}\n",
                 offset,
                 expected_frame_index);
@@ -373,6 +378,7 @@ static void write_detection_row(FILE* out,
             "{\"offset\":%d,\"expected_frame_index\":%d,"
             "\"bbox_xyxy\":[%.3f,%.3f,%.3f,%.3f],\"score\":%.6f,"
             "\"mask_area\":%d,\"mask_fnv1a64\":\"%016llx\","
+            "\"mask_path\":%s%s%s,"
             "\"source\":\"sam3cpp-edgetam\"}\n",
             offset,
             expected_frame_index,
@@ -382,7 +388,27 @@ static void write_detection_row(FILE* out,
             det.box.y1,
             det.score,
             mask_area,
-            (unsigned long long) mask_hash);
+            (unsigned long long) mask_hash,
+            mask_path.empty() ? "" : "\"",
+            mask_path.empty() ? "null" : std::string{mask_path}.c_str(),
+            mask_path.empty() ? "" : "\"");
+}
+
+static std::string save_detection_mask(std::string_view output_mask_dir,
+                                       int offset,
+                                       const sam3_result& result) {
+    if (output_mask_dir.empty() || result.detections.empty() ||
+        result.detections[0].mask.data.empty()) {
+        return {};
+    }
+
+    std::filesystem::create_directories(std::filesystem::path{output_mask_dir});
+    const auto path =
+        std::filesystem::path{output_mask_dir} / std::format("frame_{:05d}.png", offset);
+    if (!sam3_save_mask(result.detections[0].mask, path.string())) {
+        return {};
+    }
+    return path.string();
 }
 
 // Sort key: family → size → precision
@@ -508,7 +534,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       int encode_img_size,
                                       bool bbox_only,
                                       int recondition_every,
-                                      const std::string& output_jsonl) {
+                                      const std::string& output_jsonl,
+                                      const std::string& output_mask_dir) {
     BenchWire wire = {};
 
     auto fail = [&](const char* msg) {
@@ -595,7 +622,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
 
     if (out) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
-        write_detection_row(out.get(), 0, 0, first);
+        const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
+        write_detection_row(out.get(), 0, 0, first, mask_path);
     }
 
     int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
@@ -619,7 +647,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         } else {
             last_result = sam3_track_frame(*tracker, *state, *model, frames[f]);
         }
-        write_detection_row(out.get(), f, f, last_result);
+        const auto mask_path = save_detection_mask(output_mask_dir, f, last_result);
+        write_detection_row(out.get(), f, f, last_result, mask_path);
 
         double dt = (ggml_time_us() - t0) / 1000.0;
         t_track_sum += dt;
@@ -669,6 +698,7 @@ static void child_benchmark(const std::string& model_path,
                             bool bbox_only,
                             int recondition_every,
                             const std::string& output_jsonl,
+                            const std::string& output_mask_dir,
                             int write_fd) {
     BenchWire wire = run_single_benchmark(model_path,
                                           use_gpu,
@@ -680,7 +710,8 @@ static void child_benchmark(const std::string& model_path,
                                           encode_img_size,
                                           bbox_only,
                                           recondition_every,
-                                          output_jsonl);
+                                          output_jsonl,
+                                          output_mask_dir);
     const auto bytes = std::as_bytes(std::span{&wire, 1});
     if (!write_full(write_fd, bytes)) {
         fprintf(stderr, "child_benchmark: failed to write result pipe\n");
@@ -700,7 +731,8 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           int encode_img_size = 0,
                                           bool bbox_only = false,
                                           int recondition_every = 16,
-                                          const std::string& output_jsonl = "") {
+                                          const std::string& output_jsonl = "",
+                                          const std::string& output_mask_dir = "") {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -718,7 +750,8 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           encode_img_size,
                                           bbox_only,
                                           recondition_every,
-                                          output_jsonl);
+                                          output_jsonl,
+                                          output_mask_dir);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
         res.t_frame0_ms = wire.t_frame0_ms;
@@ -764,6 +797,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                         bbox_only,
                         recondition_every,
                         output_jsonl,
+                        output_mask_dir,
                         write_fd);
         _exit(1);
     }
@@ -813,7 +847,8 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                         int encode_img_size = 0,
                                         bool bbox_only = false,
                                         int recondition_every = 16,
-                                        const std::string& output_jsonl = "") {
+                                        const std::string& output_jsonl = "",
+                                        const std::string& output_mask_dir = "") {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -829,7 +864,8 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                           encode_img_size,
                                           bbox_only,
                                           recondition_every,
-                                          output_jsonl);
+                                          output_jsonl,
+                                          output_mask_dir);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
         res.t_frame0_ms = wire.t_frame0_ms;
@@ -956,6 +992,7 @@ int main(int argc, char** argv) {
     bool no_isolation = false;
     std::string filter;
     std::string output_jsonl;
+    std::string output_mask_dir;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -987,6 +1024,8 @@ int main(int argc, char** argv) {
             filter = argv[++i];
         } else if (arg == "--output-jsonl" && i + 1 < argc) {
             output_jsonl = argv[++i];
+        } else if (arg == "--output-mask-dir" && i + 1 < argc) {
+            output_mask_dir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             fprintf(
                 stderr,
@@ -1003,6 +1042,7 @@ int main(int argc, char** argv) {
                 "  --bbox-only           Track/output bbox rows without full-res masks\n"
                 "  --filter <substr>     Filter model filenames\n"
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
+                "  --output-mask-dir <path> Write first-run target masks as PNG files\n"
                 "  --no-isolation        Run in-process for profiler capture\n",
                 argv[0]);
             return 0;
@@ -1012,9 +1052,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (!output_jsonl.empty() && !(gpu_only || cpu_only)) {
+    if ((!output_jsonl.empty() || !output_mask_dir.empty()) && !(gpu_only || cpu_only)) {
         fprintf(stderr,
-                "ERROR: --output-jsonl requires --gpu-only or --cpu-only to select one backend\n");
+                "ERROR: --output-jsonl/--output-mask-dir requires --gpu-only or --cpu-only to "
+                "select one backend\n");
         return 1;
     }
 
@@ -1119,7 +1160,8 @@ int main(int argc, char** argv) {
                                                        encode_img_size,
                                                        bbox_only,
                                                        recondition_every,
-                                                       (i == 0) ? output_jsonl : "")
+                                                       (i == 0) ? output_jsonl : "",
+                                                       (i == 0) ? output_mask_dir : "")
                                 : run_benchmark_isolated(*run.entry,
                                                          run.use_gpu,
                                                          video_path,
@@ -1130,7 +1172,8 @@ int main(int argc, char** argv) {
                                                          encode_img_size,
                                                          bbox_only,
                                                          recondition_every,
-                                                         (i == 0) ? output_jsonl : "");
+                                                         (i == 0) ? output_jsonl : "",
+                                                         (i == 0) ? output_mask_dir : "");
         results.push_back(res);
 
         if (res.success) {

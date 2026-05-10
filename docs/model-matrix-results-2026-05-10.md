@@ -57,7 +57,7 @@ fallback. This is a coverage/correctness fix, not a speed optimization. A
 | SAM 2 small | `sam2_hiera_small_q4_1` | `q4_1` | 489.1 | 486.6 | 500.7 | 621.3 |
 | SAM 2 large | `sam2_hiera_large_q4_0` | `q4_0` | 686.0 | 684.6 | 697.7 | 677.2 |
 | SAM 2.1 tiny | `sam2.1_hiera_tiny_q4_0` | `q4_0` | 479.9 | 478.6 | 490.3 | 611.9 |
-| SAM 2.1 base+ | `sam2.1_hiera_base_plus_q4_0` | `q4_0` | 547.3 | 544.8 | 559.4 | 620.2 |
+| SAM 2.1 base+ | `sam2.1_hiera_base_plus_q4_0` | `q4_0` | 129.8 | 127.3 | 139.7 | 647.4 |
 | SAM 2.1 small | `sam2.1_hiera_small_q4_1` | `q4_1` | 484.2 | 481.3 | 496.2 | 597.9 |
 | SAM 2.1 large | `sam2.1_hiera_large_q8_0` | `q8_0` | 687.7 | 688.2 | 699.5 | 677.1 |
 
@@ -69,7 +69,7 @@ equivalents. These are family-level references, not precision-equivalent rows.
 | Family | Backend | Track ms | CUDA alloc MiB |
 | --- | --- | ---: | ---: |
 | SAM 2.1 Tiny | PyTorch CUDA bf16 | 42.1 | 674.5 |
-| SAM 2.1 Base+ | PyTorch CUDA bf16 | 58.2 | 854.0 |
+| SAM 2.1 Base+ | PyTorch CUDA bf16 | 43.4 | 855.2 |
 | SAM 3 | PyTorch CUDA bf16 | 254.1 | 4695.1 |
 
 ## C++ vs Python
@@ -92,11 +92,11 @@ the comparable baselines, although C++ uses much less memory for SAM 3.
 | `sam2.1_hiera_tiny_q8_0` | 483.9 | 42.1 | 0.087 |
 | `sam2.1_hiera_tiny_q4_1` | 482.8 | 42.1 | 0.087 |
 | `sam2.1_hiera_tiny_q4_0` | 479.9 | 42.1 | 0.088 |
-| `sam2.1_hiera_base_plus_f32` | 560.9 | 58.2 | 0.104 |
-| `sam2.1_hiera_base_plus_f16` | 560.2 | 58.2 | 0.104 |
-| `sam2.1_hiera_base_plus_q8_0` | 551.1 | 58.2 | 0.106 |
-| `sam2.1_hiera_base_plus_q4_1` | 551.3 | 58.2 | 0.106 |
-| `sam2.1_hiera_base_plus_q4_0` | 547.3 | 58.2 | 0.106 |
+| `sam2.1_hiera_base_plus_f32` | 149.8 | 43.4 | 0.290 |
+| `sam2.1_hiera_base_plus_f16` | 146.9 | 43.4 | 0.295 |
+| `sam2.1_hiera_base_plus_q8_0` | 134.6 | 43.4 | 0.322 |
+| `sam2.1_hiera_base_plus_q4_1` | 136.0 | 43.4 | 0.319 |
+| `sam2.1_hiera_base_plus_q4_0` | 129.8 | 43.4 | 0.334 |
 
 ## Interpretation
 
@@ -110,8 +110,9 @@ the comparable baselines, although C++ uses much less memory for SAM 3.
   reduce per-frame CUDA tracking latency for SAM 3 or SAM 2 Hiera in the current
   implementation.
 - SAM 2 / SAM 2.1 Base+ CUDA coverage is now complete for the downloaded GGML
-  matrix, but the generic fallback path is much slower than official PyTorch
-  CUDA bf16 for the same family.
+  matrix. Follow-up PE caching reduced SAM 2.1 Base+ q4_0 from 547.3 ms/frame
+  to 129.8 ms/frame, but it remains slower than official PyTorch CUDA bf16 for
+  the same family.
 
 ## Artifacts
 

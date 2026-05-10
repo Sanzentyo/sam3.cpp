@@ -24,6 +24,7 @@ ENCODE_RE = re.compile(r"sam2_encode_image_hiera: SAM2 image encoded in ([0-9.]+
 COMPUTE_RE = re.compile(r"SAM3_PROFILE compute backend=(\S+) nodes=(\d+) ms=([0-9.]+)")
 TENSOR_SET_RE = re.compile(r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
 TENSOR_GET_RE = re.compile(r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
+CPU_SPAN_RE = re.compile(r"SAM3_PROFILE cpu name=(\S+) ms=([0-9.]+)")
 
 
 def mean(values: list[float]) -> float | None:
@@ -37,6 +38,9 @@ def summarize(path: Path) -> dict[str, Any]:
     computes = [(backend, int(nodes), float(ms)) for backend, nodes, ms in COMPUTE_RE.findall(text)]
     tensor_sets = [float(value) for value in TENSOR_SET_RE.findall(text)]
     tensor_gets = [float(value) for value in TENSOR_GET_RE.findall(text)]
+    cpu_spans: dict[str, list[float]] = {}
+    for name, ms in CPU_SPAN_RE.findall(text):
+        cpu_spans.setdefault(name, []).append(float(ms))
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -51,6 +55,15 @@ def summarize(path: Path) -> dict[str, Any]:
         "tensor_set_sum_ms": sum(tensor_sets),
         "tensor_get_sum_ms": sum(tensor_gets),
         "tensor_get_count": len(tensor_gets),
+        "cpu_spans": {
+            name: {
+                "count": len(values),
+                "sum_ms": sum(values),
+                "mean_ms": mean(values),
+                "values_ms": values,
+            }
+            for name, values in sorted(cpu_spans.items())
+        },
     }
     if row:
         result.update(

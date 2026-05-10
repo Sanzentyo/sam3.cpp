@@ -1134,6 +1134,17 @@ struct sam3_state {
     struct ggml_tensor* dense_pe_tensor = nullptr;
     struct ggml_tensor* dense_nomask_tensor = nullptr;
     struct ggml_tensor* not_a_point_tensor = nullptr;
+
+    // SAM2 Hiera encode constants. They are fixed for a state/model/img_size and
+    // are reused for every tracked frame.
+    int sam2_cached_hiera_pos_h = 0;
+    int sam2_cached_hiera_pos_w = 0;
+    std::vector<float> sam2_cached_hiera_pos_embed;
+
+    std::array<int, 4> sam2_cached_neck_pe_h = {};
+    std::array<int, 4> sam2_cached_neck_pe_w = {};
+    std::array<int, 4> sam2_cached_neck_pe_dim = {};
+    std::array<std::vector<float>, 4> sam2_cached_neck_pe;
 };
 
 /*
@@ -6611,9 +6622,12 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     state.orig_height = image.height;
 
     // ── Preprocess ───────────────────────────────────────────────────────
+    SAM3_PROFILE_CPU_START(hiera_encode_preprocess);
     auto img_data = sam2_preprocess_image(image, img_size);
+    SAM3_PROFILE_CPU_END(hiera_encode_preprocess);
 
     // ── Build graph ──────────────────────────────────────────────────────
+    SAM3_PROFILE_CPU_START(hiera_encode_graph_build);
     const size_t buf_size = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
     struct ggml_init_params gparams = {
         .mem_size = buf_size,
@@ -6650,43 +6664,63 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     for (int i = 0; i < n_fpn; ++i) {
         ggml_build_forward_expand(graph, fpn_outs[i]);
     }
+    SAM3_PROFILE_CPU_END(hiera_encode_graph_build);
 
     // ── Allocate + compute ───────────────────────────────────────────────
+    SAM3_PROFILE_CPU_START(hiera_encode_graph_alloc);
     auto galloc = make_ggml_gallocr(model.backend);
     if (!reserve_and_alloc_graph(galloc.get(), graph)) {
         fprintf(stderr, "%s: failed to alloc graph\n", __func__);
         return false;
     }
+    SAM3_PROFILE_CPU_END(hiera_encode_graph_alloc);
 
     // Set input image
+    SAM3_PROFILE_CPU_START(hiera_encode_input_upload);
     ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
+    SAM3_PROFILE_CPU_END(hiera_encode_input_upload);
 
     // Set positional embedding (precomputed on CPU)
     {
         int pe_H = img_size / 4;
         int pe_W = img_size / 4;
-        auto pe_data = sam2_compute_pos_embed(model, pe_H, pe_W);
+        if (state.sam2_cached_hiera_pos_embed.empty() || state.sam2_cached_hiera_pos_h != pe_H ||
+            state.sam2_cached_hiera_pos_w != pe_W) {
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_compute);
+            state.sam2_cached_hiera_pos_embed = sam2_compute_pos_embed(model, pe_H, pe_W);
+            state.sam2_cached_hiera_pos_h = pe_H;
+            state.sam2_cached_hiera_pos_w = pe_W;
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_compute);
+        } else {
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_cache_hit);
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_cache_hit);
+        }
         auto* pe_tensor = ggml_graph_get_tensor(graph, "hiera_pos_embed");
-        ggml_backend_tensor_set(pe_tensor, pe_data.data(), 0, pe_data.size() * sizeof(float));
+        SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_upload);
+        ggml_backend_tensor_set(pe_tensor,
+                                state.sam2_cached_hiera_pos_embed.data(),
+                                0,
+                                state.sam2_cached_hiera_pos_embed.size() * sizeof(float));
+        SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_upload);
     }
 
     // Compute
-    if (ggml_backend_is_cpu(model.backend)) {
-        ggml_backend_cpu_set_n_threads(model.backend, state.n_threads);
-    }
-    if (ggml_backend_graph_compute(model.backend, graph) != GGML_STATUS_SUCCESS) {
+    SAM3_PROFILE_CPU_START(hiera_encode_graph_compute_total);
+    if (!sam3_graph_compute(model.backend, graph, state.n_threads)) {
         fprintf(stderr, "%s: graph compute failed\n", __func__);
         return false;
     }
+    SAM3_PROFILE_CPU_END(hiera_encode_graph_compute_total);
 
     // ── Copy results to state ────────────────────────────────────────────
     // Free old state buffers
+    SAM3_PROFILE_CPU_START(hiera_encode_state_reset);
     sam3_reset_backend_buffer(state.buffer);
-    sam3_reset_backend_buffer(state.pe_buf);
-    sam3_reset_context(state.pe_ctx);
     sam3_reset_context(state.ctx);
+    SAM3_PROFILE_CPU_END(hiera_encode_state_reset);
 
     // Create state context for persistent tensors
+    SAM3_PROFILE_CPU_START(hiera_encode_state_ctx_build);
     size_t state_ctx_size = ggml_tensor_overhead() * 32;
     struct ggml_init_params sparams = {
         .mem_size = state_ctx_size,
@@ -6704,38 +6738,81 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     for (int i = n_fpn; i < 4; ++i) {
         state.neck_trk[i] = nullptr;
     }
+    SAM3_PROFILE_CPU_END(hiera_encode_state_ctx_build);
 
     // Allocate state buffer
+    SAM3_PROFILE_CPU_START(hiera_encode_state_buffer_alloc);
     state.buffer = ggml_backend_alloc_ctx_tensors(state.ctx, model.backend);
+    SAM3_PROFILE_CPU_END(hiera_encode_state_buffer_alloc);
 
     // Copy FPN outputs to state
+    SAM3_PROFILE_CPU_START(hiera_encode_fpn_copy_to_state);
     for (int i = 0; i < n_fpn; ++i) {
         ggml_backend_tensor_copy(fpn_outs[i], state.neck_trk[i]);
     }
+    SAM3_PROFILE_CPU_END(hiera_encode_fpn_copy_to_state);
 
-    // Compute sinusoidal PE for each FPN level
-    size_t pe_ctx_size = ggml_tensor_overhead() * 16;
-    struct ggml_init_params pe_params = {
-        .mem_size = pe_ctx_size,
-        .mem_buffer = nullptr,
-        .no_alloc = true,
-    };
-    state.pe_ctx = ggml_init(pe_params);
-
+    bool pe_backend_valid = state.pe_ctx != nullptr && state.pe_buf != nullptr;
     for (int i = 0; i < n_fpn; ++i) {
-        int H = static_cast<int>(state.neck_trk[i]->ne[2]);
-        int W = static_cast<int>(state.neck_trk[i]->ne[1]);
-        auto pe = sam3_sinusoidal_pe_2d(H, W, hp.neck_dim);
-        state.neck_trk_pe[i] =
-            ggml_new_tensor_4d(state.pe_ctx, GGML_TYPE_F32, hp.neck_dim, W, H, 1);
-        sam3_set_name(state.neck_trk_pe[i], std::format("neck_trk_pe_{}", i));
+        const int H = static_cast<int>(state.neck_trk[i]->ne[2]);
+        const int W = static_cast<int>(state.neck_trk[i]->ne[1]);
+        pe_backend_valid = pe_backend_valid && state.neck_trk_pe[i] != nullptr &&
+                           state.neck_trk_pe[i]->ne[0] == hp.neck_dim &&
+                           state.neck_trk_pe[i]->ne[1] == W && state.neck_trk_pe[i]->ne[2] == H;
     }
-    state.pe_buf = ggml_backend_alloc_ctx_tensors(state.pe_ctx, model.backend);
-    for (int i = 0; i < n_fpn; ++i) {
-        int H = static_cast<int>(state.neck_trk[i]->ne[2]);
-        int W = static_cast<int>(state.neck_trk[i]->ne[1]);
-        auto pe = sam3_sinusoidal_pe_2d(H, W, hp.neck_dim);
-        ggml_backend_tensor_set(state.neck_trk_pe[i], pe.data(), 0, pe.size() * sizeof(float));
+    for (int i = n_fpn; i < 4; ++i) {
+        pe_backend_valid = pe_backend_valid && state.neck_trk_pe[i] == nullptr;
+    }
+
+    if (!pe_backend_valid) {
+        sam3_reset_backend_buffer(state.pe_buf);
+        sam3_reset_context(state.pe_ctx);
+
+        // Compute sinusoidal PE for each FPN level
+        SAM3_PROFILE_CPU_START(hiera_encode_pe_ctx_build);
+        size_t pe_ctx_size = ggml_tensor_overhead() * 16;
+        struct ggml_init_params pe_params = {
+            .mem_size = pe_ctx_size,
+            .mem_buffer = nullptr,
+            .no_alloc = true,
+        };
+        state.pe_ctx = ggml_init(pe_params);
+
+        for (int i = 0; i < n_fpn; ++i) {
+            int H = static_cast<int>(state.neck_trk[i]->ne[2]);
+            int W = static_cast<int>(state.neck_trk[i]->ne[1]);
+            state.neck_trk_pe[i] =
+                ggml_new_tensor_4d(state.pe_ctx, GGML_TYPE_F32, hp.neck_dim, W, H, 1);
+            sam3_set_name(state.neck_trk_pe[i], std::format("neck_trk_pe_{}", i));
+        }
+        for (int i = n_fpn; i < 4; ++i) {
+            state.neck_trk_pe[i] = nullptr;
+        }
+        SAM3_PROFILE_CPU_END(hiera_encode_pe_ctx_build);
+
+        SAM3_PROFILE_CPU_START(hiera_encode_pe_buffer_alloc);
+        state.pe_buf = ggml_backend_alloc_ctx_tensors(state.pe_ctx, model.backend);
+        SAM3_PROFILE_CPU_END(hiera_encode_pe_buffer_alloc);
+
+        SAM3_PROFILE_CPU_START(hiera_encode_pe_compute_upload);
+        for (int i = 0; i < n_fpn; ++i) {
+            int H = static_cast<int>(state.neck_trk[i]->ne[2]);
+            int W = static_cast<int>(state.neck_trk[i]->ne[1]);
+            if (state.sam2_cached_neck_pe[i].empty() || state.sam2_cached_neck_pe_h[i] != H ||
+                state.sam2_cached_neck_pe_w[i] != W ||
+                state.sam2_cached_neck_pe_dim[i] != hp.neck_dim) {
+                state.sam2_cached_neck_pe[i] = sam3_sinusoidal_pe_2d(H, W, hp.neck_dim);
+                state.sam2_cached_neck_pe_h[i] = H;
+                state.sam2_cached_neck_pe_w[i] = W;
+                state.sam2_cached_neck_pe_dim[i] = hp.neck_dim;
+            }
+            const auto& pe = state.sam2_cached_neck_pe[i];
+            ggml_backend_tensor_set(state.neck_trk_pe[i], pe.data(), 0, pe.size() * sizeof(float));
+        }
+        SAM3_PROFILE_CPU_END(hiera_encode_pe_compute_upload);
+    } else {
+        SAM3_PROFILE_CPU_START(hiera_encode_pe_backend_cache_hit);
+        SAM3_PROFILE_CPU_END(hiera_encode_pe_backend_cache_hit);
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();

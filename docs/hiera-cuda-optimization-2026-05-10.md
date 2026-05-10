@@ -554,6 +554,14 @@ cases cover 64, 80, 96, 112, 128, 256, and a few large GQA shapes, but no
 by another allowlist or shape-key tweak; it needs either a real 56-aware
 MMA/WMMA path or a redesigned tile kernel for the Base+ global/window shapes.
 
+`scripts/summarize_goal_audit.py` combines the matched C++/official-Python
+speed rows, official-Python quality checks, Hiera stage gap, and CUDA node
+hotspots into a single completion audit. The current audit artifact is
+`outputs/goal-audit/sam2-base-plus-cuda-vs-python.json`; it marks the profiling
+and prioritization work as complete, but keeps the overall objective
+`not_complete` because C++ is still slower than official PyTorch on matched
+512/1024 rows and Base+ mask quality is not at parity.
+
 The head_dim 56 tile column width was also tested. Forcing smaller tile widths
 was slower on the same 1024 q4_0 benchmark: 16 cols measured `112.5 ms/frame`,
 8 cols `135.3 ms/frame`, and 4 cols `141.3 ms/frame` against the default
@@ -724,6 +732,7 @@ outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
 outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json
+outputs/goal-audit/sam2-base-plus-cuda-vs-python.json
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

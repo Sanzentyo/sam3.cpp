@@ -252,6 +252,11 @@ Rejected follow-up experiments:
   (`609.9 -> 658.1 MiB`). This confirms the previous global
   `GGML_CUDA_FORCE_CUBLAS=1` rejection is not just caused by unrelated small
   matmuls.
+- Switching the two Hiera block residual adds to `ggml_add_inplace` preserved
+  512 full-mask parity against the current artifact (`mask_hash_equal_rows=10/10`),
+  but did not improve the 1024 bbox-only row in a single-run check
+  (`89.2 -> 90.0 ms/frame`). It was reverted because it does not move the
+  PyTorch-speed target.
 
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
@@ -735,6 +740,8 @@ outputs/hiera-pad-head64/global_1024_parity.json
 outputs/hiera-pad-head64/window_1024_parity.json
 outputs/hiera-mlp448-cublas/default_1024.log
 outputs/hiera-mlp448-cublas/mlp448_1024.log
+outputs/hiera-residual-inplace/q4_0_512_parity.json
+outputs/hiera-residual-inplace/q4_0_1024_bbox.log
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 outputs/model-matrix-free-prev-state-1024-trackrange/summary.json

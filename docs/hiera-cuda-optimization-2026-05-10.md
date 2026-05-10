@@ -181,6 +181,15 @@ of the PyTorch-speed target. The remaining gap still points at steady Hiera
 FlashAttention / quantized MLP kernels rather than CPU graph build or output
 copy overhead.
 
+Rejected follow-up experiments:
+
+- `GGML_CUDA_FORCE_CUBLAS=1` for q4_0 matmuls did not improve the remaining
+  gap. The 512 row regressed to `31.7 ms/frame` with mid-run encode outliers,
+  and 1024 stayed at `90.4 ms/frame`.
+- Forcing Hiera FlashAttention V tensors through `ggml_cont` before
+  `ggml_flash_attn_ext` regressed the 512 row to `25.2 ms/frame`; the added
+  copy cost is larger than any stride-handling benefit.
+
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
 kernel position for every output element even though this shape has exactly one
@@ -649,6 +658,9 @@ outputs/sam2-official-quality-frame-index-1024/summary.json
 outputs/sam2-official-quality-frame-index-512/summary.json
 outputs/hiera-free-prev-state/q4_0_512_fixed_summary.json
 outputs/hiera-free-prev-state/q4_0_512_fullmask_summary.json
+outputs/hiera-free-prev-state/q4_0_512_force_cublas_summary.json
+outputs/hiera-free-prev-state/q4_0_1024_force_cublas_summary.json
+outputs/hiera-v-cont/q4_0_512_summary.json
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 ```

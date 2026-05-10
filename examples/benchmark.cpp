@@ -23,6 +23,7 @@
  *   --gpu-only            Skip CPU runs
  *   --bbox-only           Track/output bbox rows without full-res masks
  *   --multimask           Use multimask output for the initial point prompt
+ *   --initial-candidate-index <n> Force a point-prompt candidate for diagnostics
  *   --filter <substr>     Only run models whose filename contains <substr>
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
  *   --output-initial-candidates-jsonl <path> Write initial point-prompt candidates
@@ -36,6 +37,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -46,6 +48,7 @@
 #include <filesystem>
 #include <fstream>
 #include <format>
+#include <optional>
 #include <ostream>
 #include <print>
 #include <ranges>
@@ -123,6 +126,17 @@ static std::string format_time_short(double ms) {
     if (ms < 0)
         return "  -";
     return std::format("{:.1f}", ms);
+}
+
+static std::optional<size_t> parse_size_t(std::string_view value) {
+    size_t parsed = 0;
+    const auto* first = value.data();
+    const auto* last = first + value.size();
+    const auto [ptr, ec] = std::from_chars(first, last, parsed);
+    if (ec != std::errc{} || ptr != last) {
+        return std::nullopt;
+    }
+    return parsed;
 }
 
 #ifndef _WIN32
@@ -305,9 +319,13 @@ static double percentile(std::vector<double> values, double p) {
     return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
-static const sam3_detection* best_detection(const sam3_result& result) {
+static const sam3_detection* select_detection(const sam3_result& result,
+                                              std::optional<size_t> candidate_index = std::nullopt) {
     if (result.detections.empty())
         return nullptr;
+    if (candidate_index && *candidate_index < result.detections.size()) {
+        return &result.detections[*candidate_index];
+    }
     return &*std::ranges::max_element(
         result.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
 }
@@ -386,7 +404,8 @@ static void write_detection_row(std::ostream* out,
                                 int offset,
                                 int expected_frame_index,
                                 const sam3_result& result,
-                                std::string_view mask_path = {}) {
+                                std::string_view mask_path = {},
+                                std::optional<size_t> candidate_index = std::nullopt) {
     if (!out)
         return;
     if (result.detections.empty()) {
@@ -399,7 +418,7 @@ static void write_detection_row(std::ostream* out,
             expected_frame_index);
         return;
     }
-    const auto* best = best_detection(result);
+    const auto* best = select_detection(result, candidate_index);
     if (!best)
         return;
     const auto& det = *best;
@@ -432,7 +451,9 @@ static void write_detection_row(std::ostream* out,
         mask_path_json);
 }
 
-static void write_initial_candidate_rows(std::ostream* out, const sam3_result& result) {
+static void write_initial_candidate_rows(std::ostream* out,
+                                         const sam3_result& result,
+                                         std::optional<size_t> selected_index = std::nullopt) {
     if (!out)
         return;
     for (size_t candidate_index = 0; candidate_index < result.detections.size(); ++candidate_index) {
@@ -449,6 +470,7 @@ static void write_initial_candidate_rows(std::ostream* out, const sam3_result& r
             "{{\"source\":\"sam3cpp-initial-candidate\","
             "\"frame_index\":0,"
             "\"candidate_index\":{},"
+            "\"selected\":{},"
             "\"instance_id\":{},"
             "\"bbox_xyxy\":[{:.3f},{:.3f},{:.3f},{:.3f}],"
             "\"score\":{:.6f},"
@@ -457,6 +479,7 @@ static void write_initial_candidate_rows(std::ostream* out, const sam3_result& r
             "\"mask_area\":{},"
             "\"mask_fnv1a64\":\"{:016x}\"}}\n",
             candidate_index,
+            selected_index && *selected_index == candidate_index,
             det.instance_id,
             det.box.x0,
             det.box.y0,
@@ -472,8 +495,9 @@ static void write_initial_candidate_rows(std::ostream* out, const sam3_result& r
 
 static std::string save_detection_mask(std::string_view output_mask_dir,
                                        int offset,
-                                       const sam3_result& result) {
-    const auto* det = best_detection(result);
+                                       const sam3_result& result,
+                                       std::optional<size_t> candidate_index = std::nullopt) {
+    const auto* det = select_detection(result, candidate_index);
     if (output_mask_dir.empty() || !det || det->mask.data.empty()) {
         return {};
     }
@@ -610,6 +634,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       int encode_img_size,
                                       bool bbox_only,
                                       bool multimask,
+                                      std::optional<size_t> initial_candidate_index,
                                       int recondition_every,
                                       const std::string& output_jsonl,
                                       const std::string& output_initial_candidates_jsonl,
@@ -728,14 +753,18 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     sam3_pvs_params pvs;
     pvs.pos_points.push_back({px, py});
     pvs.multimask = multimask;
+    pvs.candidate_index = initial_candidate_index;
 
     if (out.is_open() || candidate_out.is_open()) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
         if (out.is_open()) {
-            const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
-            write_detection_row(&out, 0, 0, first, mask_path);
+            const auto mask_path =
+                save_detection_mask(output_mask_dir, 0, first, initial_candidate_index);
+            write_detection_row(&out, 0, 0, first, mask_path, initial_candidate_index);
         }
-        write_initial_candidate_rows(candidate_out.is_open() ? &candidate_out : nullptr, first);
+        write_initial_candidate_rows(candidate_out.is_open() ? &candidate_out : nullptr,
+                                     first,
+                                     initial_candidate_index);
     }
 
     int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
@@ -811,6 +840,7 @@ static void child_benchmark(const std::string& model_path,
                             int encode_img_size,
                             bool bbox_only,
                             bool multimask,
+                            std::optional<size_t> initial_candidate_index,
                             int recondition_every,
                             const std::string& output_jsonl,
                             const std::string& output_initial_candidates_jsonl,
@@ -827,6 +857,7 @@ static void child_benchmark(const std::string& model_path,
                                           encode_img_size,
                                           bbox_only,
                                           multimask,
+                                          initial_candidate_index,
                                           recondition_every,
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
@@ -851,6 +882,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           int encode_img_size = 0,
                                           bool bbox_only = false,
                                           bool multimask = false,
+                                          std::optional<size_t> initial_candidate_index = std::nullopt,
                                           int recondition_every = 16,
                                           const std::string& output_jsonl = "",
                                           const std::string& output_initial_candidates_jsonl = "",
@@ -873,6 +905,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           encode_img_size,
                                           bbox_only,
                                           multimask,
+                                          initial_candidate_index,
                                           recondition_every,
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
@@ -922,6 +955,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                         encode_img_size,
                         bbox_only,
                         multimask,
+                        initial_candidate_index,
                         recondition_every,
                         output_jsonl,
                         output_initial_candidates_jsonl,
@@ -974,6 +1008,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                         int encode_img_size = 0,
                                         bool bbox_only = false,
                                         bool multimask = false,
+                                        std::optional<size_t> initial_candidate_index = std::nullopt,
                                         int recondition_every = 16,
                                         const std::string& output_jsonl = "",
                                         const std::string& output_initial_candidates_jsonl = "",
@@ -994,6 +1029,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                           encode_img_size,
                                           bbox_only,
                                           multimask,
+                                          initial_candidate_index,
                                           recondition_every,
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
@@ -1123,6 +1159,7 @@ int main(int argc, char** argv) {
     bool multimask = false;
     bool no_isolation = false;
     bool quiet = false;
+    std::optional<size_t> initial_candidate_index;
     std::string filter;
     std::string output_jsonl;
     std::string output_initial_candidates_jsonl;
@@ -1154,6 +1191,12 @@ int main(int argc, char** argv) {
             bbox_only = true;
         } else if (arg == "--multimask") {
             multimask = true;
+        } else if (arg == "--initial-candidate-index" && i + 1 < argc) {
+            initial_candidate_index = parse_size_t(argv[++i]);
+            if (!initial_candidate_index) {
+                std::print(stderr, "ERROR: invalid --initial-candidate-index value\n");
+                return 1;
+            }
         } else if (arg == "--no-isolation") {
             no_isolation = true;
         } else if (arg == "--quiet") {
@@ -1181,6 +1224,7 @@ int main(int argc, char** argv) {
                 "  --gpu-only            Skip CPU runs\n"
                 "  --bbox-only           Track/output bbox rows without full-res masks\n"
                 "  --multimask           Use multimask output for the initial point prompt\n"
+                "  --initial-candidate-index <n> Force a point-prompt candidate for diagnostics\n"
                 "  --filter <substr>     Filter model filenames\n"
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
                 "  --output-initial-candidates-jsonl <path> Write initial point-prompt candidates\n"
@@ -1305,6 +1349,7 @@ int main(int argc, char** argv) {
                                                        encode_img_size,
                                                        bbox_only,
                                                        multimask,
+                                                       initial_candidate_index,
                                                        recondition_every,
                                                        (i == 0) ? output_jsonl : "",
                                                        (i == 0) ? output_initial_candidates_jsonl : "",
@@ -1320,6 +1365,7 @@ int main(int argc, char** argv) {
                                                          encode_img_size,
                                                          bbox_only,
                                                          multimask,
+                                                         initial_candidate_index,
                                                          recondition_every,
                                                          (i == 0) ? output_jsonl : "",
                                                          (i == 0) ? output_initial_candidates_jsonl : "",

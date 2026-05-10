@@ -51,6 +51,7 @@
 #include <memory>
 #include <numbers>
 #include <optional>
+#include <print>
 #include <string_view>
 #include <thread>
 #include <type_traits>
@@ -14172,8 +14173,24 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
         return -1;
     }
 
-    const auto& det = *std::ranges::max_element(
-        r.detections, {}, [](const sam3_detection& detection) { return detection.iou_score; });
+    const sam3_detection* selected = nullptr;
+    if (pvs_params.candidate_index) {
+        const size_t candidate_index = *pvs_params.candidate_index;
+        if (candidate_index >= r.detections.size()) {
+            std::print(stderr,
+                       "{}: PVS candidate index {} out of range ({} masks)\n",
+                       __func__,
+                       candidate_index,
+                       r.detections.size());
+            return -1;
+        }
+        selected = &r.detections[candidate_index];
+    } else {
+        selected = &*std::ranges::max_element(
+            r.detections, {}, [](const sam3_detection& detection) { return detection.iou_score; });
+    }
+
+    const auto& det = *selected;
     if (det.mask.data.empty()) {
         fprintf(stderr, "%s: PVS mask is empty\n", __func__);
         return -1;

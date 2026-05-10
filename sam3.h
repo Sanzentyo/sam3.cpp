@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -197,6 +198,7 @@ struct sam3_pvs_params {
     };
     bool use_box = false;
     bool multimask = false;
+    std::optional<size_t> candidate_index;
 };
 
 struct sam3_video_params {

@@ -751,15 +751,21 @@ still not parity and remains slower than official PyTorch.
 | --- | ---: | ---: | ---: | ---: | ---: |
 | q4_0 single-mask prompt | 1024 | 89-96 | 0.4742 | 0.5020 | 0.2500 |
 | q4_0 multimask prompt | 1024 | 96.2 | 0.4731 | 0.4959 | 0.1975 |
+| q4_0 multimask, forced candidate 0 | 1024 | 96.4 | 0.6025 | 0.6375 | 0.3807 |
 | q4_1 multimask prompt | 1024 | 96.7 | 0.5835 | 0.6539 | 0.6093 |
 | q8_0 multimask prompt | 1024 | 96.7 | 0.6999 | 0.8591 | 0.6594 |
 | f16 multimask prompt | 1024 | 109.3 | 0.6995 | 0.8397 | 0.6439 |
 
 The official initial candidate diagnostic for the same prompt selects candidate
 0. C++ f32/f16/q8_0/q4_1 also score candidate 0 highest, while q4_0 scores
-candidate 2 highest. The q4_0 quality issue should therefore be treated as a
-quantized IoU/candidate-selection problem before it is used as a Rust-wrapper
-quality baseline.
+candidate 2 highest. A diagnostic `--initial-candidate-index 0` run confirms
+that candidate selection is a real part of the q4_0 quality gap: mean mask IoU
+improves from `0.4731` to `0.6025`, and frame-0 bbox IoU improves from `0.1975`
+to `0.6090`. It still does not reach parity, and later frames remain vertically
+shifted relative to official PyTorch. The remaining gap therefore cannot be
+explained by q4_0 IoU ranking alone; the selected mask/object-pointer/memory
+propagation path needs a deeper comparison before Base+ q4_0 is used as a
+Rust-wrapper quality baseline.
 
 At `--encode-img-size 512`, the earlier bbox-only scaling run reached
 `34.4 ms/frame`, but that initial comparison was against the default official
@@ -782,9 +788,10 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
 
 1. Fix or explain the SAM2 point-prompt quality gap against official PyTorch.
    The current C++ mask is not a faithful substitute for the official model on
-   this sample. The f32/f16/q8/q4 sweep shows this is not primarily a
-   quantization issue, and the multimask prompt experiment does not close the
-   gap at 1024.
+   this sample. Forced q4_0 candidate selection improves quality but does not
+   close the gap, so the next quality target is the selected mask token,
+   object-pointer extraction, and memory propagation state relative to official
+   PyTorch.
 2. Reduce Hiera encode graph compute. After PE caching, `head_dim=56` tile
    FlashAttention, graph cleanups, threaded preprocessing, and the SAM decoder
    conv-transpose k2s2 kernel, the 1024 path is still about 1.56x slower than
@@ -909,6 +916,8 @@ outputs/tracker-frame-index/q4_0_1024_profile_summary.json
 outputs/tracker-frame-index/q4_0_512_profile_summary.json
 outputs/sam2-official-quality-frame-index-1024/summary.json
 outputs/sam2-official-quality-frame-index-512/summary.json
+outputs/sam2-official-quality-1024-q4_0-multimask-candidate0/summary.json
+outputs/sam2-official-quality-1024-q4_0-multimask-candidate0/cpp_initial_candidates.jsonl
 outputs/hiera-free-prev-state/q4_0_512_fixed_summary.json
 outputs/hiera-free-prev-state/q4_0_512_fullmask_summary.json
 outputs/hiera-free-prev-state/q4_0_512_force_cublas_summary.json

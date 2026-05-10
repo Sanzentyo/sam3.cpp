@@ -38,7 +38,10 @@ python_track_ms / cpp_track_ms
 ```
 
 Values above `1.0` mean the Python baseline is slower than the C++ row. Values
-below `1.0` mean the Python baseline is faster for that benchmark path.
+below `1.0` mean the Python baseline is faster for that benchmark path. Use
+this as win/loss evidence only when `comparable_speed_claim` is `true`; the
+script also copies those valid rows into `comparable_speed_rows`. Rows in
+`non_comparable_speed_rows` are coverage or scaling data.
 
 For SAM 3 specifically, the current C++ benchmark initializes the tracker from a
 visual point prompt and then tracks/propagates, while the official Python video
@@ -127,8 +130,11 @@ uv run scripts/model_matrix_compare.py \
   the local machine.
 - C++ vs Python speed/quality claims use the same decoded source-frame
   resolution, frame range, prompt, model family, and SAM input encode size.
-- `summary.json` records the decoded source-frame size, requested encode size,
-  and a `comparable_speed_claim` flag for each C++/Python comparison row.
+- `summary.json` records the decoded source-frame size, point/text prompt,
+  requested encode size, a comparison contract, and a `comparable_speed_claim`
+  flag for each C++/Python comparison row.
+- `summary.json` separates valid speed-claim rows into `comparable_speed_rows`
+  and keeps scaling or coverage rows in `non_comparable_speed_rows`.
 - Quantized C++ rows are compared only against a family-level Python baseline,
   not treated as precision-equivalent PyTorch rows.
 - The output includes track latency, total latency, and memory columns.

@@ -439,6 +439,8 @@ def summarize(
     decoded_height: int,
     frames: int,
     prompt: str,
+    point_x: float,
+    point_y: float,
     requested_encode_size: int,
 ) -> dict[str, Any]:
     py_by_family = {row["family"]: row for row in py_rows}
@@ -469,40 +471,62 @@ def summarize(
             and python_encode_size is not None
             and cpp_encode_size == python_encode_size
         )
+        same_frame_range = py.get("frames") == frames
+        comparable_speed_claim = same_encode_size and same_frame_range
+        track_ratio = py["track_ms"] / row["track_ms"] if row["track_ms"] > 0 else None
         comparisons.append(
-                {
-                    "model": row["model"],
-                    "family": row["family"],
-                    "precision": row["precision"],
-                    "decoded_source_width": decoded_width,
-                    "decoded_source_height": decoded_height,
-                    "frames": frames,
-                    "prompt": prompt,
-                    "cpp_encode_img_size": cpp_encode_size,
-                    "python_image_size": python_encode_size,
-                    "same_decoded_source_resolution": True,
-                    "same_frame_range": py.get("frames") == frames,
-                    "same_prompt": True,
-                    "same_input_encode_size": same_encode_size,
-                    "comparable_speed_claim": same_encode_size and py.get("frames") == frames,
-                    "cpp_track_ms": row["track_ms"],
-                    "python_track_ms": py["track_ms"],
-                    "python_over_cpp_track_ratio": py["track_ms"] / row["track_ms"] if row["track_ms"] > 0 else None,
-                    "cpp_rss_mib": row["rss_mib"],
-                    "python_cuda_alloc_mib": py["rss_mib"],
-                }
+            {
+                "model": row["model"],
+                "family": row["family"],
+                "precision": row["precision"],
+                "decoded_source_width": decoded_width,
+                "decoded_source_height": decoded_height,
+                "frames": frames,
+                "point_prompt": {"x": point_x, "y": point_y},
+                "text_prompt": prompt,
+                "cpp_encode_img_size": cpp_encode_size,
+                "python_image_size": python_encode_size,
+                "same_decoded_source_resolution": True,
+                "same_frame_range": same_frame_range,
+                "same_prompt": True,
+                "same_input_encode_size": same_encode_size,
+                "comparable_speed_claim": comparable_speed_claim,
+                "cpp_track_ms": row["track_ms"],
+                "python_track_ms": py["track_ms"],
+                "python_over_cpp_track_ratio": track_ratio,
+                "python_over_cpp_track_ratio_if_comparable": track_ratio if comparable_speed_claim else None,
+                "cpp_rss_mib": row["rss_mib"],
+                "python_cuda_alloc_mib": py["rss_mib"],
+            }
         )
+    comparable = [row for row in comparisons if row.get("comparable_speed_claim")]
+    not_comparable = [row for row in comparisons if not row.get("comparable_speed_claim")]
     summary = {
+        "comparison_contract": {
+            "speed_and_quality_claims_require": [
+                "same decoded source-frame resolution",
+                "same frame range",
+                "same prompt",
+                "same SAM input encode size",
+            ],
+            "note": (
+                "Rows with comparable_speed_claim=false are scaling or coverage rows. "
+                "Do not use their C++/Python ratios as speed win/loss evidence."
+            ),
+        },
         "benchmark_context": {
             "decoded_source_width": decoded_width,
             "decoded_source_height": decoded_height,
             "frames": frames,
-            "prompt": prompt,
+            "point_prompt": {"x": point_x, "y": point_y},
+            "text_prompt": prompt,
             "requested_encode_img_size": requested_encode_size,
         },
         "cpp": cpp_rows,
         "python": py_rows,
         "comparisons": comparisons,
+        "comparable_speed_rows": comparable,
+        "non_comparable_speed_rows": not_comparable,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
@@ -579,6 +603,8 @@ def main() -> int:
         decoded_height=decoded_height,
         frames=args.frames,
         prompt=args.text_prompt,
+        point_x=args.point_x,
+        point_y=args.point_y,
         requested_encode_size=args.encode_img_size,
     )
     print(json.dumps(summary, indent=2), flush=True)

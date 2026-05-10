@@ -18,6 +18,7 @@ SAM2_REPO := env_var_or_default("SAM2_REPO", "../sam2")
 SAM2_BASE_PLUS_CHECKPOINT := env_var_or_default("SAM2_BASE_PLUS_CHECKPOINT", "../sam2/checkpoints/sam2.1_hiera_base_plus.pt")
 SAM2_QUALITY_CPP_JSONL := env_var_or_default("SAM2_QUALITY_CPP_JSONL", "outputs/sam2-official-quality-10/cpp.jsonl")
 SAM2_QUALITY_OUT := env_var_or_default("SAM2_QUALITY_OUT", "outputs/sam2-official-quality-10")
+SAM2_QUALITY_IMAGE_SIZE := env_var_or_default("SAM2_QUALITY_IMAGE_SIZE", "0")
 
 CLANG_TIDY := env_var_or_default("CLANG_TIDY", "uvx --from clang-tidy clang-tidy")
 CLANG_FORMAT := env_var_or_default("CLANG_FORMAT", "uvx --from clang-format clang-format")
@@ -116,4 +117,5 @@ compare-sam2-official-quality cpp_jsonl=SAM2_QUALITY_CPP_JSONL out=SAM2_QUALITY_
         --cpp-jsonl {{ cpp_jsonl }} \
         --sam2-repo {{ SAM2_REPO }} \
         --checkpoint {{ SAM2_BASE_PLUS_CHECKPOINT }} \
+        --image-size {{ SAM2_QUALITY_IMAGE_SIZE }} \
         --out-dir {{ out }}

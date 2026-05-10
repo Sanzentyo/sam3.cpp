@@ -26,14 +26,16 @@ Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 | After CPU PE caching | 136.1 | 133.3 | 148.9 | removed repeated Hiera/neck PE generation |
 | After backend neck PE reuse | 129.8 | 127.3 | 139.7 | avoids repeated neck PE backend upload |
 
-Encode-size sweep after PE caching:
+Encode-size sweep after PE caching. This is a scaling sweep, not an
+apples-to-apples comparison against the official PyTorch baseline unless the
+official run uses the same input encode size.
 
 | Encode size | Track ms/frame | P50 ms | P95 ms | RSS MiB | Note |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 1024 | 129.8 | 127.3 | 139.7 | 647.4 | default size |
-| 768 | 72.3 | 71.3 | 80.6 | 574.2 | faster, lower resolution |
-| 640 | 48.3 | 47.1 | 53.1 | 552.2 | near PyTorch speed |
-| 512 | 34.4 | 33.4 | 39.5 | 572.8 | faster than PyTorch speed |
+| 1024 | 129.8 | 127.3 | 139.7 | 647.4 | default, comparable to official default |
+| 768 | 72.3 | 71.3 | 80.6 | 574.2 | lower-resolution scaling point |
+| 640 | 48.3 | 47.1 | 53.1 | 552.2 | lower-resolution scaling point |
+| 512 | 34.4 | 33.4 | 39.5 | 572.8 | lower-resolution scaling point |
 
 Base+ precision sweep after CPU PE caching:
 
@@ -49,8 +51,10 @@ Official PyTorch SAM2.1 Base+ on the same 10-frame clip measured
 `43.4 ms/frame` for propagation with `855.2 MiB` CUDA allocation. The current
 C++ CUDA path is therefore still about 3x slower than official PyTorch for this
 prompt/video at the default 1024 encode size, despite the PE cache improvement.
-At `--encode-img-size 512`, C++ is faster than PyTorch on this clip, but that is
-a speed/quality tradeoff and not a parity-preserving replacement.
+The lower encode-size rows above are useful for understanding scaling, but they
+must not be used to claim a speed win over the official 1024 PyTorch baseline.
+Any lower-resolution comparison needs an official PyTorch run configured to the
+same input encode size.
 
 ## Detailed Profile
 
@@ -89,15 +93,21 @@ This is not quality parity. The official SAM2 mask selected by the same point is
 much larger than the current C++ mask. PyTorch-level speed is not sufficient by
 itself until this semantic mismatch is understood.
 
-At `--encode-img-size 512`, C++ reaches `34.4 ms/frame`, but quality remains far
-from official PyTorch:
+At `--encode-img-size 512`, C++ reaches `34.4 ms/frame`. The initial comparison
+was against the default official PyTorch 1024 run and was therefore not a fair
+speed baseline. Re-running official PyTorch with `model.image_size=512` gives
+`15.6 ms/frame`, so C++ is still about 2.2x slower at the same input encode
+size:
 
 | Metric | Value |
 | --- | ---: |
 | Frames compared | 10 |
-| Mean mask IoU | 0.0521 |
-| Minimum mask IoU | 0.0000 |
-| Minimum bbox IoU | 0.0310 |
+| Mean mask IoU vs PyTorch 1024 | 0.0521 |
+| Mean mask IoU vs PyTorch 512 | 0.1496 |
+| Minimum mask IoU vs PyTorch 512 | 0.1416 |
+| Minimum bbox IoU vs PyTorch 512 | 0.0968 |
+| C++ 512 track ms/frame | 34.4 |
+| PyTorch 512 propagate ms/frame | 15.6 |
 
 ## Priority
 
@@ -106,9 +116,9 @@ from official PyTorch:
    this sample.
 2. Reduce Hiera encode graph compute. After caching fixed PE, the remaining
    dominant steady-state cost is the 80-90 ms ggml CUDA graph compute.
-3. Decide whether lower encode sizes are acceptable for the Rust wrapper. A
-   512 encode size beats PyTorch speed on this sample, but current mask IoU is
-   too low to treat it as a quality-preserving optimization.
+3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
+   requires same-resolution measurements: C++ 512 must be compared with
+   official PyTorch 512, C++ 640 with official PyTorch 640, and so on.
 4. Reduce CPU preprocessing cost. Resize/normalize still costs roughly
    14-18 ms/frame.
 5. Treat `head_dim=56` FlashAttention support as a secondary optimization. The
@@ -125,4 +135,5 @@ outputs/sam2-official-quality-10/cpp.log
 outputs/sam2-official-quality-10/python-official.log
 outputs/hiera-encode-size-sweep/base_plus_q4_0_512.log
 outputs/sam2-official-quality-512/summary.json
+outputs/sam2-official-quality-512-same-res/summary.json
 ```

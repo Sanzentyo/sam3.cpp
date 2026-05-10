@@ -135,6 +135,7 @@ out_dir = Path(sys.argv[5])
 point_x = float(sys.argv[6])
 point_y = float(sys.argv[7])
 frames = int(sys.argv[8])
+image_size = int(sys.argv[9])
 
 sys.path.insert(0, str(sam2_repo))
 from sam2.build_sam import build_sam2_video_predictor
@@ -145,7 +146,17 @@ if torch.cuda.get_device_properties(0).major >= 8:
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-predictor = build_sam2_video_predictor(cfg, checkpoint, device="cuda", vos_optimized=False)
+overrides = []
+if image_size > 0:
+    overrides.append(f"model.image_size={image_size}")
+
+predictor = build_sam2_video_predictor(
+    cfg,
+    checkpoint,
+    device="cuda",
+    vos_optimized=False,
+    hydra_overrides_extra=overrides,
+)
 state = predictor.init_state(video_path=str(frame_dir))
 points = np.array([[point_x, point_y]], dtype=np.float32)
 labels = np.array([1], np.int32)
@@ -204,6 +215,7 @@ print(json.dumps({
         "propagate_total_ms": total_ms,
         "propagate_ms_per_frame": total_ms / max(len(ordered), 1),
         "cuda_alloc_mib": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
+        "image_size": image_size if image_size > 0 else 1024,
     }
 }), flush=True)
 '''
@@ -223,6 +235,7 @@ print(json.dumps({
             str(args.point_x),
             str(args.point_y),
             str(args.frames),
+            str(args.image_size),
         ]
     )
     env = os.environ.copy()
@@ -255,6 +268,12 @@ def main() -> int:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--config", default="configs/sam2.1/sam2.1_hiera_b+.yaml")
     parser.add_argument("--frames", type=int, default=10)
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=0,
+        help="Official SAM2 image_size override. 0 keeps the config default.",
+    )
     parser.add_argument("--point-x", type=float, default=315.0)
     parser.add_argument("--point-y", type=float, default=250.0)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/sam2-official-quality"))

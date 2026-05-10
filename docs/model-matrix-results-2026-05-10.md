@@ -65,6 +65,8 @@ fallback. This is a coverage/correctness fix, not a speed optimization. A
 
 Python uses official PyTorch CUDA bf16 paths and does not have GGML precision
 equivalents. These are family-level references, not precision-equivalent rows.
+The SAM 2.1 rows use the official default 1024 input encode size, so only C++
+runs at the same encode size are directly comparable.
 
 | Family | Backend | Track ms | CUDA alloc MiB |
 | --- | --- | ---: | ---: |
@@ -78,7 +80,8 @@ equivalents. These are family-level references, not precision-equivalent rows.
 
 Values below `1.0` mean Python is faster for the measured path. On this CUDA
 machine, the current C++ path is not speed-competitive with official Python for
-the comparable baselines, although C++ uses much less memory for SAM 3.
+the same-resolution comparable baselines, although C++ uses much less memory
+for SAM 3.
 
 | C++ model | C++ track ms | Python track ms | Python/C++ ratio |
 | --- | ---: | ---: | ---: |

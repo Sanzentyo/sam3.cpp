@@ -13,6 +13,9 @@ target_link_libraries(sam3_smoke PRIVATE sam3)
 add_executable(sam3_profile_edgetam profile_edgetam.cpp)
 target_link_libraries(sam3_profile_edgetam PRIVATE sam3)
 
+add_executable(sam3_fattn_parity fattn_parity.cpp)
+target_link_libraries(sam3_fattn_parity PRIVATE sam3)
+
 # SDL2 + ImGui are optional -- build only if SDL2 is found.
 find_package(SDL2 QUIET)
 

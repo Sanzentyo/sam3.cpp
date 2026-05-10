@@ -587,6 +587,15 @@ kernel path, not acceptable numerical drift. The experiment was reverted; only
 the generator/extern cleanup needed to reproduce the existing tile
 instantiations was kept.
 
+To keep future kernel work from reaching this late failure mode again,
+`sam3_fattn_parity` now checks `ggml_flash_attn_ext` directly against a scalar
+CPU reference. It matches the CUDA path's fp16 K/V conversion before comparing,
+so it is a kernel-output gate rather than a full-model proxy. Current valid
+tile-path checks pass for the Hiera window shape
+(`D=56,N=196,heads=8,batch=25`, `max_abs=0.0321010835`) and sampled global shape
+(`D=56,N=4096,heads=8,batch=1,sampled_q=9`, `max_abs=0.00512025505`) under the
+default `0.04` absolute tolerance.
+
 The tile FlashAttention launch was also tested with `stream_k=true` to check
 whether the long 4096-token global attention was limited by the current
 parallel-block combine path. It produced a large rough 1024 bbox speedup
@@ -846,6 +855,8 @@ outputs/fattn56-mma/default_vs_restored_bbox.json
 outputs/fattn56-mma-gated/default_1024.log
 outputs/fattn56-mma-gated/mma_1024.log
 outputs/fattn56-mma-gated/mma_ncols32_1024.log
+build/xmake-release-cuda/examples/sam3_fattn_parity --cuda --d 56 --n 196 --heads 8 --batch 25
+build/xmake-release-cuda/examples/sam3_fattn_parity --cuda --d 56 --n 4096 --heads 8 --batch 1 --sample-queries 9
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

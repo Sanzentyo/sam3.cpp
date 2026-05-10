@@ -698,6 +698,24 @@ changed full-mask output (`mask_hash_equal_rows=0/10`, `min_bbox_iou=0.9645`,
 as a parity-preserving optimization, so the default 32-col tile path remains in
 place.
 
+Specializing the `head_dim=56` tile path for Hiera's mask-free
+`ggml_flash_attn_ext` calls removes the inner mask-add branch only when
+`DKQ=56,DV=56` and `mask == nullptr`; other head sizes keep the previous
+runtime path. The direct kernel parity checks still pass with the same error
+range as the baseline:
+
+| Shape | Max abs | Mean abs | Bad values |
+| --- | ---: | ---: | ---: |
+| `D=56,N=196,heads=8,batch=25` | `0.0321010835` | `0.00512901675` | `0/2195200` |
+| `D=56,N=4096,heads=8,batch=1,sampled_q=9` | `0.00512025505` | `0.00105904906` | `0/4032` |
+
+A short same-input A/B run showed only a small 1024 improvement candidate and
+no 512 improvement: restored baseline measured `90.8 ms/frame` at 1024 and
+`23.2 ms/frame` at 512; the mask-free specialization measured `88.8 ms/frame`
+at 1024 and `23.2 ms/frame` at 512. This is useful as a low-risk cleanup, but
+it is not a major speed fix and does not change the conclusion that PyTorch is
+still much faster on the matched comparison.
+
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
 1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change

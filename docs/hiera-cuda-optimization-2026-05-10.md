@@ -81,13 +81,25 @@ Base+ precision sweep after CPU PE caching:
 | `sam2.1_hiera_base_plus_q4_1` | 136.0 | 134.4 | 143.7 | 649.6 |
 | `sam2.1_hiera_base_plus_q4_0` | 134.5 | 133.6 | 142.1 | 647.8 |
 
-Current precision spot-check after the Hiera graph cleanups:
+Current same-size precision sweep after the Hiera graph cleanups:
 
-| Model | Track ms/frame | P50 ms | P95 ms | Note |
-| --- | ---: | ---: | ---: | --- |
-| `sam2.1_hiera_base_plus_f16` | 121.7 | 119.9 | 133.3 | cublas path, still slower here |
-| `sam2.1_hiera_base_plus_q8_0` | 105.9 | 103.2 | 115.7 | fastest bbox-only spot-check |
-| `sam2.1_hiera_base_plus_q4_0` | 107.6 | 105.2 | 117.4 | current quality baseline |
+| Encode size | Model | C++ track ms/frame | P50 ms | P95 ms | PyTorch bf16 ms/frame |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1024 | `sam2.1_hiera_base_plus_f32` | 121.0 | 120.8 | 128.9 | 57.0 |
+| 1024 | `sam2.1_hiera_base_plus_f16` | 119.2 | 115.8 | 129.8 | 57.0 |
+| 1024 | `sam2.1_hiera_base_plus_q8_0` | 105.9 | 102.8 | 115.9 | 57.0 |
+| 1024 | `sam2.1_hiera_base_plus_q4_1` | 106.2 | 103.7 | 115.3 | 57.0 |
+| 1024 | `sam2.1_hiera_base_plus_q4_0` | 105.7 | 103.3 | 115.1 | 57.0 |
+| 512 | `sam2.1_hiera_base_plus_f32` | 32.5 | 31.7 | 37.0 | 21.0 |
+| 512 | `sam2.1_hiera_base_plus_f16` | 30.2 | 29.1 | 34.9 | 21.0 |
+| 512 | `sam2.1_hiera_base_plus_q8_0` | 29.9 | 28.9 | 34.6 | 21.0 |
+| 512 | `sam2.1_hiera_base_plus_q4_1` | 30.2 | 29.2 | 34.4 | 21.0 |
+| 512 | `sam2.1_hiera_base_plus_q4_0` | 29.9 | 29.1 | 34.2 | 21.0 |
+
+The quantized rows are close to each other at both sizes. Precision selection
+alone is therefore not enough to overtake official PyTorch; the remaining work
+needs to reduce Hiera graph compute or improve the CUDA kernels used by the
+stage-2 projection/MLP matmuls and layout operations.
 
 The current same-script C++/official-PyTorch comparison uses the same decoded
 source-frame resolution, frame range, point prompt, model family, and explicit
@@ -403,6 +415,6 @@ outputs/hiera-current-precision/summary.json
 outputs/sam2-official-quality-10-current-q8_0/summary.json
 outputs/hiera-force-mmq/summary.json
 outputs/hiera-window-matmul-flatten/parity.json
-outputs/model-matrix-sam2-base-plus-q4-current-1024/summary.json
-outputs/model-matrix-sam2-base-plus-q4-current-512/summary.json
+outputs/model-matrix-sam2-base-plus-current-1024/summary.json
+outputs/model-matrix-sam2-base-plus-current-512/summary.json
 ```

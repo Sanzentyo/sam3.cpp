@@ -43,10 +43,11 @@ Comparison rule: C++ vs official PyTorch speed/quality claims are valid only
 when both runs use the same decoded source-frame resolution, the same frame
 range, the same prompt, and the same SAM2 input encode size
 (`--encode-img-size` in C++, `model.image_size` in official PyTorch). The
-effective input resolution must match before interpreting speed or quality
-differences as implementation differences. Running multiple source resolutions
-or encode sizes is still useful, but those rows are a scaling study rather than
-a cross-implementation win/loss comparison.
+primary comparison must keep both the decoded input resolution and the model
+input encode size fixed. Running multiple source resolutions or encode sizes is
+still useful, but those rows are a scaling study; they must not be used as a
+cross-implementation win/loss comparison unless the matching PyTorch run uses
+the same source resolution and encode size.
 
 | State | Track ms/frame | P50 ms | P95 ms | Note |
 | --- | ---: | ---: | ---: | --- |
@@ -361,6 +362,27 @@ propagation matmul is
 single-token/object-pointer shapes such as `q4_0[256,256] x f32[256,1]`. This
 means the 512 path cannot be finished by Hiera-only work; the propagation graph
 needs the same kind of layout reduction or quantized small-GEMM improvement.
+
+The opt-in ggml CUDA node profiler (`GGML_CUDA_PROFILE_NODES=1`) disables CUDA
+graphs and synchronizes after every node, so its totals are not comparable to
+normal benchmark rows. It is useful for ranking kernels and shapes. On a
+3-frame 1024 q4_0 run, the Hiera encode profile shows:
+
+| Region | Node/signature | Count | Sum ms | Mean ms | Note |
+| --- | --- | ---: | ---: | ---: | --- |
+| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,4096,1]` output | 9 | 36.69 | 4.08 | steady global-attention hotspot |
+| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,196,25]` output | 36 | 18.19 | 0.51 | window-attention hotspot |
+| Hiera | q4_0 MLP `448 -> 1792` / `1792 -> 448` matmuls | 96 | 12.70 | 0.13 | many small/medium calls |
+| Propagate | `CONV_TRANSPOSE_2D` | 4 | 13.07 | 3.27 | top propagation-side kernel |
+
+The largest single Hiera `MUL_MAT` sample includes first-use warmup and should
+not be treated as the steady-state bottleneck. The steady 1024 target is now the
+global `FLASH_ATTN_EXT` path for head_dim 56 and 4096 tokens, followed by the
+window-attention and quantized MLP matmul shapes. A simple experiment that cast
+Hiera Q/K/V to f16 before `ggml_flash_attn_ext` was rejected: the current CUDA
+FlashAttention tile asserts `Q->type == GGML_TYPE_F32` for this path, so f16/bf16
+attention would require a real kernel/backend change rather than a graph-level
+cast.
 
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:

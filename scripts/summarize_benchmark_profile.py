@@ -48,6 +48,11 @@ GRAPH_MATMUL_RE = re.compile(
     r"src1_type=(\S+) src1_ne=([0-9,]+) "
     r"dst_type=(\S+) dst_ne=([0-9,]+)"
 )
+CUDA_NODE_RE = re.compile(
+    r"GGML_CUDA_PROFILE_NODE fused=(\d+) skipped=(\d+) op=(\S+) name=(\S*) ms=([0-9.]+) "
+    r"dst_type=(\S+) dst_ne=([0-9,]+)"
+    r"(?: src0_type=(\S+) src0_ne=([0-9,]+) src1_type=(\S+) src1_ne=([0-9,]+))?"
+)
 
 
 def mean(values: list[float]) -> float | None:
@@ -160,6 +165,93 @@ def summarize(path: Path) -> dict[str, Any]:
             stats["samples"] = label_samples
             stats["mean_count"] = stats["count"] / label_samples
 
+    cuda_nodes: list[dict[str, Any]] = []
+    cuda_nodes_by_op: dict[str, dict[str, Any]] = {}
+    cuda_nodes_by_signature: dict[str, dict[str, Any]] = {}
+    cuda_nodes_by_label_op: dict[str, dict[str, dict[str, Any]]] = {}
+    cuda_nodes_by_label_signature: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def make_cuda_node(match: tuple[str, ...]) -> dict[str, Any]:
+        fused, skipped, op, name, ms, dst_type, dst_ne, src0_type, src0_ne, src1_type, src1_ne = match
+        return {
+            "fused": bool(int(fused)),
+            "skipped": int(skipped),
+            "op": op,
+            "name": name,
+            "ms": float(ms),
+            "dst_type": dst_type,
+            "dst_ne": dst_ne,
+            "src0_type": src0_type or "none",
+            "src0_ne": src0_ne or "0,0,0,0",
+            "src1_type": src1_type or "none",
+            "src1_ne": src1_ne or "0,0,0,0",
+        }
+
+    def cuda_node_signature(node_row: dict[str, Any]) -> str:
+        return (
+            f"op={node_row['op']} dst={node_row['dst_type']}[{node_row['dst_ne']}] "
+            f"src0={node_row['src0_type']}[{node_row['src0_ne']}] "
+            f"src1={node_row['src1_type']}[{node_row['src1_ne']}]"
+        )
+
+    def add_cuda_node_to(
+        node_row: dict[str, Any],
+        by_op: dict[str, dict[str, Any]],
+        by_signature: dict[str, dict[str, Any]],
+    ) -> None:
+        op = node_row["op"]
+        op_stats = by_op.setdefault(op, {"count": 0, "sum_ms": 0.0, "max_ms": 0.0})
+        op_stats["count"] += 1
+        op_stats["sum_ms"] += node_row["ms"]
+        op_stats["max_ms"] = max(op_stats["max_ms"], node_row["ms"])
+        signature = cuda_node_signature(node_row)
+        sig_stats = by_signature.setdefault(
+            signature,
+            {
+                "op": op,
+                "dst_type": node_row["dst_type"],
+                "dst_ne": node_row["dst_ne"],
+                "src0_type": node_row["src0_type"],
+                "src0_ne": node_row["src0_ne"],
+                "src1_type": node_row["src1_type"],
+                "src1_ne": node_row["src1_ne"],
+                "count": 0,
+                "sum_ms": 0.0,
+                "max_ms": 0.0,
+            },
+        )
+        sig_stats["count"] += 1
+        sig_stats["sum_ms"] += node_row["ms"]
+        sig_stats["max_ms"] = max(sig_stats["max_ms"], node_row["ms"])
+
+    for match in CUDA_NODE_RE.findall(text):
+        node_row = make_cuda_node(match)
+        cuda_nodes.append(node_row)
+        add_cuda_node_to(node_row, cuda_nodes_by_op, cuda_nodes_by_signature)
+
+    pending_nodes: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        node_match = CUDA_NODE_RE.search(line)
+        if node_match:
+            pending_nodes.append(make_cuda_node(node_match.groups()))
+            continue
+        compute_match = COMPUTE_RE.search(line)
+        if compute_match:
+            label = compute_match.group(1) or "unlabeled"
+            by_op = cuda_nodes_by_label_op.setdefault(label, {})
+            by_signature = cuda_nodes_by_label_signature.setdefault(label, {})
+            for node_row in pending_nodes:
+                add_cuda_node_to(node_row, by_op, by_signature)
+            pending_nodes = []
+
+    all_stats = list(cuda_nodes_by_op.values()) + list(cuda_nodes_by_signature.values())
+    for by_op in cuda_nodes_by_label_op.values():
+        all_stats.extend(by_op.values())
+    for by_signature in cuda_nodes_by_label_signature.values():
+        all_stats.extend(by_signature.values())
+    for stats in all_stats:
+        stats["mean_ms"] = stats["sum_ms"] / max(1, stats["count"])
+
     result: dict[str, Any] = {
         "path": str(path),
         "encode_ms": encodes,
@@ -235,6 +327,39 @@ def summarize(path: Path) -> dict[str, Any]:
                 )
             }
             for label, matmuls in sorted(graph_matmuls.items(), key=lambda item: item[0])
+        },
+        "cuda_profile_nodes_top": sorted(cuda_nodes, key=lambda item: item["ms"], reverse=True)[:20],
+        "cuda_profile_nodes_by_op": {
+            op: stats
+            for op, stats in sorted(
+                cuda_nodes_by_op.items(), key=lambda item: (-float(item[1]["sum_ms"]), item[0])
+            )
+        },
+        "cuda_profile_nodes_by_signature": {
+            signature: stats
+            for signature, stats in sorted(
+                cuda_nodes_by_signature.items(),
+                key=lambda item: (-float(item[1]["sum_ms"]), item[0]),
+            )[:50]
+        },
+        "cuda_profile_nodes_by_label_op": {
+            label: {
+                op: stats
+                for op, stats in sorted(
+                    by_op.items(), key=lambda item: (-float(item[1]["sum_ms"]), item[0])
+                )
+            }
+            for label, by_op in sorted(cuda_nodes_by_label_op.items())
+        },
+        "cuda_profile_nodes_by_label_signature": {
+            label: {
+                signature: stats
+                for signature, stats in sorted(
+                    by_signature.items(),
+                    key=lambda item: (-float(item[1]["sum_ms"]), item[0]),
+                )[:50]
+            }
+            for label, by_signature in sorted(cuda_nodes_by_label_signature.items())
         },
     }
     if row:

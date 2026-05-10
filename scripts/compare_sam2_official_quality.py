@@ -72,6 +72,58 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def split_cpp_rows(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    metadata = next((row for row in rows if row.get("source") == "sam3cpp-meta"), None)
+    detections = [row for row in rows if "offset" in row and row.get("source") != "sam3cpp-meta"]
+    return metadata, detections
+
+
+def frame_size(frame_dir: Path) -> tuple[int, int]:
+    first = sorted(frame_dir.glob("*.jpg"))[0]
+    with Image.open(first) as img:
+        return img.size
+
+
+def validate_cpp_metadata(
+    metadata: dict[str, Any] | None,
+    args: argparse.Namespace,
+    frame_dir: Path,
+    python_summary: dict[str, Any],
+) -> dict[str, Any]:
+    expected_width, expected_height = frame_size(frame_dir)
+    result: dict[str, Any] = {
+        "present": metadata is not None,
+        "expected_decoded_width": expected_width,
+        "expected_decoded_height": expected_height,
+        "expected_frames": args.frames,
+        "expected_point_x": args.point_x,
+        "expected_point_y": args.point_y,
+        "expected_encode_img_size": python_summary.get("image_size"),
+    }
+    if metadata is None:
+        result["status"] = "missing"
+        result["message"] = "cpp JSONL does not contain a sam3cpp-meta row; condition parity was not checked"
+        return result
+
+    checks = {
+        "decoded_width": metadata.get("decoded_width") == expected_width,
+        "decoded_height": metadata.get("decoded_height") == expected_height,
+        "frames": metadata.get("frames") == args.frames,
+        "point_x": abs(float(metadata.get("point_x", float("nan"))) - args.point_x) < 1e-4,
+        "point_y": abs(float(metadata.get("point_y", float("nan"))) - args.point_y) < 1e-4,
+        "encode_img_size": metadata.get("encode_img_size_effective") == python_summary.get("image_size"),
+    }
+    result["metadata"] = metadata
+    result["checks"] = checks
+    failed = [name for name, ok in checks.items() if not ok]
+    if failed:
+        result["status"] = "failed"
+        result["failed_checks"] = failed
+        raise ValueError(f"C++/Python comparison condition mismatch: {', '.join(failed)}")
+    result["status"] = "passed"
+    return result
+
+
 def mask_array(path: Path) -> list[int]:
     img = Image.open(path).convert("L")
     return [1 if value > 127 else 0 for value in img.tobytes()]
@@ -289,9 +341,11 @@ def main() -> int:
 
     frame_dir = args.out_dir / "frames"
     extract_frames(args.video, frame_dir, args.frames)
-    cpp_rows = read_jsonl(args.cpp_jsonl)
+    cpp_metadata, cpp_rows = split_cpp_rows(read_jsonl(args.cpp_jsonl))
     py_rows = run_python_sam2(args, frame_dir, args.out_dir)
     py_by_offset = {int(row["offset"]): row for row in py_rows}
+    python_summary = json.loads((args.out_dir / "python-summary.json").read_text(encoding="utf-8"))
+    metadata_validation = validate_cpp_metadata(cpp_metadata, args, frame_dir, python_summary)
 
     comparisons: list[dict[str, Any]] = []
     for cpp in cpp_rows:
@@ -321,7 +375,8 @@ def main() -> int:
         "mean_mask_iou": sum(row["mask_iou"] for row in comparisons) / max(len(comparisons), 1),
         "min_bbox_iou": min((row["bbox_iou"] for row in comparisons if row["bbox_iou"] is not None), default=None),
         "comparisons": comparisons,
-        "python_summary": json.loads((args.out_dir / "python-summary.json").read_text(encoding="utf-8")),
+        "python_summary": python_summary,
+        "metadata_validation": metadata_validation,
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

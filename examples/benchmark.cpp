@@ -357,6 +357,76 @@ static const sam3_detection* best_detection(const sam3_result& result) {
         result.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
 }
 
+static std::string json_escape(std::string_view value) {
+    std::string out;
+    out.reserve(value.size() + 8);
+    for (char ch : value) {
+        switch (ch) {
+            case '\\':
+                out += "\\\\";
+                break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
+            default:
+                out += ch;
+                break;
+        }
+    }
+    return out;
+}
+
+static void write_metadata_row(FILE* out,
+                               const std::string& model_path,
+                               std::string_view backend,
+                               const std::string& video_path,
+                               const sam3_image& first_frame,
+                               int n_frames,
+                               float px,
+                               float py,
+                               int requested_encode_img_size,
+                               int effective_encode_img_size,
+                               bool bbox_only,
+                               bool multimask) {
+    if (!out)
+        return;
+    const std::string model_path_json = json_escape(model_path);
+    const std::string backend_json = json_escape(backend);
+    const std::string video_path_json = json_escape(video_path);
+    fprintf(out,
+            "{\"source\":\"sam3cpp-meta\","
+            "\"model_path\":\"%s\","
+            "\"backend\":\"%s\","
+            "\"video_path\":\"%s\","
+            "\"decoded_width\":%d,\"decoded_height\":%d,"
+            "\"frames\":%d,"
+            "\"point_x\":%.6f,\"point_y\":%.6f,"
+            "\"encode_img_size_requested\":%d,"
+            "\"encode_img_size_effective\":%d,"
+            "\"bbox_only\":%s,\"multimask\":%s}\n",
+            model_path_json.c_str(),
+            backend_json.c_str(),
+            video_path_json.c_str(),
+            first_frame.width,
+            first_frame.height,
+            n_frames,
+            px,
+            py,
+            requested_encode_img_size,
+            effective_encode_img_size,
+            bbox_only ? "true" : "false",
+            multimask ? "true" : "false");
+}
+
 static void write_detection_row(FILE* out,
                                 int offset,
                                 int expected_frame_index,
@@ -591,6 +661,22 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         return wire;
     }
     snprintf(wire.backend.data(), wire.backend.size(), "%s", sam3_backend_name(*model));
+    if (out) {
+        const int effective_encode_img_size =
+            (encode_img_size > 0) ? encode_img_size : sam3_model_image_size(*model);
+        write_metadata_row(out.get(),
+                           model_path,
+                           sam3_backend_name(*model),
+                           video_path,
+                           frames[0],
+                           n_frames,
+                           px,
+                           py,
+                           encode_img_size,
+                           effective_encode_img_size,
+                           bbox_only,
+                           multimask);
+    }
 
     auto state = sam3_create_state(*model, params);
     if (!state) {

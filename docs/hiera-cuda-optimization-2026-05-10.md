@@ -15,6 +15,10 @@ path can be treated as a Rust-wrapper baseline.
 - Added `sam3_benchmark --output-mask-dir` so C++ masks can be compared with
   official PyTorch masks.
 - Added `scripts/compare_sam2_official_quality.py` for official SAM2 mask IoU.
+- Added a `sam3cpp-meta` JSONL row from `sam3_benchmark --output-jsonl` and
+  validation in the official SAM2 comparison script so decoded input
+  resolution, frame count, prompt, and effective encode size are checked before
+  interpreting C++ vs PyTorch quality results.
 
 ## Performance
 
@@ -212,4 +216,5 @@ outputs/preprocess-fused-head56/summary.json
 outputs/sam2-official-quality-10-preprocess-fused-q4_0/summary.json
 outputs/sam2-official-quality-512-preprocess-fused-q4_0/summary.json
 outputs/debug-output-gated/summary.json
+outputs/metadata-jsonl-check/cpp.jsonl
 ```

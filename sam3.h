@@ -244,6 +244,9 @@ bool sam3_is_visual_only(const sam3_model& model);
 /* Returns the model type (SAM2 or SAM3). */
 sam3_model_type sam3_get_model_type(const sam3_model& model);
 
+/* Returns the native square image encode size from the model metadata. */
+int sam3_model_image_size(const sam3_model& model);
+
 /* Returns the active ggml backend name, e.g. "CUDA0", "Metal", or "CPU". */
 const char* sam3_backend_name(const sam3_model& model);
 

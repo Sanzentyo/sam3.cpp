@@ -3944,6 +3944,10 @@ sam3_model_type sam3_get_model_type(const sam3_model& model) {
     return model.hparams.model_type;
 }
 
+int sam3_model_image_size(const sam3_model& model) {
+    return model.hparams.img_size;
+}
+
 const char* sam3_backend_name(const sam3_model& model) {
     return model.backend ? ggml_backend_name(model.backend) : "none";
 }

@@ -164,6 +164,23 @@ remains the dominant cost. The 512 Hiera compute values are still
 `130.252, 17.613, 17.281, 17.474, 17.044, 34.509, 34.187, 15.280, 15.089,
 14.996 ms`, so the remaining gap is not solved by tracker bookkeeping.
 
+Releasing the previous frame's Hiera encoder output buffer before allocating
+the next Hiera graph removes the mid-run 512 Hiera compute outliers in the
+profile path while preserving the neck PE cache. Full-mask parity against the
+pre-change artifact is exact (`mask_hash_equal_rows=10/10`). The same-input
+speed comparison improves the 512 row modestly, but it still does not overtake
+official PyTorch:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 89.6 | 57.36 | 0.640 | `outputs/model-matrix-free-prev-state-1024/summary.json` |
+| 512 | 23.1 | 20.10 | 0.870 | `outputs/model-matrix-free-prev-state-512/summary.json` |
+
+The accepted effect is therefore stability and a small 512 gain, not completion
+of the PyTorch-speed target. The remaining gap still points at steady Hiera
+FlashAttention / quantized MLP kernels rather than CPU graph build or output
+copy overhead.
+
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
 kernel position for every output element even though this shape has exactly one
@@ -630,4 +647,8 @@ outputs/tracker-frame-index/q4_0_1024_profile_summary.json
 outputs/tracker-frame-index/q4_0_512_profile_summary.json
 outputs/sam2-official-quality-frame-index-1024/summary.json
 outputs/sam2-official-quality-frame-index-512/summary.json
+outputs/hiera-free-prev-state/q4_0_512_fixed_summary.json
+outputs/hiera-free-prev-state/q4_0_512_fullmask_summary.json
+outputs/model-matrix-free-prev-state-1024/summary.json
+outputs/model-matrix-free-prev-state-512/summary.json
 ```

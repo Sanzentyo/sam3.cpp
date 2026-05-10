@@ -6942,6 +6942,18 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     state.orig_width = image.width;
     state.orig_height = image.height;
 
+    // The previous frame's encoder outputs are no longer needed once a new
+    // frame starts encoding. Release them before allocating the next Hiera graph
+    // so backend allocation addresses are less likely to churn between frames.
+    sam3_reset_gallocr(state.galloc);
+    sam3_reset_backend_buffer(state.buffer);
+    sam3_reset_context(state.ctx);
+    state.vit_output = nullptr;
+    for (int i = 0; i < 4; ++i) {
+        state.neck_det[i] = nullptr;
+        state.neck_trk[i] = nullptr;
+    }
+
     // ── Preprocess ───────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(hiera_encode_preprocess);
     auto img_data = sam2_preprocess_image(image, img_size, state.n_threads);

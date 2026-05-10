@@ -348,6 +348,19 @@ official Python has an empty mask at offset 8 while C++ still tracks a non-empty
 mask. The current quality task is therefore mask-selection / semantic parity,
 not just floating-point tolerance.
 
+`scripts/diagnose_sam2_initial_masks.py` now captures the official SAM2 initial
+point-prompt candidates by wrapping `_forward_sam_heads`. On the 1024 Base+
+case, official PyTorch uses `multimask_output=true` and selects candidate 0
+(`iou=0.1796875`, area `31954`, bbox `[195,87,597,565]`). The C++ benchmark can
+now emit its own initial candidates with `--output-initial-candidates-jsonl`.
+For q4_0 with `--multimask`, C++ assigns the highest IoU to candidate 2
+(`iou=0.515116`, area `15980`, bbox `[214,248,393,460]`), while candidate 0 is
+larger but lower-scored (`iou=0.433599`, area `23378`, bbox
+`[194,169,506,546]`). A f32 C++ spot-check flips the selection back to candidate
+0 (`iou=0.399207`, area `30251`, bbox `[194,96,584,558]`), much closer to the
+official selected mask. This narrows the Base+ q4_0 quality gap to multimask
+candidate scoring/selection under quantization rather than a frame-order issue.
+
 Fusing resize and normalization in preprocessing preserves the measured quality
 numbers and reduces CPU preprocessing from about `15.7 ms/frame` to
 `12.9 ms/frame` at 1024. The 1024 bbox-only tracking path improves to
@@ -847,6 +860,9 @@ outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json
 outputs/goal-audit/sam2-base-plus-cuda-vs-python.json
 outputs/quality-gap/sam2-base-plus-frame-index.json
+outputs/sam2-initial-mask-diagnostics-1024/initial_candidates.jsonl
+outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates.jsonl
+outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates_f32.jsonl
 outputs/fattn56-mma/q4_0_1024_bbox.log
 outputs/fattn56-mma/q4_0_1024_global_only_bbox.log
 outputs/fattn56-mma/q4_0_1024_window_only_bbox.log

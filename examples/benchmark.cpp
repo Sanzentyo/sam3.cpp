@@ -25,6 +25,7 @@
  *   --multimask           Use multimask output for the initial point prompt
  *   --filter <substr>     Only run models whose filename contains <substr>
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
+ *   --output-initial-candidates-jsonl <path> Write initial point-prompt candidates
  *   --output-mask-dir <path> Write first-run target masks as PNG files
  *   --no-isolation        Run in-process for profilers that do not follow fork
  */
@@ -43,7 +44,9 @@
 #include <cstring>
 #include <expected>
 #include <filesystem>
+#include <fstream>
 #include <format>
+#include <ostream>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -476,6 +479,44 @@ static void write_detection_row(FILE* out,
             mask_path.empty() ? "" : "\"");
 }
 
+static void write_initial_candidate_rows(std::ostream* out, const sam3_result& result) {
+    if (!out)
+        return;
+    for (size_t candidate_index = 0; candidate_index < result.detections.size(); ++candidate_index) {
+        const auto& det = result.detections[candidate_index];
+        uint64_t mask_hash = 1469598103934665603ULL;
+        int mask_area = 0;
+        for (uint8_t v : det.mask.data) {
+            if (v > 127)
+                mask_area++;
+            mask_hash ^= (uint64_t) v;
+            mask_hash *= 1099511628211ULL;
+        }
+        *out << std::format(
+            "{{\"source\":\"sam3cpp-initial-candidate\","
+            "\"frame_index\":0,"
+            "\"candidate_index\":{},"
+            "\"instance_id\":{},"
+            "\"bbox_xyxy\":[{:.3f},{:.3f},{:.3f},{:.3f}],"
+            "\"score\":{:.6f},"
+            "\"iou_score\":{:.6f},"
+            "\"obj_score\":{:.6f},"
+            "\"mask_area\":{},"
+            "\"mask_fnv1a64\":\"{:016x}\"}}\n",
+            candidate_index,
+            det.instance_id,
+            det.box.x0,
+            det.box.y0,
+            det.box.x1,
+            det.box.y1,
+            det.score,
+            det.iou_score,
+            det.mask.obj_score,
+            mask_area,
+            mask_hash);
+    }
+}
+
 static std::string save_detection_mask(std::string_view output_mask_dir,
                                        int offset,
                                        const sam3_result& result) {
@@ -618,6 +659,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       bool multimask,
                                       int recondition_every,
                                       const std::string& output_jsonl,
+                                      const std::string& output_initial_candidates_jsonl,
                                       const std::string& output_mask_dir,
                                       bool quiet) {
     BenchWire wire = {};
@@ -635,6 +677,15 @@ static BenchWire run_single_benchmark(const std::string& model_path,
             return wire;
         }
         out = std::move(*opened);
+    }
+
+    std::ofstream candidate_out;
+    if (!output_initial_candidates_jsonl.empty()) {
+        candidate_out.open(output_initial_candidates_jsonl);
+        if (!candidate_out) {
+            fail("open initial candidates JSONL failed");
+            return wire;
+        }
     }
 
     // Decode frames
@@ -720,10 +771,13 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     pvs.pos_points.push_back({px, py});
     pvs.multimask = multimask;
 
-    if (out) {
+    if (out || candidate_out.is_open()) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
-        const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
-        write_detection_row(out.get(), 0, 0, first, mask_path);
+        if (out) {
+            const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
+            write_detection_row(out.get(), 0, 0, first, mask_path);
+        }
+        write_initial_candidate_rows(candidate_out.is_open() ? &candidate_out : nullptr, first);
     }
 
     int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
@@ -801,6 +855,7 @@ static void child_benchmark(const std::string& model_path,
                             bool multimask,
                             int recondition_every,
                             const std::string& output_jsonl,
+                            const std::string& output_initial_candidates_jsonl,
                             const std::string& output_mask_dir,
                             bool quiet,
                             int write_fd) {
@@ -816,6 +871,7 @@ static void child_benchmark(const std::string& model_path,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
+                                          output_initial_candidates_jsonl,
                                           output_mask_dir,
                                           quiet);
     const auto bytes = std::as_bytes(std::span{&wire, 1});
@@ -839,6 +895,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           bool multimask = false,
                                           int recondition_every = 16,
                                           const std::string& output_jsonl = "",
+                                          const std::string& output_initial_candidates_jsonl = "",
                                           const std::string& output_mask_dir = "",
                                           bool quiet = false) {
     BenchResult res;
@@ -860,6 +917,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
+                                          output_initial_candidates_jsonl,
                                           output_mask_dir,
                                           quiet);
     if (wire.ok) {
@@ -908,6 +966,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                         multimask,
                         recondition_every,
                         output_jsonl,
+                        output_initial_candidates_jsonl,
                         output_mask_dir,
                         quiet,
                         write_fd);
@@ -961,6 +1020,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                         bool multimask = false,
                                         int recondition_every = 16,
                                         const std::string& output_jsonl = "",
+                                        const std::string& output_initial_candidates_jsonl = "",
                                         const std::string& output_mask_dir = "",
                                         bool quiet = false) {
     BenchResult res;
@@ -980,6 +1040,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                           multimask,
                                           recondition_every,
                                           output_jsonl,
+                                          output_initial_candidates_jsonl,
                                           output_mask_dir,
                                           quiet);
     if (wire.ok) {
@@ -1110,6 +1171,7 @@ int main(int argc, char** argv) {
     bool quiet = false;
     std::string filter;
     std::string output_jsonl;
+    std::string output_initial_candidates_jsonl;
     std::string output_mask_dir;
 
     for (int i = 1; i < argc; i++) {
@@ -1146,6 +1208,8 @@ int main(int argc, char** argv) {
             filter = argv[++i];
         } else if (arg == "--output-jsonl" && i + 1 < argc) {
             output_jsonl = argv[++i];
+        } else if (arg == "--output-initial-candidates-jsonl" && i + 1 < argc) {
+            output_initial_candidates_jsonl = argv[++i];
         } else if (arg == "--output-mask-dir" && i + 1 < argc) {
             output_mask_dir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
@@ -1165,6 +1229,7 @@ int main(int argc, char** argv) {
                 "  --multimask           Use multimask output for the initial point prompt\n"
                 "  --filter <substr>     Filter model filenames\n"
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
+                "  --output-initial-candidates-jsonl <path> Write initial point-prompt candidates\n"
                 "  --output-mask-dir <path> Write first-run target masks as PNG files\n"
                 "  --no-isolation        Run in-process for profiler capture\n"
                 "  --quiet               Suppress per-frame progress lines\n",
@@ -1176,10 +1241,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    if ((!output_jsonl.empty() || !output_mask_dir.empty()) && !(gpu_only || cpu_only)) {
+    if ((!output_jsonl.empty() || !output_initial_candidates_jsonl.empty() || !output_mask_dir.empty()) &&
+        !(gpu_only || cpu_only)) {
         fprintf(stderr,
-                "ERROR: --output-jsonl/--output-mask-dir requires --gpu-only or --cpu-only to "
-                "select one backend\n");
+                "ERROR: output JSONL/mask options require --gpu-only or --cpu-only to select one "
+                "backend\n");
         return 1;
     }
 
@@ -1286,6 +1352,7 @@ int main(int argc, char** argv) {
                                                        multimask,
                                                        recondition_every,
                                                        (i == 0) ? output_jsonl : "",
+                                                       (i == 0) ? output_initial_candidates_jsonl : "",
                                                        (i == 0) ? output_mask_dir : "",
                                                        quiet)
                                 : run_benchmark_isolated(*run.entry,
@@ -1300,6 +1367,7 @@ int main(int argc, char** argv) {
                                                          multimask,
                                                          recondition_every,
                                                          (i == 0) ? output_jsonl : "",
+                                                         (i == 0) ? output_initial_candidates_jsonl : "",
                                                          (i == 0) ? output_mask_dir : "",
                                                          quiet);
         results.push_back(res);

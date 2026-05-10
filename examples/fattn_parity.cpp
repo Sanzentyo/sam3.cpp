@@ -8,10 +8,10 @@
 #endif
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <format>
+#include <iostream>
 #include <limits>
 #include <string_view>
 #include <vector>
@@ -26,29 +26,32 @@ struct Args {
     int sample_queries = 0;
     float tolerance = 4.0e-2f;
     bool cuda = true;
+    bool show_help = false;
 };
 
 static void usage(const char* argv0) {
-    std::fprintf(stderr,
-                 "Usage: %s [--cpu|--cuda] [--d <head_dim>] [--n <tokens>] "
-                 "[--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance <f>]\n",
-                 argv0);
+    std::cerr << std::format(
+        "Usage: {} [--cpu|--cuda] [--d <head_dim>] [--n <tokens>] "
+        "[--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance <f>]\n",
+        argv0);
 }
 
 static bool parse_int(const char* s, int& out) {
-    char* end = nullptr;
-    long v = std::strtol(s, &end, 10);
-    if (!end || *end != '\0' || v <= 0 || v > std::numeric_limits<int>::max()) {
+    const std::string_view sv{s};
+    int v = 0;
+    const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+    if (ec != std::errc{} || ptr != sv.data() + sv.size() || v <= 0) {
         return false;
     }
-    out = static_cast<int>(v);
+    out = v;
     return true;
 }
 
 static bool parse_float(const char* s, float& out) {
-    char* end = nullptr;
-    float v = std::strtof(s, &end);
-    if (!end || *end != '\0' || !std::isfinite(v) || v <= 0.0f) {
+    const std::string_view sv{s};
+    float v = 0.0f;
+    const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+    if (ec != std::errc{} || ptr != sv.data() + sv.size() || !std::isfinite(v) || v <= 0.0f) {
         return false;
     }
     out = v;
@@ -60,7 +63,7 @@ static bool parse_args(int argc, char** argv, Args& args) {
         const std::string_view arg = argv[i];
         auto need_value = [&](const char* name) -> const char* {
             if (i + 1 >= argc) {
-                std::fprintf(stderr, "missing value for %s\n", name);
+                std::cerr << std::format("missing value for {}\n", name);
                 return nullptr;
             }
             return argv[++i];
@@ -101,10 +104,10 @@ static bool parse_args(int argc, char** argv, Args& args) {
                 return false;
             }
         } else if (arg == "--help" || arg == "-h") {
-            usage(argv[0]);
-            std::exit(0);
+            args.show_help = true;
+            return true;
         } else {
-            std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
+            std::cerr << std::format("unknown argument: {}\n", argv[i]);
             return false;
         }
     }
@@ -213,7 +216,7 @@ static ggml_backend_t create_backend(const Args& args) {
     }
 #else
     if (args.cuda) {
-        std::fprintf(stderr, "CUDA backend is not compiled in\n");
+        std::cerr << "CUDA backend is not compiled in\n";
         return nullptr;
     }
 #endif
@@ -262,7 +265,7 @@ static bool run_ggml_attention(const Args& args,
 
     ggml_gallocr_t alloc = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend));
     if (!ggml_gallocr_reserve(alloc, graph) || !ggml_gallocr_alloc_graph(alloc, graph)) {
-        std::fprintf(stderr, "failed to allocate graph\n");
+        std::cerr << "failed to allocate graph\n";
         ggml_gallocr_free(alloc);
         ggml_free(ctx);
         ggml_backend_free(backend);
@@ -275,7 +278,7 @@ static bool run_ggml_attention(const Args& args,
 
     const ggml_status status = ggml_backend_graph_compute(backend, graph);
     if (status != GGML_STATUS_SUCCESS) {
-        std::fprintf(stderr, "graph compute failed: %s\n", ggml_status_to_string(status));
+        std::cerr << std::format("graph compute failed: {}\n", ggml_status_to_string(status));
         ggml_gallocr_free(alloc);
         ggml_free(ctx);
         ggml_backend_free(backend);
@@ -299,6 +302,10 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 2;
     }
+    if (args.show_help) {
+        usage(argv[0]);
+        return 0;
+    }
 
     const size_t elements = static_cast<size_t>(args.d) * args.n * args.heads * args.batch;
     auto q = make_input(elements, 1);
@@ -317,7 +324,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (got.size() != ref.size()) {
-        std::fprintf(stderr, "size mismatch: got=%zu ref=%zu\n", got.size(), ref.size());
+        std::cerr << std::format("size mismatch: got={} ref={}\n", got.size(), ref.size());
         return 1;
     }
 
@@ -347,28 +354,30 @@ int main(int argc, char** argv) {
     }
     mean_abs /= static_cast<double>(checked);
 
-    std::printf("backend=%s D=%d N=%d heads=%d batch=%d sampled_q=%zu max_abs=%.9g mean_abs=%.9g bad=%zu/%zu max_i=%zu\n",
-                args.cuda ? "CUDA" : "CPU",
-                args.d,
-                args.n,
-                args.heads,
-                args.batch,
-                query_indices.size(),
-                max_abs,
-                mean_abs,
-                bad,
-                checked,
-                max_i);
+    std::cout << std::format(
+        "backend={} D={} N={} heads={} batch={} sampled_q={} max_abs={:.9g} "
+        "mean_abs={:.9g} bad={}/{} max_i={}\n",
+        args.cuda ? "CUDA" : "CPU",
+        args.d,
+        args.n,
+        args.heads,
+        args.batch,
+        query_indices.size(),
+        max_abs,
+        mean_abs,
+        bad,
+        checked,
+        max_i);
 
     if (bad != 0) {
-        std::fprintf(stderr,
-                     "parity failed: max_abs %.9g exceeds tolerance %.9g at index %zu "
-                     "(got %.9g ref %.9g)\n",
-                     max_abs,
-                     args.tolerance,
-                     max_i,
-                     got[max_i],
-                     ref[max_i]);
+        std::cerr << std::format(
+            "parity failed: max_abs {:.9g} exceeds tolerance {:.9g} at index {} "
+            "(got {:.9g} ref {:.9g})\n",
+            max_abs,
+            args.tolerance,
+            max_i,
+            got[max_i],
+            ref[max_i]);
         return 1;
     }
     return 0;

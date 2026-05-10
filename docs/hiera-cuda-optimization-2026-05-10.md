@@ -426,6 +426,13 @@ was not meaningful: bbox-only was `94.4 -> 93.7 ms/frame` in a single A/B pair
 and full-mask stayed `94.1 -> 94.1 ms/frame`. This was reverted and is not a
 priority unless a larger paired run shows a real effect.
 
+Changing CPU resize weights and bilinear math from `double` to `float` also
+preserved full-mask parity (`mask_hash_equal_rows=10/10`), but did not speed up
+preprocessing on the same 5-frame 1024 profile. `hiera_encode_preprocess` was
+`8.60 ms` with the default double path and `8.74 ms` with the float path, so this
+was reverted. The next preprocessing optimization should be a real GPU
+resize/normalize/upload path, not scalar type tuning inside the CPU loop.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -557,4 +564,7 @@ outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
 outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 outputs/fattn56-nbatch64/fullmask_parity.json
+outputs/preprocess-float-resize/fullmask_parity.json
+outputs/preprocess-float-resize/default_profile_summary.json
+outputs/preprocess-float-resize/float_profile_summary.json
 ```

@@ -242,7 +242,9 @@ Rejected follow-up experiments:
   `ggml_flash_attn_ext` gave a small single-run 1024 bbox-only speed improvement
   (`89.3 -> 84.7 ms/frame`) but broke full-mask parity against the default path:
   `mask_hash_equal_rows=0/10`, `min_bbox_iou=0.0111`, and
-  `max_score_abs_delta=0.4663`. This is not an acceptable optimization.
+  `max_score_abs_delta=0.4663`. Splitting the experiment into global-only and
+  window-only attention did not recover parity either (`mask_hash_equal_rows=0/10`
+  for both). This is not an acceptable optimization.
 
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
@@ -722,6 +724,8 @@ outputs/hiera-free-prev-state/q8_0_1024_summary.json
 outputs/fattn56-nbatchK28/q4_0_512_summary.json
 outputs/fattn56-nbatchK28/q4_0_1024_summary.json
 outputs/hiera-pad-head64/pad64_1024_parity.json
+outputs/hiera-pad-head64/global_1024_parity.json
+outputs/hiera-pad-head64/window_1024_parity.json
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 outputs/model-matrix-free-prev-state-1024-trackrange/summary.json

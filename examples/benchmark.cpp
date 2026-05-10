@@ -22,6 +22,7 @@
  *   --cpu-only            Skip GPU runs
  *   --gpu-only            Skip CPU runs
  *   --bbox-only           Track/output bbox rows without full-res masks
+ *   --multimask           Use multimask output for the initial point prompt
  *   --filter <substr>     Only run models whose filename contains <substr>
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
  *   --output-mask-dir <path> Write first-run target masks as PNG files
@@ -43,6 +44,7 @@
 #include <expected>
 #include <filesystem>
 #include <format>
+#include <ranges>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -348,6 +350,13 @@ static double percentile(std::vector<double> values, double p) {
     return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
+static const sam3_detection* best_detection(const sam3_result& result) {
+    if (result.detections.empty())
+        return nullptr;
+    return &*std::ranges::max_element(
+        result.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
+}
+
 static void write_detection_row(FILE* out,
                                 int offset,
                                 int expected_frame_index,
@@ -365,7 +374,10 @@ static void write_detection_row(FILE* out,
                 expected_frame_index);
         return;
     }
-    const auto& det = result.detections[0];
+    const auto* best = best_detection(result);
+    if (!best)
+        return;
+    const auto& det = *best;
     uint64_t mask_hash = 1469598103934665603ULL;
     int mask_area = 0;
     for (uint8_t v : det.mask.data) {
@@ -397,15 +409,15 @@ static void write_detection_row(FILE* out,
 static std::string save_detection_mask(std::string_view output_mask_dir,
                                        int offset,
                                        const sam3_result& result) {
-    if (output_mask_dir.empty() || result.detections.empty() ||
-        result.detections[0].mask.data.empty()) {
+    const auto* det = best_detection(result);
+    if (output_mask_dir.empty() || !det || det->mask.data.empty()) {
         return {};
     }
 
     std::filesystem::create_directories(std::filesystem::path{output_mask_dir});
     const auto path =
         std::filesystem::path{output_mask_dir} / std::format("frame_{:05d}.png", offset);
-    if (!sam3_save_mask(result.detections[0].mask, path.string())) {
+    if (!sam3_save_mask(det->mask, path.string())) {
         return {};
     }
     return path.string();
@@ -533,6 +545,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       int n_threads,
                                       int encode_img_size,
                                       bool bbox_only,
+                                      bool multimask,
                                       int recondition_every,
                                       const std::string& output_jsonl,
                                       const std::string& output_mask_dir) {
@@ -618,7 +631,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
 
     sam3_pvs_params pvs;
     pvs.pos_points.push_back({px, py});
-    pvs.multimask = false;
+    pvs.multimask = multimask;
 
     if (out) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
@@ -696,6 +709,7 @@ static void child_benchmark(const std::string& model_path,
                             int n_threads,
                             int encode_img_size,
                             bool bbox_only,
+                            bool multimask,
                             int recondition_every,
                             const std::string& output_jsonl,
                             const std::string& output_mask_dir,
@@ -709,6 +723,7 @@ static void child_benchmark(const std::string& model_path,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
+                                          multimask,
                                           recondition_every,
                                           output_jsonl,
                                           output_mask_dir);
@@ -730,6 +745,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           int n_threads,
                                           int encode_img_size = 0,
                                           bool bbox_only = false,
+                                          bool multimask = false,
                                           int recondition_every = 16,
                                           const std::string& output_jsonl = "",
                                           const std::string& output_mask_dir = "") {
@@ -749,6 +765,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
+                                          multimask,
                                           recondition_every,
                                           output_jsonl,
                                           output_mask_dir);
@@ -795,6 +812,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
                         n_threads,
                         encode_img_size,
                         bbox_only,
+                        multimask,
                         recondition_every,
                         output_jsonl,
                         output_mask_dir,
@@ -846,6 +864,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                         int n_threads,
                                         int encode_img_size = 0,
                                         bool bbox_only = false,
+                                        bool multimask = false,
                                         int recondition_every = 16,
                                         const std::string& output_jsonl = "",
                                         const std::string& output_mask_dir = "") {
@@ -863,6 +882,7 @@ static BenchResult run_benchmark_direct(const ModelEntry& entry,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
+                                          multimask,
                                           recondition_every,
                                           output_jsonl,
                                           output_mask_dir);
@@ -989,6 +1009,7 @@ int main(int argc, char** argv) {
     bool cpu_only = false;
     bool gpu_only = false;
     bool bbox_only = false;
+    bool multimask = false;
     bool no_isolation = false;
     std::string filter;
     std::string output_jsonl;
@@ -1018,6 +1039,8 @@ int main(int argc, char** argv) {
             gpu_only = true;
         } else if (arg == "--bbox-only") {
             bbox_only = true;
+        } else if (arg == "--multimask") {
+            multimask = true;
         } else if (arg == "--no-isolation") {
             no_isolation = true;
         } else if (arg == "--filter" && i + 1 < argc) {
@@ -1040,6 +1063,7 @@ int main(int argc, char** argv) {
                 "  --cpu-only            Skip GPU runs\n"
                 "  --gpu-only            Skip CPU runs\n"
                 "  --bbox-only           Track/output bbox rows without full-res masks\n"
+                "  --multimask           Use multimask output for the initial point prompt\n"
                 "  --filter <substr>     Filter model filenames\n"
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
                 "  --output-mask-dir <path> Write first-run target masks as PNG files\n"
@@ -1159,6 +1183,7 @@ int main(int argc, char** argv) {
                                                        n_threads,
                                                        encode_img_size,
                                                        bbox_only,
+                                                       multimask,
                                                        recondition_every,
                                                        (i == 0) ? output_jsonl : "",
                                                        (i == 0) ? output_mask_dir : "")
@@ -1171,6 +1196,7 @@ int main(int argc, char** argv) {
                                                          n_threads,
                                                          encode_img_size,
                                                          bbox_only,
+                                                         multimask,
                                                          recondition_every,
                                                          (i == 0) ? output_jsonl : "",
                                                          (i == 0) ? output_mask_dir : "");

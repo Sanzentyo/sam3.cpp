@@ -12255,6 +12255,11 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     ggml_set_output(dec_out.iou_pred);
     ggml_set_output(dec_out.obj_score);
     ggml_set_output(dec_out.sam_token);
+    const bool need_mask_tokens =
+        params.multimask && hp.use_multimask_token_for_obj_ptr && dec_out.mask_tokens;
+    if (need_mask_tokens) {
+        ggml_set_output(dec_out.mask_tokens);
+    }
 
     // ── Build and allocate graph ─────────────────────────────────────────
     struct ggml_cgraph* graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
@@ -12262,6 +12267,9 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     ggml_build_forward_expand(graph, dec_out.iou_pred);
     ggml_build_forward_expand(graph, dec_out.obj_score);
     ggml_build_forward_expand(graph, dec_out.sam_token);
+    if (need_mask_tokens) {
+        ggml_build_forward_expand(graph, dec_out.mask_tokens);
+    }
 
     auto galloc = make_ggml_gallocr(model.backend);
     if (!reserve_and_alloc_graph(galloc.get(), graph)) {
@@ -12459,6 +12467,15 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     ggml_backend_tensor_get(
         dec_out.sam_token, sam_token_data.data(), 0, sam_token_data.size() * sizeof(float));
 
+    std::vector<float> mask_tokens_data;
+    if (need_mask_tokens) {
+        mask_tokens_data.resize(sam3_count_mul(num_mask_tokens, D));
+        ggml_backend_tensor_get(dec_out.mask_tokens,
+                                mask_tokens_data.data(),
+                                0,
+                                mask_tokens_data.size() * sizeof(float));
+    }
+
     SAM3_LOG(2,
              "%s: obj_score=%.4f (logit=%.4f), iou=[%.3f, %.3f, %.3f, %.3f]\n",
              __func__,
@@ -12477,7 +12494,13 @@ sam3_result sam3_segment_pvs(sam3_state& state,
 
     for (int m = start_idx; m < end_idx; ++m) {
         sam3_detection det{};
-        det.sam_token = sam_token_data;
+        if (mask_tokens_data.empty()) {
+            det.sam_token = sam_token_data;
+        } else {
+            const auto first =
+                mask_tokens_data.begin() + static_cast<ptrdiff_t>(sam3_count_mul(m, D));
+            det.sam_token.assign(first, first + D);
+        }
 
         // Resize mask from 288×288 to original image size
         const float* mask_ptr =
@@ -13689,7 +13712,8 @@ bool sam3_refine_instance(sam3_tracker& tracker,
     // tracker.frame_index points to the *next* frame; the refinement applies
     // to the frame that was last tracked / encoded.
     int fi = std::max(0, tracker.frame_index - 1);
-    const auto& rdet = r.detections[0];
+    const auto& rdet = *std::ranges::max_element(
+        r.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
     tgt->last_score = rdet.score;
     tgt->last_seen = fi;
     std::vector<float> op(D);
@@ -13717,7 +13741,8 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
         return -1;
     }
 
-    const auto& det = r.detections[0];
+    const auto& det = *std::ranges::max_element(
+        r.detections, {}, [](const sam3_detection& detection) { return detection.iou_score; });
     if (det.mask.data.empty()) {
         fprintf(stderr, "%s: PVS mask is empty\n", __func__);
         return -1;

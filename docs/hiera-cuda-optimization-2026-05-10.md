@@ -93,6 +93,27 @@ This is not quality parity. The official SAM2 mask selected by the same point is
 much larger than the current C++ mask. PyTorch-level speed is not sufficient by
 itself until this semantic mismatch is understood.
 
+Precision does not explain the quality gap. Re-running the same default 1024
+comparison across Base+ precisions gives nearly identical low IoU:
+
+| Model | C++ track ms/frame | Mean mask IoU | Min mask IoU | PyTorch ms/frame |
+| --- | ---: | ---: | ---: | ---: |
+| `sam2.1_hiera_base_plus_f32` | 147 | 0.0185 | 0.0000 | 43.3 |
+| `sam2.1_hiera_base_plus_f16` | 148 | 0.0185 | 0.0000 | 43.4 |
+| `sam2.1_hiera_base_plus_q8_0` | 135 | 0.0179 | 0.0000 | 43.4 |
+| `sam2.1_hiera_base_plus_q4_0` | 135 | 0.0197 | 0.0000 | 43.6 |
+
+An experimental C++ `--multimask` initial prompt path was also tested. It
+selects the highest predicted IoU mask among SAM mask tokens 1..3 and uses the
+matching mask token for the tracker object pointer. This did not fix 1024
+parity:
+
+| Mode | Encode size | C++ track ms/frame | Mean mask IoU | Min mask IoU |
+| --- | ---: | ---: | ---: | ---: |
+| single-mask prompt | 1024 | 135-140 | 0.0197 | 0.0000 |
+| multimask prompt | 1024 | 134 | 0.0321 | 0.0000 |
+| multimask prompt | 512 | 39 | 0.1822 | 0.1394 |
+
 At `--encode-img-size 512`, C++ reaches `34.4 ms/frame`. The initial comparison
 was against the default official PyTorch 1024 run and was therefore not a fair
 speed baseline. Re-running official PyTorch with `model.image_size=512` gives
@@ -113,7 +134,9 @@ size:
 
 1. Fix or explain the SAM2 point-prompt quality gap against official PyTorch.
    The current C++ mask is not a faithful substitute for the official model on
-   this sample.
+   this sample. The f32/f16/q8/q4 sweep shows this is not primarily a
+   quantization issue, and the multimask prompt experiment does not close the
+   gap at 1024.
 2. Reduce Hiera encode graph compute. After caching fixed PE, the remaining
    dominant steady-state cost is the 80-90 ms ggml CUDA graph compute.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
@@ -136,4 +159,10 @@ outputs/sam2-official-quality-10/python-official.log
 outputs/hiera-encode-size-sweep/base_plus_q4_0_512.log
 outputs/sam2-official-quality-512/summary.json
 outputs/sam2-official-quality-512-same-res/summary.json
+outputs/sam2-official-quality-10-precision-f32/summary.json
+outputs/sam2-official-quality-10-precision-f16/summary.json
+outputs/sam2-official-quality-10-precision-q8_0/summary.json
+outputs/sam2-official-quality-10-precision-q4_0/summary.json
+outputs/sam2-official-quality-10-multimask-fullmask/summary.json
+outputs/sam2-official-quality-512-multimask-fullmask-same-res/summary.json
 ```

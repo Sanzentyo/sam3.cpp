@@ -19,6 +19,9 @@ path can be treated as a Rust-wrapper baseline.
   validation in the official SAM2 comparison script so decoded input
   resolution, frame count, prompt, and effective encode size are checked before
   interpreting C++ vs PyTorch quality results.
+- Cached the Hiera positional embedding as a backend tensor. Steady-state
+  frames now copy the cached device tensor into the graph input instead of
+  uploading the same 4 MiB CPU buffer every frame.
 
 ## Performance
 
@@ -39,6 +42,7 @@ a scaling study rather than a cross-implementation win/loss comparison.
 | After `head_dim=56` FA tile | 120.1 | 119.0 | 127.1 | avoids fallback attention for Base+ |
 | After fused preprocess | 117.4 | 115.4 | 128.3 | resize and normalize in one pass |
 | After gating debug tensor outputs | 116.6 | 115.8 | 126.2 | removes nonessential debug graph outputs unless requested |
+| After Hiera PE backend cache | 113.6 | 113.8 | 121.6 | avoids repeated CPU upload of Hiera positional embedding |
 
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
@@ -131,6 +135,14 @@ debug-only Hiera/FPN graph outputs behind `SAM3_DEBUG_TENSORS` or
 `116.6 ms/frame`, so it should be treated as graph cleanup rather than a major
 speedup.
 
+Caching the Hiera positional embedding as a backend tensor removes the repeated
+CPU-to-device upload from steady-state frames. In the profile run,
+`hiera_encode_pos_embed_backend_copy` is about `0.09 ms/frame`, replacing the
+previous roughly `1.9 ms/frame` upload. The 1024 bbox-only tracking run improves
+to `113.6 ms/frame`. Full-mask parity against the previous output is exact on
+the 10-frame sample: `mask_hash_equal_rows=10`, `min_bbox_iou=1.0`, and
+`max_score_abs_delta=0.0`.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -220,4 +232,6 @@ outputs/debug-output-gated/summary.json
 outputs/metadata-jsonl-check/cpp.jsonl
 outputs/sam2-official-quality-10-metadata-q4_0/summary.json
 outputs/sam2-official-quality-512-metadata-q4_0/summary.json
+outputs/hiera-pos-backend-cache/summary.json
+outputs/hiera-pos-backend-cache/parity.json
 ```

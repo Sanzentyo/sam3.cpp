@@ -1140,6 +1140,9 @@ struct sam3_state {
     int sam2_cached_hiera_pos_h = 0;
     int sam2_cached_hiera_pos_w = 0;
     std::vector<float> sam2_cached_hiera_pos_embed;
+    struct ggml_context* sam2_hiera_pos_ctx = nullptr;
+    ggml_backend_buffer_t sam2_hiera_pos_buf = nullptr;
+    struct ggml_tensor* sam2_hiera_pos_tensor = nullptr;
 
     std::array<int, 4> sam2_cached_neck_pe_h = {};
     std::array<int, 4> sam2_cached_neck_pe_w = {};
@@ -4007,9 +4010,16 @@ static void sam3_clear_prompt_backend_cache(sam3_state& state) {
     state.not_a_point_tensor = nullptr;
 }
 
+static void sam3_clear_hiera_pos_backend_cache(sam3_state& state) {
+    sam3_reset_backend_buffer(state.sam2_hiera_pos_buf);
+    sam3_reset_context(state.sam2_hiera_pos_ctx);
+    state.sam2_hiera_pos_tensor = nullptr;
+}
+
 void sam3_free_state(sam3_state& state) {
     sam3_reset_gallocr(state.galloc);
     sam3_clear_prompt_backend_cache(state);
+    sam3_clear_hiera_pos_backend_cache(state);
     sam3_reset_backend_buffer(state.buffer);
     sam3_reset_backend_buffer(state.pe_buf);
     sam3_reset_context(state.pe_ctx);
@@ -6696,8 +6706,10 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     {
         int pe_H = img_size / 4;
         int pe_W = img_size / 4;
-        if (state.sam2_cached_hiera_pos_embed.empty() || state.sam2_cached_hiera_pos_h != pe_H ||
-            state.sam2_cached_hiera_pos_w != pe_W) {
+        const bool cpu_cache_valid = !state.sam2_cached_hiera_pos_embed.empty() &&
+                                     state.sam2_cached_hiera_pos_h == pe_H &&
+                                     state.sam2_cached_hiera_pos_w == pe_W;
+        if (!cpu_cache_valid) {
             SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_compute);
             state.sam2_cached_hiera_pos_embed = sam2_compute_pos_embed(model, pe_H, pe_W);
             state.sam2_cached_hiera_pos_h = pe_H;
@@ -6707,13 +6719,56 @@ static bool sam2_encode_image_hiera(sam3_state& state,
             SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_cache_hit);
             SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_cache_hit);
         }
+
+        const bool backend_cache_valid = state.sam2_hiera_pos_ctx != nullptr &&
+                                         state.sam2_hiera_pos_buf != nullptr &&
+                                         state.sam2_hiera_pos_tensor != nullptr &&
+                                         state.sam2_hiera_pos_tensor->ne[0] == hp.hiera_embed_dim &&
+                                         state.sam2_hiera_pos_tensor->ne[1] == pe_W &&
+                                         state.sam2_hiera_pos_tensor->ne[2] == pe_H;
+        if (!backend_cache_valid) {
+            sam3_clear_hiera_pos_backend_cache(state);
+
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_ctx_build);
+            struct ggml_init_params pe_pos_params = {
+                .mem_size = ggml_tensor_overhead() + 256,
+                .mem_buffer = nullptr,
+                .no_alloc = true,
+            };
+            state.sam2_hiera_pos_ctx = ggml_init(pe_pos_params);
+            if (!state.sam2_hiera_pos_ctx) {
+                fprintf(stderr, "%s: failed to init Hiera pos cache context\n", __func__);
+                return false;
+            }
+            state.sam2_hiera_pos_tensor = ggml_new_tensor_4d(
+                state.sam2_hiera_pos_ctx, GGML_TYPE_F32, hp.hiera_embed_dim, pe_W, pe_H, 1);
+            ggml_set_name(state.sam2_hiera_pos_tensor, "hiera_pos_embed_cache");
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_ctx_build);
+
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_alloc);
+            state.sam2_hiera_pos_buf =
+                ggml_backend_alloc_ctx_tensors(state.sam2_hiera_pos_ctx, model.backend);
+            if (!state.sam2_hiera_pos_buf) {
+                fprintf(stderr, "%s: failed to alloc Hiera pos cache buffer\n", __func__);
+                return false;
+            }
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_alloc);
+
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_upload);
+            ggml_backend_tensor_set(state.sam2_hiera_pos_tensor,
+                                    state.sam2_cached_hiera_pos_embed.data(),
+                                    0,
+                                    state.sam2_cached_hiera_pos_embed.size() * sizeof(float));
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_upload);
+        } else {
+            SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_cache_hit);
+            SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_cache_hit);
+        }
+
         auto* pe_tensor = ggml_graph_get_tensor(graph, "hiera_pos_embed");
-        SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_upload);
-        ggml_backend_tensor_set(pe_tensor,
-                                state.sam2_cached_hiera_pos_embed.data(),
-                                0,
-                                state.sam2_cached_hiera_pos_embed.size() * sizeof(float));
-        SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_upload);
+        SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_copy);
+        ggml_backend_tensor_copy(state.sam2_hiera_pos_tensor, pe_tensor);
+        SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_copy);
     }
 
     // Compute

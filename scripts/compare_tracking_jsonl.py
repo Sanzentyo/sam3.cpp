@@ -15,6 +15,10 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
 
 
+def detection_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if "offset" in row and row.get("source") != "sam3cpp-meta"]
+
+
 def bbox_iou(lhs: list[float], rhs: list[float]) -> float:
     ax0, ay0, ax1, ay1 = lhs
     bx0, by0, bx1, by1 = rhs
@@ -65,8 +69,8 @@ def main() -> int:
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
-    lhs_rows = read_jsonl(args.lhs)
-    rhs_rows = read_jsonl(args.rhs)
+    lhs_rows = detection_rows(read_jsonl(args.lhs))
+    rhs_rows = detection_rows(read_jsonl(args.rhs))
     rows = [compare_rows(lhs, rhs) for lhs, rhs in zip(lhs_rows, rhs_rows, strict=False)]
     if len(lhs_rows) != len(rhs_rows):
         rows.append({"row_count_delta": [len(lhs_rows), len(rhs_rows)]})

@@ -47,6 +47,7 @@
 #include <fstream>
 #include <format>
 #include <ostream>
+#include <print>
 #include <ranges>
 #include <string>
 #include <string_view>
@@ -109,23 +110,19 @@ struct BenchResult {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 static std::string format_size(int64_t bytes) {
-    char buf[32];
     if (bytes >= (int64_t) 1024 * 1024 * 1024) {
-        snprintf(buf, sizeof(buf), "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0));
-    } else if (bytes >= (int64_t) 1024 * 1024) {
-        snprintf(buf, sizeof(buf), "%lld MB", (long long) (bytes / (1024 * 1024)));
-    } else {
-        snprintf(buf, sizeof(buf), "%lld KB", (long long) (bytes / 1024));
+        return std::format("{:.1f} GB", bytes / (1024.0 * 1024.0 * 1024.0));
     }
-    return buf;
+    if (bytes >= (int64_t) 1024 * 1024) {
+        return std::format("{} MB", bytes / (1024 * 1024));
+    }
+    return std::format("{} KB", bytes / 1024);
 }
 
 static std::string format_time_short(double ms) {
     if (ms < 0)
         return "  -";
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%.1f", ms);
-    return buf;
+    return std::format("{:.1f}", ms);
 }
 
 #ifndef _WIN32
@@ -264,51 +261,6 @@ static bool read_full(int fd, std::span<std::byte> bytes) {
 }
 #endif
 
-class FileHandle {
-public:
-    FileHandle() = default;
-
-    explicit FileHandle(FILE* file) : file_(file) {}
-
-    FileHandle(const FileHandle&) = delete;
-    FileHandle& operator=(const FileHandle&) = delete;
-
-    FileHandle(FileHandle&& other) noexcept : file_(std::exchange(other.file_, nullptr)) {}
-
-    FileHandle& operator=(FileHandle&& other) noexcept {
-        if (this != &other) {
-            reset();
-            file_ = std::exchange(other.file_, nullptr);
-        }
-        return *this;
-    }
-
-    ~FileHandle() { reset(); }
-
-    [[nodiscard]] FILE* get() const noexcept { return file_; }
-
-    [[nodiscard]] explicit operator bool() const noexcept { return file_ != nullptr; }
-
-    void reset(FILE* file = nullptr) noexcept {
-        if (file_) {
-            fclose(file_);
-        }
-        file_ = file;
-    }
-
-    [[nodiscard]] static std::expected<FileHandle, std::string> open_write(std::string_view path) {
-        std::string owned_path{path};
-        FILE* file = fopen(owned_path.c_str(), "w");
-        if (!file) {
-            return std::unexpected("open output_jsonl failed");
-        }
-        return FileHandle{file};
-    }
-
-private:
-    FILE* file_ = nullptr;
-};
-
 static bool ends_with(std::string_view s, std::string_view suffix) {
     if (suffix.size() > s.size())
         return false;
@@ -388,7 +340,7 @@ static std::string json_escape(std::string_view value) {
     return out;
 }
 
-static void write_metadata_row(FILE* out,
+static void write_metadata_row(std::ostream* out,
                                const std::string& model_path,
                                std::string_view backend,
                                const std::string& video_path,
@@ -405,32 +357,32 @@ static void write_metadata_row(FILE* out,
     const std::string model_path_json = json_escape(model_path);
     const std::string backend_json = json_escape(backend);
     const std::string video_path_json = json_escape(video_path);
-    fprintf(out,
-            "{\"source\":\"sam3cpp-meta\","
-            "\"model_path\":\"%s\","
-            "\"backend\":\"%s\","
-            "\"video_path\":\"%s\","
-            "\"decoded_width\":%d,\"decoded_height\":%d,"
-            "\"frames\":%d,"
-            "\"point_x\":%.6f,\"point_y\":%.6f,"
-            "\"encode_img_size_requested\":%d,"
-            "\"encode_img_size_effective\":%d,"
-            "\"bbox_only\":%s,\"multimask\":%s}\n",
-            model_path_json.c_str(),
-            backend_json.c_str(),
-            video_path_json.c_str(),
-            first_frame.width,
-            first_frame.height,
-            n_frames,
-            px,
-            py,
-            requested_encode_img_size,
-            effective_encode_img_size,
-            bbox_only ? "true" : "false",
-            multimask ? "true" : "false");
+    *out << std::format(
+        "{{\"source\":\"sam3cpp-meta\","
+        "\"model_path\":\"{}\","
+        "\"backend\":\"{}\","
+        "\"video_path\":\"{}\","
+        "\"decoded_width\":{},\"decoded_height\":{},"
+        "\"frames\":{},"
+        "\"point_x\":{:.6f},\"point_y\":{:.6f},"
+        "\"encode_img_size_requested\":{},"
+        "\"encode_img_size_effective\":{},"
+        "\"bbox_only\":{},\"multimask\":{}}}\n",
+        model_path_json,
+        backend_json,
+        video_path_json,
+        first_frame.width,
+        first_frame.height,
+        n_frames,
+        px,
+        py,
+        requested_encode_img_size,
+        effective_encode_img_size,
+        bbox_only,
+        multimask);
 }
 
-static void write_detection_row(FILE* out,
+static void write_detection_row(std::ostream* out,
                                 int offset,
                                 int expected_frame_index,
                                 const sam3_result& result,
@@ -438,13 +390,13 @@ static void write_detection_row(FILE* out,
     if (!out)
         return;
     if (result.detections.empty()) {
-        fprintf(out,
-                "{\"offset\":%d,\"expected_frame_index\":%d,\"bbox_xyxy\":null,"
-                "\"score\":0,\"mask_area\":0,\"mask_fnv1a64\":\"0000000000000000\","
-                "\"mask_path\":null,"
-                "\"source\":\"sam3cpp-missing\"}\n",
-                offset,
-                expected_frame_index);
+        *out << std::format(
+            "{{\"offset\":{},\"expected_frame_index\":{},\"bbox_xyxy\":null,"
+            "\"score\":0,\"mask_area\":0,\"mask_fnv1a64\":\"0000000000000000\","
+            "\"mask_path\":null,"
+            "\"source\":\"sam3cpp-missing\"}}\n",
+            offset,
+            expected_frame_index);
         return;
     }
     const auto* best = best_detection(result);
@@ -459,24 +411,25 @@ static void write_detection_row(FILE* out,
         mask_hash ^= (uint64_t) v;
         mask_hash *= 1099511628211ULL;
     }
-    fprintf(out,
-            "{\"offset\":%d,\"expected_frame_index\":%d,"
-            "\"bbox_xyxy\":[%.3f,%.3f,%.3f,%.3f],\"score\":%.6f,"
-            "\"mask_area\":%d,\"mask_fnv1a64\":\"%016llx\","
-            "\"mask_path\":%s%s%s,"
-            "\"source\":\"sam3cpp-edgetam\"}\n",
-            offset,
-            expected_frame_index,
-            det.box.x0,
-            det.box.y0,
-            det.box.x1,
-            det.box.y1,
-            det.score,
-            mask_area,
-            (unsigned long long) mask_hash,
-            mask_path.empty() ? "" : "\"",
-            mask_path.empty() ? "null" : std::string{mask_path}.c_str(),
-            mask_path.empty() ? "" : "\"");
+    const std::string mask_path_json = mask_path.empty()
+                                           ? "null"
+                                           : std::format("\"{}\"", json_escape(mask_path));
+    *out << std::format(
+        "{{\"offset\":{},\"expected_frame_index\":{},"
+        "\"bbox_xyxy\":[{:.3f},{:.3f},{:.3f},{:.3f}],\"score\":{:.6f},"
+        "\"mask_area\":{},\"mask_fnv1a64\":\"{:016x}\","
+        "\"mask_path\":{},"
+        "\"source\":\"sam3cpp-edgetam\"}}\n",
+        offset,
+        expected_frame_index,
+        det.box.x0,
+        det.box.y0,
+        det.box.x1,
+        det.box.y1,
+        det.score,
+        mask_area,
+        mask_hash,
+        mask_path_json);
 }
 
 static void write_initial_candidate_rows(std::ostream* out, const sam3_result& result) {
@@ -587,7 +540,7 @@ static std::vector<ModelEntry> discover_models(const std::string& dir, const std
     WIN32_FIND_DATAA fd;
     HANDLE hFind = FindFirstFileA(pattern.c_str(), &fd);
     if (hFind == INVALID_HANDLE_VALUE) {
-        fprintf(stderr, "ERROR: cannot open models directory '%s'\n", dir.c_str());
+        std::print(stderr, "ERROR: cannot open models directory '{}'\n", dir);
         return entries;
     }
     do {
@@ -614,7 +567,7 @@ static std::vector<ModelEntry> discover_models(const std::string& dir, const std
 #else
     auto opened_dir = DirHandle::open(dir);
     if (!opened_dir) {
-        fprintf(stderr, "ERROR: cannot open models directory '%s'\n", dir.c_str());
+        std::print(stderr, "ERROR: cannot open models directory '{}'\n", dir);
         return entries;
     }
     DirHandle d = std::move(*opened_dir);
@@ -664,19 +617,24 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       bool quiet) {
     BenchWire wire = {};
 
-    auto fail = [&](const char* msg) {
-        wire.ok = 0;
-        snprintf(wire.error.data(), wire.error.size(), "%s", msg);
+    auto set_wire_string = [](auto& dst, std::string_view value) {
+        const size_t n = std::min(dst.size() - 1, value.size());
+        std::ranges::copy(value.substr(0, n), dst.begin());
+        dst[n] = '\0';
     };
 
-    FileHandle out;
+    auto fail = [&](std::string_view msg) {
+        wire.ok = 0;
+        set_wire_string(wire.error, msg);
+    };
+
+    std::ofstream out;
     if (!output_jsonl.empty()) {
-        auto opened = FileHandle::open_write(output_jsonl);
-        if (!opened) {
-            fail(opened.error().c_str());
+        out.open(output_jsonl);
+        if (!out) {
+            fail("open output_jsonl failed");
             return wire;
         }
-        out = std::move(*opened);
     }
 
     std::ofstream candidate_out;
@@ -712,11 +670,11 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         fail("load failed");
         return wire;
     }
-    snprintf(wire.backend.data(), wire.backend.size(), "%s", sam3_backend_name(*model));
-    if (out) {
+    set_wire_string(wire.backend, sam3_backend_name(*model));
+    if (out.is_open()) {
         const int effective_encode_img_size =
             (encode_img_size > 0) ? encode_img_size : sam3_model_image_size(*model);
-        write_metadata_row(out.get(),
+        write_metadata_row(&out,
                            model_path,
                            sam3_backend_name(*model),
                            video_path,
@@ -771,11 +729,11 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     pvs.pos_points.push_back({px, py});
     pvs.multimask = multimask;
 
-    if (out || candidate_out.is_open()) {
+    if (out.is_open() || candidate_out.is_open()) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
-        if (out) {
+        if (out.is_open()) {
             const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
-            write_detection_row(out.get(), 0, 0, first, mask_path);
+            write_detection_row(&out, 0, 0, first, mask_path);
         }
         write_initial_candidate_rows(candidate_out.is_open() ? &candidate_out : nullptr, first);
     }
@@ -802,7 +760,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
             last_result = sam3_track_frame(*tracker, *state, *model, frames[f]);
         }
         const auto mask_path = save_detection_mask(output_mask_dir, f, last_result);
-        write_detection_row(out.get(), f, f, last_result, mask_path);
+        write_detection_row(out.is_open() ? &out : nullptr, f, f, last_result, mask_path);
 
         double dt = (ggml_time_us() - t0) / 1000.0;
         t_track_sum += dt;
@@ -810,12 +768,12 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         wire.n_track_frames++;
 
         if (!quiet) {
-            fprintf(stderr,
-                    "    frame %d/%d  %.0f ms  (%zu det)\n",
-                    f,
-                    n_frames - 1,
-                    dt,
-                    last_result.detections.size());
+            std::print(stderr,
+                       "    frame {}/{}  {:.0f} ms  ({} det)\n",
+                       f,
+                       n_frames - 1,
+                       dt,
+                       last_result.detections.size());
         }
     }
 
@@ -876,7 +834,7 @@ static void child_benchmark(const std::string& model_path,
                                           quiet);
     const auto bytes = std::as_bytes(std::span{&wire, 1});
     if (!write_full(write_fd, bytes)) {
-        fprintf(stderr, "child_benchmark: failed to write result pipe\n");
+        std::print(stderr, "child_benchmark: failed to write result pipe\n");
     }
     close(write_fd);
     _exit(wire.ok ? 0 : 1);
@@ -997,9 +955,7 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
     } else if (got_wire && !wire.ok) {
         res.error = wire.error.data();
     } else if (WIFSIGNALED(status)) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "crashed (signal %d)", WTERMSIG(status));
-        res.error = buf;
+        res.error = std::format("crashed (signal {})", WTERMSIG(status));
     } else {
         res.error = "child failed (no result)";
     }
@@ -1068,65 +1024,63 @@ static void print_table(const std::vector<BenchResult>& results,
                         float py,
                         int n_frames,
                         int n_threads) {
-    printf("\n");
-    printf(
+    std::print("\n");
+    std::print(
         "=========================================================================================="
         "===============\n");
-    printf("SAM3.CPP BENCHMARK  —  %d frames, point=(%.1f, %.1f), threads=%d\n",
-           n_frames,
-           px,
-           py,
-           n_threads);
-    printf("video: %s\n", video_path.c_str());
-    printf(
+    std::print("SAM3.CPP BENCHMARK  —  {} frames, point=({:.1f}, {:.1f}), threads={}\n",
+               n_frames,
+               px,
+               py,
+               n_threads);
+    std::print("video: {}\n", video_path);
+    std::print(
         "=========================================================================================="
         "===============\n\n");
 
-    printf("  %3s | %-36s | %7s | %7s | %9s | %9s | %13s | %9s | %9s | %10s | %8s | %3s | %s\n",
-           "#",
-           "Model",
-           "Size",
-           "Backend",
-           "Load (ms)",
-           "Init (ms)",
-           "Track/fr (ms)",
-           "P50 (ms)",
-           "P95 (ms)",
-           "Total (ms)",
-           "RSS MiB",
-           "Det",
-           "Status");
-    printf(
+    std::print("  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8} | {:>3} | {}\n",
+               "#",
+               "Model",
+               "Size",
+               "Backend",
+               "Load (ms)",
+               "Init (ms)",
+               "Track/fr (ms)",
+               "P50 (ms)",
+               "P95 (ms)",
+               "Total (ms)",
+               "RSS MiB",
+               "Det",
+               "Status");
+    std::print(
         "------+--------------------------------------+---------+---------+-----------+-----------+"
         "---------------+-----------+-----------+------------+----------+-----+--------\n");
 
     for (size_t i = 0; i < results.size(); i++) {
         const auto& r = results[i];
         if (r.success) {
-            printf(
-                "  %3d | %-36s | %7s | %7s | %9s | %9s | %13s | %9s | %9s | %10s | %8.1f | %3d | "
-                "OK\n",
-                (int) (i + 1),
-                r.model_name.c_str(),
-                format_size(r.file_size).c_str(),
-                r.backend.c_str(),
-                format_time_short(r.t_load_ms).c_str(),
-                format_time_short(r.t_frame0_ms).c_str(),
-                format_time_short(r.t_track_avg_ms).c_str(),
-                format_time_short(r.t_track_p50_ms).c_str(),
-                format_time_short(r.t_track_p95_ms).c_str(),
-                format_time_short(r.t_total_ms).c_str(),
+            std::print(
+                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8.1f} | {:>3} | OK\n",
+                i + 1,
+                r.model_name,
+                format_size(r.file_size),
+                r.backend,
+                format_time_short(r.t_load_ms),
+                format_time_short(r.t_frame0_ms),
+                format_time_short(r.t_track_avg_ms),
+                format_time_short(r.t_track_p50_ms),
+                format_time_short(r.t_track_p95_ms),
+                format_time_short(r.t_total_ms),
                 r.max_rss_kib / 1024.0,
                 r.n_detections);
         } else {
-            printf(
-                "  %3d | %-36s | %7s | %7s | %9s | %9s | %13s | %9s | %9s | %10s | %8s | %3s | "
-                "FAIL: %s\n",
-                (int) (i + 1),
-                r.model_name.c_str(),
-                format_size(r.file_size).c_str(),
-                r.backend.c_str(),
-                r.t_load_ms > 0 ? format_time_short(r.t_load_ms).c_str() : "-",
+            std::print(
+                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8} | {:>3} | FAIL: {}\n",
+                i + 1,
+                r.model_name,
+                format_size(r.file_size),
+                r.backend,
+                r.t_load_ms > 0 ? format_time_short(r.t_load_ms) : "-",
                 "-",
                 "-",
                 "-",
@@ -1134,11 +1088,11 @@ static void print_table(const std::vector<BenchResult>& results,
                 "-",
                 "-",
                 "-",
-                r.error.c_str());
+                r.error);
         }
     }
 
-    printf(
+    std::print(
         "------+--------------------------------------+---------+---------+-----------+-----------+"
         "---------------+-----------+-----------+------------+----------+-----+--------\n");
 
@@ -1149,7 +1103,7 @@ static void print_table(const std::vector<BenchResult>& results,
         else
             n_fail++;
     }
-    printf("\nSUMMARY: %d runs, %d OK, %d FAIL\n", (int) results.size(), n_ok, n_fail);
+    std::print("\nSUMMARY: {} runs, {} OK, {} FAIL\n", results.size(), n_ok, n_fail);
 }
 
 // ── Main ────────────────────────────────────────────────────────────────────
@@ -1213,9 +1167,9 @@ int main(int argc, char** argv) {
         } else if (arg == "--output-mask-dir" && i + 1 < argc) {
             output_mask_dir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
-            fprintf(
+            std::print(
                 stderr,
-                "Usage: %s [options]\n"
+                "Usage: {} [options]\n"
                 "  --models-dir <path>   Models directory       (default: models/)\n"
                 "  --video <path>        Video file             (default: data/test_video.mp4)\n"
                 "  --point-x <f>         Click X                (default: 315.0)\n"
@@ -1236,62 +1190,63 @@ int main(int argc, char** argv) {
                 argv[0]);
             return 0;
         } else {
-            fprintf(stderr, "Unknown argument: %s\n", arg.c_str());
+            std::print(stderr, "Unknown argument: {}\n", arg);
             return 1;
         }
     }
 
     if ((!output_jsonl.empty() || !output_initial_candidates_jsonl.empty() || !output_mask_dir.empty()) &&
         !(gpu_only || cpu_only)) {
-        fprintf(stderr,
-                "ERROR: output JSONL/mask options require --gpu-only or --cpu-only to select one "
-                "backend\n");
+        std::print(stderr,
+                   "ERROR: output JSONL/mask options require --gpu-only or --cpu-only to select one "
+                   "backend\n");
         return 1;
     }
 
     if (n_frames < 2) {
-        fprintf(stderr, "ERROR: --n-frames must be >= 2\n");
+        std::print(stderr, "ERROR: --n-frames must be >= 2\n");
         return 1;
     }
     if (recondition_every < 1) {
-        fprintf(stderr, "ERROR: --recondition-every must be >= 1\n");
+        std::print(stderr, "ERROR: --recondition-every must be >= 1\n");
         return 1;
     }
 
     // Discover models
     auto entries = discover_models(models_dir, filter);
     if (entries.empty()) {
-        fprintf(stderr, "ERROR: no .ggml files found in '%s'", models_dir.c_str());
-        if (!filter.empty())
-            fprintf(stderr, " (filter: '%s')", filter.c_str());
-        fprintf(stderr, "\n");
+        std::print(stderr, "ERROR: no .ggml files found in '{}'", models_dir);
+        if (!filter.empty()) {
+            std::print(stderr, " (filter: '{}')", filter);
+        }
+        std::print(stderr, "\n");
         return 1;
     }
 
-    fprintf(stderr, "Found %zu model(s)\n", entries.size());
+    std::print(stderr, "Found {} model(s)\n", entries.size());
     for (const auto& e : entries) {
-        fprintf(stderr, "  %s  (%s)\n", e.name.c_str(), format_size(e.file_size).c_str());
+        std::print(stderr, "  {}  ({})\n", e.name, format_size(e.file_size));
     }
 
     // Validate video
     auto vinfo = sam3_get_video_info(video_path);
     if (vinfo.n_frames <= 0) {
-        fprintf(stderr, "ERROR: cannot read video '%s'\n", video_path.c_str());
+        std::print(stderr, "ERROR: cannot read video '{}'\n", video_path);
         return 1;
     }
     if (n_frames > vinfo.n_frames) {
-        fprintf(stderr,
-                "WARNING: video has %d frames, clamping to %d\n",
-                vinfo.n_frames,
-                vinfo.n_frames);
+        std::print(stderr,
+                   "WARNING: video has {} frames, clamping to {}\n",
+                   vinfo.n_frames,
+                   vinfo.n_frames);
         n_frames = vinfo.n_frames;
     }
-    fprintf(stderr,
-            "Video: %dx%d, %d frames, %.1f fps\n",
-            vinfo.width,
-            vinfo.height,
-            vinfo.n_frames,
-            vinfo.fps);
+    std::print(stderr,
+               "Video: {}x{}, {} frames, {:.1f} fps\n",
+               vinfo.width,
+               vinfo.height,
+               vinfo.n_frames,
+               vinfo.fps);
 
     // Build run list
     struct RunSpec {
@@ -1315,12 +1270,12 @@ int main(int argc, char** argv) {
     });
 
     if (no_isolation) {
-        fprintf(stderr, "\nStarting %zu benchmark runs (in-process)...\n\n", runs.size());
+        std::print(stderr, "\nStarting {} benchmark runs (in-process)...\n\n", runs.size());
     } else {
 #ifdef _WIN32
-        fprintf(stderr, "\nStarting %zu benchmark runs (in-process)...\n\n", runs.size());
+        std::print(stderr, "\nStarting {} benchmark runs (in-process)...\n\n", runs.size());
 #else
-        fprintf(stderr, "\nStarting %zu benchmark runs (each in a subprocess)...\n\n", runs.size());
+        std::print(stderr, "\nStarting {} benchmark runs (each in a subprocess)...\n\n", runs.size());
 #endif
     }
 
@@ -1333,12 +1288,12 @@ int main(int argc, char** argv) {
         const auto& run = runs[i];
         const char* backend_str = requested_backend_label(run.use_gpu);
 
-        fprintf(stderr,
-                "[%3zu/%zu] %s (%s) ...\n",
-                i + 1,
-                runs.size(),
-                run.entry->name.c_str(),
-                backend_str);
+        std::print(stderr,
+                   "[{:>3}/{}] {} ({}) ...\n",
+                   i + 1,
+                   runs.size(),
+                   run.entry->name,
+                   backend_str);
 
         auto res = no_isolation ? run_benchmark_direct(*run.entry,
                                                        run.use_gpu,
@@ -1373,20 +1328,20 @@ int main(int argc, char** argv) {
         results.push_back(res);
 
         if (res.success) {
-            fprintf(stderr,
-                    "  -> OK  backend=%s  load=%.0fms  init=%.0fms  track/fr=%.0fms  p50=%.0fms  "
-                    "p95=%.0fms  total=%.0fms  rss=%.1fMiB  det=%d\n\n",
-                    res.backend.c_str(),
-                    res.t_load_ms,
-                    res.t_frame0_ms,
-                    res.t_track_avg_ms,
-                    res.t_track_p50_ms,
-                    res.t_track_p95_ms,
-                    res.t_total_ms,
-                    res.max_rss_kib / 1024.0,
-                    res.n_detections);
+            std::print(stderr,
+                       "  -> OK  backend={}  load={:.0f}ms  init={:.0f}ms  track/fr={:.0f}ms  p50={:.0f}ms  "
+                       "p95={:.0f}ms  total={:.0f}ms  rss={:.1f}MiB  det={}\n\n",
+                       res.backend,
+                       res.t_load_ms,
+                       res.t_frame0_ms,
+                       res.t_track_avg_ms,
+                       res.t_track_p50_ms,
+                       res.t_track_p95_ms,
+                       res.t_total_ms,
+                       res.max_rss_kib / 1024.0,
+                       res.n_detections);
         } else {
-            fprintf(stderr, "  -> FAIL: %s\n\n", res.error.c_str());
+            std::print(stderr, "  -> FAIL: {}\n\n", res.error);
         }
     }
 
@@ -1398,7 +1353,7 @@ int main(int argc, char** argv) {
     double t_wall_s = t_wall_ms / 1000.0;
     int mins = (int) (t_wall_s / 60.0);
     int secs = (int) (t_wall_s) % 60;
-    printf("Total wall time: %dm %ds\n\n", mins, secs);
+    std::print("Total wall time: {}m {}s\n\n", mins, secs);
 
     return 0;
 }

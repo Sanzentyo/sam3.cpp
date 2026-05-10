@@ -327,6 +327,16 @@ frames. The remaining 512 gap to official PyTorch is therefore no longer only
 Hiera encode; it also includes the propagation graph and small CPU overheads.
 For 1024, Hiera graph compute still dominates at roughly `65 ms` steady-state.
 
+The generic graph structure profile (`SAM3_PROFILE_GRAPH_OPS=1` and
+`SAM3_PROFILE_GRAPH_MATMULS=1`) shows `propagate_single` at 512 is also dominated
+by small/medium matmul and layout work: about 96 `MUL_MAT`, 127 `RESHAPE`, 80
+`VIEW`, 77 `CONT`, and 53 `PERMUTE` nodes per propagation graph. The most common
+propagation matmul is
+`q4_0[256,256] x f32[256,1024] -> f32[256,1024]` with mean count 24, followed by
+single-token/object-pointer shapes such as `q4_0[256,256] x f32[256,1]`. This
+means the 512 path cannot be finished by Hiera-only work; the propagation graph
+needs the same kind of layout reduction or quantized small-GEMM improvement.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -443,4 +453,5 @@ outputs/model-matrix-sam2-base-plus-current-512/summary.json
 outputs/parity-sam2-base-plus-q4-1024-shape-key-default/summary.json
 outputs/parity-sam2-base-plus-q4-512-shape-key-default/summary.json
 outputs/hiera-shape-key-profile-current/q4_0_512_labeled_profile_summary.json
+outputs/propagate-profile-current/q4_0_512_graph_ops_summary.json
 ```

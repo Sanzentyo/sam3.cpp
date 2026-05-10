@@ -1227,6 +1227,8 @@ static bool sam3_graph_compute(ggml_backend_t backend,
                                struct ggml_cgraph* graph,
                                int n_threads,
                                const char* label = nullptr);
+static void sam3_profile_print_graph_ops(struct ggml_cgraph* graph, const char* label);
+static void sam3_profile_print_graph_matmuls(struct ggml_cgraph* graph, const char* label);
 
 // ggml building blocks
 static struct ggml_tensor* sam3_layer_norm(struct ggml_context* ctx,
@@ -1253,6 +1255,13 @@ static bool sam3_graph_compute(ggml_backend_t backend,
     if (ggml_backend_is_cpu(backend)) {
         ggml_backend_cpu_set_n_threads(backend, n_threads);
     }
+    const char* profile_label = label ? label : "unlabeled";
+    if (sam3_getenv("SAM3_PROFILE_GRAPH_OPS")) {
+        sam3_profile_print_graph_ops(graph, profile_label);
+    }
+    if (sam3_getenv("SAM3_PROFILE_GRAPH_MATMULS")) {
+        sam3_profile_print_graph_matmuls(graph, profile_label);
+    }
     const bool profile = sam3_getenv("SAM3_PROFILE").has_value();
     const auto t0 = profile ? std::chrono::high_resolution_clock::now()
                             : std::chrono::high_resolution_clock::time_point{};
@@ -1262,7 +1271,7 @@ static bool sam3_graph_compute(ggml_backend_t backend,
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         fprintf(stderr,
                 "SAM3_PROFILE compute label=%s backend=%s nodes=%d ms=%.3f\n",
-                label ? label : "unlabeled",
+                profile_label,
                 ggml_backend_name(backend),
                 ggml_graph_n_nodes(graph),
                 ms);
@@ -1272,6 +1281,58 @@ static bool sam3_graph_compute(ggml_backend_t backend,
         return false;
     }
     return true;
+}
+
+static void sam3_profile_print_graph_ops(struct ggml_cgraph* graph, const char* label) {
+    std::map<std::string, std::pair<int, int64_t>> op_stats;
+    const int n_nodes = ggml_graph_n_nodes(graph);
+    for (int i = 0; i < n_nodes; ++i) {
+        auto* node = ggml_graph_node(graph, i);
+        auto& stat = op_stats[ggml_op_name(node->op)];
+        stat.first += 1;
+        stat.second += ggml_nelements(node);
+    }
+    for (const auto& [op_name, stat] : op_stats) {
+        fprintf(stderr,
+                "SAM3_PROFILE_GRAPH_OPS label=%s op=%s count=%d out_elements=%lld\n",
+                label,
+                op_name.c_str(),
+                stat.first,
+                static_cast<long long>(stat.second));
+    }
+}
+
+static void sam3_profile_print_graph_matmuls(struct ggml_cgraph* graph, const char* label) {
+    const int n_nodes = ggml_graph_n_nodes(graph);
+    for (int i = 0; i < n_nodes; ++i) {
+        auto* node = ggml_graph_node(graph, i);
+        if (node->op != GGML_OP_MUL_MAT || node->src[0] == nullptr || node->src[1] == nullptr) {
+            continue;
+        }
+        const auto* src0 = node->src[0];
+        const auto* src1 = node->src[1];
+        fprintf(stderr,
+                "SAM3_PROFILE_GRAPH_MATMUL label=%s "
+                "src0_type=%s src0_ne=%lld,%lld,%lld,%lld "
+                "src1_type=%s src1_ne=%lld,%lld,%lld,%lld "
+                "dst_type=%s dst_ne=%lld,%lld,%lld,%lld\n",
+                label,
+                ggml_type_name(src0->type),
+                static_cast<long long>(src0->ne[0]),
+                static_cast<long long>(src0->ne[1]),
+                static_cast<long long>(src0->ne[2]),
+                static_cast<long long>(src0->ne[3]),
+                ggml_type_name(src1->type),
+                static_cast<long long>(src1->ne[0]),
+                static_cast<long long>(src1->ne[1]),
+                static_cast<long long>(src1->ne[2]),
+                static_cast<long long>(src1->ne[3]),
+                ggml_type_name(node->type),
+                static_cast<long long>(node->ne[0]),
+                static_cast<long long>(node->ne[1]),
+                static_cast<long long>(node->ne[2]),
+                static_cast<long long>(node->ne[3]));
+    }
 }
 
 struct sam3_hiera_profile_cut {

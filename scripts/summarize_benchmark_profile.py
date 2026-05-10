@@ -39,6 +39,15 @@ HIERA_CUT_MATMUL_RE = re.compile(
     r"src1_type=(\S+) src1_ne=([0-9,]+) "
     r"dst_type=(\S+) dst_ne=([0-9,]+)"
 )
+GRAPH_OPS_RE = re.compile(
+    r"SAM3_PROFILE_GRAPH_OPS label=(\S+) op=(\S+) count=(\d+) out_elements=(\d+)"
+)
+GRAPH_MATMUL_RE = re.compile(
+    r"SAM3_PROFILE_GRAPH_MATMUL label=(\S+) "
+    r"src0_type=(\S+) src0_ne=([0-9,]+) "
+    r"src1_type=(\S+) src1_ne=([0-9,]+) "
+    r"dst_type=(\S+) dst_ne=([0-9,]+)"
+)
 
 
 def mean(values: list[float]) -> float | None:
@@ -107,6 +116,49 @@ def summarize(path: Path) -> dict[str, Any]:
         for stats in matmuls.values():
             stats["samples"] = label_samples
             stats["mean_count"] = stats["count"] / label_samples
+    graph_ops: dict[str, dict[str, dict[str, int | float]]] = {}
+    for label, op, count, elements in GRAPH_OPS_RE.findall(text):
+        op_stats = graph_ops.setdefault(label, {}).setdefault(
+            op, {"samples": 0, "count": 0, "out_elements": 0}
+        )
+        op_stats["samples"] += 1
+        op_stats["count"] += int(count)
+        op_stats["out_elements"] += int(elements)
+    for ops in graph_ops.values():
+        for op_stats in ops.values():
+            samples = int(op_stats["samples"])
+            op_stats["mean_count"] = op_stats["count"] / samples
+            op_stats["mean_out_elements"] = op_stats["out_elements"] / samples
+    graph_matmuls: dict[str, dict[str, dict[str, int | float | str]]] = {}
+    for label, src0_type, src0_ne, src1_type, src1_ne, dst_type, dst_ne in GRAPH_MATMUL_RE.findall(
+        text
+    ):
+        key = (
+            f"src0={src0_type}[{src0_ne}] src1={src1_type}[{src1_ne}] "
+            f"dst={dst_type}[{dst_ne}]"
+        )
+        stats = graph_matmuls.setdefault(label, {}).setdefault(
+            key,
+            {
+                "count": 0,
+                "src0_type": src0_type,
+                "src0_ne": src0_ne,
+                "src1_type": src1_type,
+                "src1_ne": src1_ne,
+                "dst_type": dst_type,
+                "dst_ne": dst_ne,
+            },
+        )
+        stats["count"] += 1
+    for label, matmuls in graph_matmuls.items():
+        # Estimate samples from GRAPH_OPS when available; otherwise keep raw counts.
+        label_samples = max(
+            1,
+            max((int(stats["samples"]) for stats in graph_ops.get(label, {}).values()), default=1),
+        )
+        for stats in matmuls.values():
+            stats["samples"] = label_samples
+            stats["mean_count"] = stats["count"] / label_samples
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -167,6 +219,22 @@ def summarize(path: Path) -> dict[str, Any]:
                 )
             }
             for label, matmuls in sorted(hiera_cut_matmuls.items(), key=lambda item: item[0])
+        },
+        "graph_ops": {
+            label: {
+                op: stats
+                for op, stats in sorted(ops.items(), key=lambda item: item[0])
+            }
+            for label, ops in sorted(graph_ops.items(), key=lambda item: item[0])
+        },
+        "graph_matmuls": {
+            label: {
+                key: stats
+                for key, stats in sorted(
+                    matmuls.items(), key=lambda item: (-float(item[1]["mean_count"]), item[0])
+                )
+            }
+            for label, matmuls in sorted(graph_matmuls.items(), key=lambda item: item[0])
         },
     }
     if row:

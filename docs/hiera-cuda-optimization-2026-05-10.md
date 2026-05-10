@@ -577,6 +577,57 @@ first kernel implementation, not just adding 56 instantiations to the existing
 f16 MMA path. The restored tile build was rechecked against the reference JSONL
 with exact bbox/mask parity (`mask_hash_equal_rows=10/10`).
 
+## Kernel-Level Optimization Direction
+
+Further work should not be limited to changing the current tile kernel
+parameters. The remaining gap is large enough that the next branch should treat
+`head_dim=56` as a kernel-design problem:
+
+1. Add a SAM2 Base+ specific CUDA FlashAttention path for the observed Hiera
+   shapes, initially limited to `Q/K/V=[56,4096,8,1]` and
+   `Q/K/V=[56,196,8,25]`.
+2. Keep the external ggml tensor contract exactly `[56,N,heads,batch]`; any
+   padding to tensor-core friendly widths must be internal to the kernel and
+   must zero masked lanes before both `KQ` and `VKQ`.
+3. Do not route this through the existing generic MMA templates unless the
+   remainder lanes are proven correct. The previous prototype showed that
+   "instantiate 56 and pad locally" is not enough.
+4. Consider a dedicated no-mask, no-sink, no-GQA kernel first. Hiera image
+   encode calls `ggml_flash_attn_ext` without an attention mask, so the fastest
+   path can skip mask loading, GQA handling, sink handling, and stream-k fixup
+   branches that exist for LLM KV-cache workloads.
+5. If the dedicated kernel is still too slow, split the problem further:
+   specialize global attention (`4096x4096`) and window attention
+   (`196x196 x 25 windows`) separately. These have different occupancy and
+   memory-reuse constraints and should not be forced through one generic
+   schedule.
+6. Treat QKV projection and output projection as the next kernel-fusion target
+   only after attention parity is stable. Fusing projection with attention has
+   more surface area because Hiera uses q4 model weights and ggml graph
+   allocation/layout assumptions; it should not be the first correctness risk.
+
+### Acceptance Criteria For The Next Kernel Branch
+
+- Correctness:
+  - Full-mask parity against the current tile path for 10 same frames at
+    `encode-img-size=512` and `1024`.
+  - `mask_hash_equal_rows=10/10`, `min_bbox_iou=1.0`, and
+    `max_score_abs_delta=0.0` for the tile-vs-new-kernel comparison.
+  - Separate global-only and window-only toggles must both pass before enabling
+    the combined path by default.
+- Performance:
+  - Report paired runs, not single rows, for `q4_0` Base+ at `512` and `1024`.
+  - The 1024 `track_ms` mean must beat the current tile baseline by at least
+    15% before the kernel is considered worth merging.
+  - The target remains official PyTorch parity or better on the matched
+    decode/source-resolution/input-resolution protocol.
+- Scope:
+  - Gate the new path by exact shape and CUDA capability first.
+  - Fall back to the current tile path for all unsupported shapes or any future
+    model whose head dimension/layout differs.
+  - Keep documentation and generated benchmark artifacts free of local absolute
+    user paths.
+
 `scripts/summarize_goal_audit.py` combines the matched C++/official-Python
 speed rows, official-Python quality checks, Hiera stage gap, and CUDA node
 hotspots into a single completion audit. The current audit artifact is

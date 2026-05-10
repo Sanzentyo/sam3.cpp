@@ -727,8 +727,10 @@ unchanged at 512 (`34 -> 34 ms/frame`), so this graph cleanup was reverted.
 The remaining Hiera target is still kernel time, especially head_dim 56
 FlashAttention, not add-node allocation style.
 
-Precision does not explain the quality gap. Re-running the same default 1024
-comparison across Base+ precisions gives nearly identical low IoU:
+Precision alone does not explain the quality gap, but precision affects the
+multimask candidate scoring. Re-running the same default 1024 comparison across
+Base+ precisions without fixing candidate selection gave similarly poor
+official-Python IoU:
 
 | Model | C++ track ms/frame | Mean mask IoU | Min mask IoU | PyTorch ms/frame |
 | --- | ---: | ---: | ---: | ---: |
@@ -739,14 +741,25 @@ comparison across Base+ precisions gives nearly identical low IoU:
 
 An experimental C++ `--multimask` initial prompt path was also tested. It
 selects the highest predicted IoU mask among SAM mask tokens 1..3 and uses the
-matching mask token for the tracker object pointer. This did not fix 1024
-parity:
+matching mask token for the tracker object pointer. On the current build, this
+shows that q4_0 is the outlier: q4_0 still selects the small candidate and stays
+near the single-mask quality level, while f16/q8_0 select the same candidate
+index as official PyTorch and improve the 1024 quality substantially. It is
+still not parity and remains slower than official PyTorch.
 
-| Mode | Encode size | C++ track ms/frame | Mean mask IoU | Min mask IoU |
-| --- | ---: | ---: | ---: | ---: |
-| single-mask prompt | 1024 | 135-140 | 0.0197 | 0.0000 |
-| multimask prompt | 1024 | 134 | 0.0321 | 0.0000 |
-| multimask prompt | 512 | 39 | 0.1822 | 0.1394 |
+| Model/mode | Encode size | C++ track ms/frame | Mean mask IoU | Frame-0 mask IoU | Min bbox IoU |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| q4_0 single-mask prompt | 1024 | 89-96 | 0.4742 | 0.5020 | 0.2500 |
+| q4_0 multimask prompt | 1024 | 96.2 | 0.4731 | 0.4959 | 0.1975 |
+| q4_1 multimask prompt | 1024 | 96.7 | 0.5835 | 0.6539 | 0.6093 |
+| q8_0 multimask prompt | 1024 | 96.7 | 0.6999 | 0.8591 | 0.6594 |
+| f16 multimask prompt | 1024 | 109.3 | 0.6995 | 0.8397 | 0.6439 |
+
+The official initial candidate diagnostic for the same prompt selects candidate
+0. C++ f32/f16/q8_0/q4_1 also score candidate 0 highest, while q4_0 scores
+candidate 2 highest. The q4_0 quality issue should therefore be treated as a
+quantized IoU/candidate-selection problem before it is used as a Rust-wrapper
+quality baseline.
 
 At `--encode-img-size 512`, the earlier bbox-only scaling run reached
 `34.4 ms/frame`, but that initial comparison was against the default official
@@ -863,6 +876,13 @@ outputs/quality-gap/sam2-base-plus-frame-index.json
 outputs/sam2-initial-mask-diagnostics-1024/initial_candidates.jsonl
 outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates.jsonl
 outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates_f32.jsonl
+outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates_f16.jsonl
+outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates_q8_0.jsonl
+outputs/sam2-initial-mask-diagnostics-1024/cpp_initial_candidates_q4_1.jsonl
+outputs/sam2-official-quality-1024-f16-multimask-diagnostic/summary.json
+outputs/sam2-official-quality-1024-q8_0-multimask-diagnostic/summary.json
+outputs/sam2-official-quality-1024-q4_1-multimask-diagnostic/summary.json
+outputs/sam2-official-quality-1024-q4_0-multimask-diagnostic/summary.json
 outputs/fattn56-mma/q4_0_1024_bbox.log
 outputs/fattn56-mma/q4_0_1024_global_only_bbox.log
 outputs/fattn56-mma/q4_0_1024_window_only_bbox.log

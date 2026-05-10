@@ -181,6 +181,20 @@ of the PyTorch-speed target. The remaining gap still points at steady Hiera
 FlashAttention / quantized MLP kernels rather than CPU graph build or output
 copy overhead.
 
+The Python comparison script now times the same tracking range as the C++
+benchmark: frame 0 point-prompt/add-instance is excluded, and only frames
+`1..N-1` are averaged. With that stricter contract, official PyTorch is
+substantially faster than the earlier all-yield average suggested:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 89.2 | 43.76 | 0.491 | `outputs/model-matrix-free-prev-state-1024-trackrange/summary.json` |
+| 512 | 24.7 | 12.56 | 0.508 | `outputs/model-matrix-free-prev-state-512-trackrange/summary.json` |
+
+This makes the remaining target larger: matching PyTorch requires roughly a
+2x reduction in the steady C++ tracking path, not just removing the previous
+short-run outliers.
+
 Rejected follow-up experiments:
 
 - `GGML_CUDA_FORCE_CUBLAS=1` for q4_0 matmuls did not improve the remaining
@@ -663,4 +677,6 @@ outputs/hiera-free-prev-state/q4_0_1024_force_cublas_summary.json
 outputs/hiera-v-cont/q4_0_512_summary.json
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
+outputs/model-matrix-free-prev-state-1024-trackrange/summary.json
+outputs/model-matrix-free-prev-state-512-trackrange/summary.json
 ```

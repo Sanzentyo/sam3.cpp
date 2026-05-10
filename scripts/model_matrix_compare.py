@@ -343,7 +343,7 @@ import json, sys, time
 import numpy as np
 import torch
 
-sam2_repo, checkpoint, cfg, video_dir, point_x, point_y, image_size = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5]), float(sys.argv[6]), int(sys.argv[7])
+sam2_repo, checkpoint, cfg, video_dir, point_x, point_y, image_size, frames = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5]), float(sys.argv[6]), int(sys.argv[7]), int(sys.argv[8])
 sys.path.insert(0, sam2_repo)
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 if torch.cuda.get_device_properties(0).major >= 8:
@@ -363,31 +363,39 @@ predictor = build_sam2_video_predictor(
     hydra_overrides_extra=overrides,
 )
 
-def run_once():
+def run_once(measure=False):
     state = predictor.init_state(video_path=video_dir)
     points = np.array([[point_x, point_y]], dtype=np.float32)
     labels = np.array([1], np.int32)
     predictor.add_new_points_or_box(inference_state=state, frame_idx=0, obj_id=1, points=points, labels=labels)
     count = 0
-    for _ in predictor.propagate_in_video(state):
-        count += 1
+    measured_ms = 0.0
+    prev = time.perf_counter()
+    for out_frame_idx, _, _ in predictor.propagate_in_video(state):
+        torch.cuda.synchronize()
+        now = time.perf_counter()
+        if 0 < out_frame_idx < frames:
+            measured_ms += (now - prev) * 1000.0
+            count += 1
+        prev = now
+        if out_frame_idx + 1 >= frames:
+            break
     torch.cuda.synchronize()
-    return count
+    if measure:
+        return count, measured_ms
+    return count, 0.0
 
 for _ in range(2):
     run_once()
 
 torch.cuda.reset_peak_memory_stats()
-t0 = time.perf_counter()
-count = run_once()
-torch.cuda.synchronize()
-t1 = time.perf_counter()
-elapsed = t1 - t0
+count, measured_ms = run_once(measure=True)
 print(json.dumps({
     "backend": "PyTorch CUDA bf16",
-    "frames": count,
-    "track_ms": elapsed * 1000.0 / max(count, 1),
-    "total_ms": elapsed * 1000.0,
+    "frames": frames,
+    "track_frames": count,
+    "track_ms": measured_ms / max(count, 1),
+    "total_ms": measured_ms,
     "rss_mib": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
     "image_size": image_size if image_size > 0 else 1024,
 }))
@@ -410,6 +418,7 @@ print(json.dumps({
                         str(args.point_x),
                         str(args.point_y),
                         str(args.encode_img_size),
+                        str(args.frames),
                     ],
                     SAM2_UV_DEPS,
                 ),
@@ -500,6 +509,7 @@ def summarize(
                 "comparable_speed_claim": comparable_speed_claim,
                 "cpp_track_ms": row["track_ms"],
                 "python_track_ms": py["track_ms"],
+                "python_track_frames": py.get("track_frames"),
                 "python_over_cpp_track_ratio": track_ratio,
                 "python_over_cpp_track_ratio_if_comparable": track_ratio if comparable_speed_claim else None,
                 "cpp_rss_mib": row["rss_mib"],
@@ -513,6 +523,7 @@ def summarize(
             "speed_and_quality_claims_require": [
                 "same decoded source-frame resolution",
                 "same frame range",
+                "same measured tracking range (frame 0 add-instance excluded)",
                 "same prompt",
                 "same SAM model input resolution",
             ],

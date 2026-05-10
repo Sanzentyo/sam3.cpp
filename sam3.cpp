@@ -4011,126 +4011,119 @@ void sam3_free_state(sam3_state& state) {
 ** Image preprocessing
 *****************************************************************************/
 
-// Bilinear resize of a [H, W, 3] uint8 image to [dst_h, dst_w, 3].
-static void sam3_resize_bilinear(
-    const uint8_t* src, int src_w, int src_h, uint8_t* dst, int dst_w, int dst_h) {
-    // Bilinear resize matching torch.nn.functional.interpolate(bilinear, align_corners=False).
-    // ALL arithmetic is in double to get an exact result for uint8 inputs (0-255),
-    // ensuring the bilinear result is independent of FMA/SIMD/compiler behavior.
-    // The exact double result is then rounded to uint8, matching torch's round().
-    const double sx = static_cast<double>(src_w) / dst_w;
-    const double sy = static_cast<double>(src_h) / dst_h;
-    for (int y = 0; y < dst_h; ++y) {
-        double fy = ((static_cast<double>(y) + 0.5) * sy) - 0.5;
-        fy = std::max(fy, 0.0);
-        const int y0 = static_cast<int>(fy);
-        const int y1 = (y0 < src_h - 1) ? y0 + 1 : y0;
-        const double wy = fy - y0;
-        const double wy0 = 1.0 - wy;
-        for (int x = 0; x < dst_w; ++x) {
-            double fx = ((static_cast<double>(x) + 0.5) * sx) - 0.5;
-            fx = std::max(fx, 0.0);
-            const int x0 = static_cast<int>(fx);
-            const int x1 = (x0 < src_w - 1) ? x0 + 1 : x0;
-            const double wx = fx - x0;
-            const double wx0 = 1.0 - wx;
-            const auto pixel_index = [src_w](int row, int col, int channel) {
-                return (((sam3_count_mul(row, src_w) + static_cast<size_t>(col)) *
-                         static_cast<size_t>(3)) +
-                        static_cast<size_t>(channel));
-            };
-            for (int c = 0; c < 3; ++c) {
-                const double p00 = src[pixel_index(y0, x0, c)];
-                const double p01 = src[pixel_index(y0, x1, c)];
-                const double p10 = src[pixel_index(y1, x0, c)];
-                const double p11 = src[pixel_index(y1, x1, c)];
-                double v = (wy0 * ((wx0 * p00) + (wx * p01))) + (wy * ((wx0 * p10) + (wx * p11)));
-                // Round to nearest integer, matching torch's round().to(uint8).
-                // For exact half-values (v = N.5), torch uses banker's rounding
-                // (round-half-to-even), but bilinear with double precision on
-                // uint8 inputs virtually never hits exact halves.
-                int iv = std::clamp(static_cast<int>(std::lround(v)), 0, 255);
-                dst[(
-                    ((sam3_count_mul(y, dst_w) + static_cast<size_t>(x)) * static_cast<size_t>(3)) +
-                    static_cast<size_t>(c))] = static_cast<uint8_t>(iv);
+struct sam3_resize_axis_cache {
+    int src = 0;
+    int dst = 0;
+    std::vector<int> lo;
+    std::vector<int> hi;
+    std::vector<double> w;
+    std::vector<double> w0;
+};
+
+static const sam3_resize_axis_cache& sam3_get_resize_axis_cache(int src, int dst, bool vertical) {
+    thread_local sam3_resize_axis_cache x_cache;
+    thread_local sam3_resize_axis_cache y_cache;
+    auto& cache = vertical ? y_cache : x_cache;
+    if (cache.src == src && cache.dst == dst)
+        return cache;
+
+    cache.src = src;
+    cache.dst = dst;
+    cache.lo.resize(dst);
+    cache.hi.resize(dst);
+    cache.w.resize(dst);
+    cache.w0.resize(dst);
+
+    const double scale = static_cast<double>(src) / static_cast<double>(dst);
+    for (int i = 0; i < dst; ++i) {
+        double f = ((static_cast<double>(i) + 0.5) * scale) - 0.5;
+        f = std::max(f, 0.0);
+        const int i0 = static_cast<int>(f);
+        cache.lo[static_cast<size_t>(i)] = i0;
+        cache.hi[static_cast<size_t>(i)] = (i0 < src - 1) ? i0 + 1 : i0;
+        cache.w[static_cast<size_t>(i)] = f - static_cast<double>(i0);
+        cache.w0[static_cast<size_t>(i)] = 1.0 - cache.w[static_cast<size_t>(i)];
+    }
+    return cache;
+}
+
+static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
+                                                    int img_size,
+                                                    const std::array<float, 3>& mean,
+                                                    const std::array<float, 3>& std_d) {
+    constexpr int C = 3;
+    const size_t image_area = sam3_count_mul(img_size, img_size);
+    std::vector<float> result(static_cast<size_t>(C) * image_area);
+    const auto* pixels = image.data.data();
+    const int src_w = image.width;
+    const int src_h = image.height;
+
+    if (src_w == img_size && src_h == img_size) {
+        for (int y = 0; y < img_size; ++y) {
+            for (int x = 0; x < img_size; ++x) {
+                const size_t hwc_base =
+                    (sam3_count_mul(y, img_size) + static_cast<size_t>(x)) * static_cast<size_t>(3);
+                const size_t chw_base = sam3_count_mul(y, img_size) + static_cast<size_t>(x);
+                for (int c = 0; c < C; ++c) {
+                    const float v = pixels[hwc_base + static_cast<size_t>(c)] / 255.0f;
+                    result[static_cast<size_t>(c) * image_area + chw_base] =
+                        (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+                }
+            }
+        }
+        return result;
+    }
+
+    const auto& x_cache = sam3_get_resize_axis_cache(src_w, img_size, false);
+    const auto& y_cache = sam3_get_resize_axis_cache(src_h, img_size, true);
+    const auto pixel_index = [src_w](int row, int col, int channel) {
+        return (((sam3_count_mul(row, src_w) + static_cast<size_t>(col)) * static_cast<size_t>(3)) +
+                static_cast<size_t>(channel));
+    };
+
+    for (int y = 0; y < img_size; ++y) {
+        const auto yi = static_cast<size_t>(y);
+        const int y0 = y_cache.lo[yi];
+        const int y1 = y_cache.hi[yi];
+        const double wy = y_cache.w[yi];
+        const double wy0 = y_cache.w0[yi];
+        for (int x = 0; x < img_size; ++x) {
+            const auto xi = static_cast<size_t>(x);
+            const int x0 = x_cache.lo[xi];
+            const int x1 = x_cache.hi[xi];
+            const double wx = x_cache.w[xi];
+            const double wx0 = x_cache.w0[xi];
+            const size_t chw_base = sam3_count_mul(y, img_size) + xi;
+            for (int c = 0; c < C; ++c) {
+                const double p00 = pixels[pixel_index(y0, x0, c)];
+                const double p01 = pixels[pixel_index(y0, x1, c)];
+                const double p10 = pixels[pixel_index(y1, x0, c)];
+                const double p11 = pixels[pixel_index(y1, x1, c)];
+                const double resized =
+                    (wy0 * ((wx0 * p00) + (wx * p01))) + (wy * ((wx0 * p10) + (wx * p11)));
+                const int iv = std::clamp(static_cast<int>(std::lround(resized)), 0, 255);
+                const float v = static_cast<float>(iv) / 255.0f;
+                result[static_cast<size_t>(c) * image_area + chw_base] =
+                    (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
             }
         }
     }
+
+    return result;
 }
 
 // Preprocess an image: resize to img_size × img_size, convert to float, normalize.
 // Returns a float tensor in [C, H, W] layout (channel-first), range normalized with
 // mean=0.5, std=0.5 → pixel values in [-1, 1].
 static std::vector<float> sam3_preprocess_image(const sam3_image& image, int img_size) {
-    const int C = 3;
-    const size_t image_area = sam3_count_mul(img_size, img_size);
-    std::vector<float> result(static_cast<size_t>(C) * image_area);
-
-    // Resize to img_size × img_size via uint8 bilinear (matching torch pipeline)
-    std::vector<uint8_t> resized;
-    const uint8_t* pixels = image.data.data();
-    int w = image.width;
-    int h = image.height;
-
-    if (w != img_size || h != img_size) {
-        resized.resize(image_area * static_cast<size_t>(3));
-        sam3_resize_bilinear(pixels, w, h, resized.data(), img_size, img_size);
-        pixels = resized.data();
-    }
-
-    // Convert to float [C, H, W] with normalization: (pixel / 255.0 - 0.5) / 0.5
-    for (int c = 0; c < C; ++c) {
-        for (int y = 0; y < img_size; ++y) {
-            for (int x = 0; x < img_size; ++x) {
-                const size_t hwc_index = ((sam3_count_mul(y, img_size) + static_cast<size_t>(x)) *
-                                          static_cast<size_t>(3)) +
-                                         static_cast<size_t>(c);
-                const size_t chw_index = (static_cast<size_t>(c) * image_area) +
-                                         sam3_count_mul(y, img_size) + static_cast<size_t>(x);
-                float v = pixels[hwc_index] / 255.0f;
-                result[chw_index] = (v - 0.5f) / 0.5f;
-            }
-        }
-    }
-
-    return result;
+    return sam3_preprocess_image_chw(image, img_size, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f});
 }
 
 // SAM2 preprocessing: resize + ImageNet normalization.
 // Returns [C, H, W] float, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225].
 static std::vector<float> sam2_preprocess_image(const sam3_image& image, int img_size) {
-    static const float mean[3] = {0.485f, 0.456f, 0.406f};
-    static const float std_d[3] = {0.229f, 0.224f, 0.225f};
-    const int C = 3;
-    const size_t image_area = sam3_count_mul(img_size, img_size);
-    std::vector<float> result(static_cast<size_t>(C) * image_area);
-
-    std::vector<uint8_t> resized;
-    const uint8_t* pixels = image.data.data();
-    int w = image.width;
-    int h = image.height;
-
-    if (w != img_size || h != img_size) {
-        resized.resize(image_area * static_cast<size_t>(3));
-        sam3_resize_bilinear(pixels, w, h, resized.data(), img_size, img_size);
-        pixels = resized.data();
-    }
-
-    for (int c = 0; c < C; ++c) {
-        for (int y = 0; y < img_size; ++y) {
-            for (int x = 0; x < img_size; ++x) {
-                const size_t hwc_index = ((sam3_count_mul(y, img_size) + static_cast<size_t>(x)) *
-                                          static_cast<size_t>(3)) +
-                                         static_cast<size_t>(c);
-                const size_t chw_index = (static_cast<size_t>(c) * image_area) +
-                                         sam3_count_mul(y, img_size) + static_cast<size_t>(x);
-                float v = pixels[hwc_index] / 255.0f;
-                result[chw_index] = (v - mean[c]) / std_d[c];
-            }
-        }
-    }
-
-    return result;
+    return sam3_preprocess_image_chw(
+        image, img_size, {0.485f, 0.456f, 0.406f}, {0.229f, 0.224f, 0.225f});
 }
 
 /*****************************************************************************

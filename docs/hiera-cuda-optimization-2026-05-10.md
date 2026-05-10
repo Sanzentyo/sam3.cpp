@@ -26,6 +26,7 @@ Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 | After CPU PE caching | 136.1 | 133.3 | 148.9 | removed repeated Hiera/neck PE generation |
 | After backend neck PE reuse | 129.8 | 127.3 | 139.7 | avoids repeated neck PE backend upload |
 | After `head_dim=56` FA tile | 120.1 | 119.0 | 127.1 | avoids fallback attention for Base+ |
+| After fused preprocess | 117.4 | 115.4 | 128.3 | resize and normalize in one pass |
 
 Encode-size sweep after PE caching. This is a scaling sweep, not an
 apples-to-apples comparison against the official PyTorch baseline unless the
@@ -107,6 +108,11 @@ semantically weak for SAM2.1 Base+. The implementation is still slower than
 official PyTorch at the same input encode size, but the quality gap is much
 smaller with the CUDA FA tile path.
 
+Fusing resize and normalization in preprocessing preserves the measured quality
+numbers and reduces CPU preprocessing from about `15.7 ms/frame` to
+`12.9 ms/frame` at 1024. The 1024 bbox-only tracking path improves to
+`117.4 ms/frame`; the 512 bbox-only path improves to `32.0 ms/frame`.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -151,14 +157,16 @@ size:
    this sample. The f32/f16/q8/q4 sweep shows this is not primarily a
    quantization issue, and the multimask prompt experiment does not close the
    gap at 1024.
-2. Reduce Hiera encode graph compute. After caching fixed PE and enabling
-   `head_dim=56` tile FlashAttention, the remaining dominant steady-state cost
-   is still the Hiera CUDA graph compute, now roughly 72-76 ms after warmup.
+2. Reduce Hiera encode graph compute. After caching fixed PE, enabling
+   `head_dim=56` tile FlashAttention, and fusing preprocessing, the remaining
+   dominant steady-state cost is still the Hiera CUDA graph compute, now roughly
+   72-76 ms after warmup.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
    official PyTorch 512, C++ 640 with official PyTorch 640, and so on.
-4. Reduce CPU preprocessing cost. Resize/normalize still costs roughly
-   14-18 ms/frame.
+4. Continue reducing CPU preprocessing cost or move it to GPU. Fused
+   resize/normalize brings it down to roughly 10-15 ms/frame at 1024, but that
+   is still large relative to the PyTorch baseline.
 5. Treat `head_dim=56` FlashAttention support as a secondary optimization. The
    tile path is now enabled and gives a modest 1024 speedup plus a large quality
    improvement. MMA support for 56 did not compile and should be treated as a
@@ -186,4 +194,7 @@ outputs/hiera-head56-tile/base_plus_q4_0_noprofile.log
 outputs/hiera-head56-tile/summary.json
 outputs/sam2-official-quality-10-head56-tile-q4_0/summary.json
 outputs/sam2-official-quality-512-head56-tile-q4_0/summary.json
+outputs/preprocess-fused-head56/summary.json
+outputs/sam2-official-quality-10-preprocess-fused-q4_0/summary.json
+outputs/sam2-official-quality-512-preprocess-fused-q4_0/summary.json
 ```

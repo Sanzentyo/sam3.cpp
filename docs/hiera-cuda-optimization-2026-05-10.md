@@ -47,7 +47,9 @@ primary comparison must keep both the decoded input resolution and the model
 input encode size fixed. Running multiple source resolutions or encode sizes is
 still useful, but those rows are a scaling study; they must not be used as a
 cross-implementation win/loss comparison unless the matching PyTorch run uses
-the same source resolution and encode size.
+the same decoded source resolution and encode size. In short: use matched
+same-input rows for C++/PyTorch conclusions, and use unmatched resolution rows
+only to describe scaling.
 
 | State | Track ms/frame | P50 ms | P95 ms | Note |
 | --- | ---: | ---: | ---: | --- |
@@ -85,7 +87,10 @@ Base+ precision sweep after CPU PE caching:
 | `sam2.1_hiera_base_plus_q4_1` | 136.0 | 134.4 | 143.7 | 649.6 |
 | `sam2.1_hiera_base_plus_q4_0` | 134.5 | 133.6 | 142.1 | 647.8 |
 
-Current same-size precision sweep after the Hiera graph cleanups:
+Current precision sweep after the Hiera graph cleanups. The C++ rows below use
+the same decoded `1008x568` source frames as the official PyTorch comparison
+for the matching encode-size row; the 512 and 1024 rows should be read as
+separate same-input comparisons, not as cross-resolution wins or losses:
 
 | Encode size | Model | C++ track ms/frame | P50 ms | P95 ms | PyTorch bf16 ms/frame |
 | --- | --- | ---: | ---: | ---: | ---: |

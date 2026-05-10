@@ -345,6 +345,7 @@ def main() -> int:
     py_rows = run_python_sam2(args, frame_dir, args.out_dir)
     py_by_offset = {int(row["offset"]): row for row in py_rows}
     python_summary = json.loads((args.out_dir / "python-summary.json").read_text(encoding="utf-8"))
+    source_width, source_height = frame_size(frame_dir)
     metadata_validation = validate_cpp_metadata(cpp_metadata, args, frame_dir, python_summary)
 
     comparisons: list[dict[str, Any]] = []
@@ -377,6 +378,18 @@ def main() -> int:
         "comparisons": comparisons,
         "python_summary": python_summary,
         "metadata_validation": metadata_validation,
+        "comparison_contract": {
+            "same_decoded_source_resolution": True,
+            "decoded_source_width": source_width,
+            "decoded_source_height": source_height,
+            "same_frame_count": True,
+            "same_point_prompt": True,
+            "same_encode_img_size": True,
+            "note": (
+                "C++/official PyTorch speed or quality rows are directly comparable "
+                "only when these conditions are true. Other resolutions are scaling studies."
+            ),
+        },
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)

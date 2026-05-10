@@ -114,8 +114,8 @@ same q4_0 run improves substantially:
 
 | Encode size | C++ track ms/frame | PyTorch ms/frame | Mean mask IoU | Min mask IoU | Note |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 1024 | 126.8 | 43.7 | 0.4745 | 0.0000 | same source frames and encode size; frame 8 official output is empty |
-| 512 | 39.9 | 21.1 | 0.7798 | 0.7743 | same source frames and encode size |
+| 1024 | 120.2 | 43.4 | 0.4745 | 0.0000 | metadata-validated same decoded resolution, frame range, prompt, and encode size; frame 8 official output is empty |
+| 512 | 36.8 | 15.4 | 0.7798 | 0.7743 | metadata-validated same decoded resolution, frame range, prompt, and encode size |
 
 This indicates the previous no-mask attention fallback was both slower and
 semantically weak for SAM2.1 Base+. The implementation is still slower than
@@ -152,11 +152,12 @@ parity:
 | multimask prompt | 1024 | 134 | 0.0321 | 0.0000 |
 | multimask prompt | 512 | 39 | 0.1822 | 0.1394 |
 
-At `--encode-img-size 512`, C++ reaches `34.4 ms/frame`. The initial comparison
-was against the default official PyTorch 1024 run and was therefore not a fair
-speed baseline. Re-running official PyTorch with `model.image_size=512` gives
-`15.6 ms/frame`, so C++ is still about 2.2x slower at the same input encode
-size:
+At `--encode-img-size 512`, the earlier bbox-only scaling run reached
+`34.4 ms/frame`, but that initial comparison was against the default official
+PyTorch 1024 run and was therefore not a fair speed baseline. The current
+metadata-validated full-mask quality run measures C++ at `36.8 ms/frame` and
+official PyTorch with `model.image_size=512` at `15.4 ms/frame`, so C++ is still
+about 2.4x slower at the same input encode size for the full-mask quality path:
 
 | Metric | Value |
 | --- | ---: |
@@ -165,8 +166,8 @@ size:
 | Mean mask IoU vs PyTorch 512 | 0.1496 |
 | Minimum mask IoU vs PyTorch 512 | 0.1416 |
 | Minimum bbox IoU vs PyTorch 512 | 0.0968 |
-| C++ 512 track ms/frame | 34.4 |
-| PyTorch 512 propagate ms/frame | 15.6 |
+| C++ 512 track ms/frame | 36.8 |
+| PyTorch 512 propagate ms/frame | 15.4 |
 
 ## Priority
 
@@ -217,4 +218,6 @@ outputs/sam2-official-quality-10-preprocess-fused-q4_0/summary.json
 outputs/sam2-official-quality-512-preprocess-fused-q4_0/summary.json
 outputs/debug-output-gated/summary.json
 outputs/metadata-jsonl-check/cpp.jsonl
+outputs/sam2-official-quality-10-metadata-q4_0/summary.json
+outputs/sam2-official-quality-512-metadata-q4_0/summary.json
 ```

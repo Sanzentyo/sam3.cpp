@@ -1300,6 +1300,7 @@ static bool sam3_profile_hiera_cuts(ggml_backend_t backend,
 
     const int n_warmup = std::max(0, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_WARMUP", 1));
     const int n_iter = std::max(1, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_ITER", 3));
+    const bool print_ops = sam3_getenv("SAM3_PROFILE_HIERA_CUT_OPS").has_value();
 
     for (const auto& cut : cuts) {
         if (cut.tensors.empty())
@@ -1315,6 +1316,25 @@ static bool sam3_profile_hiera_cuts(ggml_backend_t backend,
         for (auto* tensor : cut.tensors) {
             if (tensor != nullptr) {
                 ggml_build_forward_expand(graph, tensor);
+            }
+        }
+
+        if (print_ops) {
+            std::map<std::string, std::pair<int, int64_t>> op_stats;
+            const int n_nodes = ggml_graph_n_nodes(graph);
+            for (int i = 0; i < n_nodes; ++i) {
+                auto* node = ggml_graph_node(graph, i);
+                auto& stat = op_stats[ggml_op_name(node->op)];
+                stat.first += 1;
+                stat.second += ggml_nelements(node);
+            }
+            for (const auto& [op_name, stat] : op_stats) {
+                fprintf(stderr,
+                        "SAM3_PROFILE_HIERA_CUT_OPS label=%s op=%s count=%d out_elements=%lld\n",
+                        cut.label.c_str(),
+                        op_name.c_str(),
+                        stat.first,
+                        static_cast<long long>(stat.second));
             }
         }
 
@@ -5122,28 +5142,39 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     auto* qkv = ggml_mul_mat(ctx, blk.qkv_w, flat);
     qkv = ggml_add(ctx, qkv, ggml_reshape_3d(ctx, blk.qkv_b, 3 * C_out, 1, 1));
 
-    // Split Q, K, V
     int64_t head_dim = C_out / blk.num_heads;
-    auto* q = ggml_view_3d(ctx, qkv, C_out, N_kv, B_win, qkv->nb[1], qkv->nb[2], 0);
-    auto* k = ggml_view_3d(
-        ctx, qkv, C_out, N_kv, B_win, qkv->nb[1], qkv->nb[2], C_out * ggml_type_size(qkv->type));
-    auto* v = ggml_view_3d(ctx,
-                           qkv,
-                           C_out,
-                           N_kv,
-                           B_win,
-                           qkv->nb[1],
-                           qkv->nb[2],
-                           2 * C_out * ggml_type_size(qkv->type));
-    q = ggml_cont(ctx, q);
-    k = ggml_cont(ctx, k);
-    v = ggml_cont(ctx, v);
+    const int64_t NH = blk.num_heads;
+    const size_t qkv_type_size = ggml_type_size(qkv->type);
 
     // Q-pooling WITHIN each window: reshape Q to spatial, MaxPool, reshape back
     int64_t N_q = N_kv;
     int64_t out_W;
     int64_t out_H;
+    struct ggml_tensor* Q = nullptr;
+    struct ggml_tensor* K = nullptr;
+    struct ggml_tensor* V = nullptr;
     if (blk.has_q_stride) {
+        auto* q = ggml_view_3d(ctx, qkv, C_out, N_kv, B_win, qkv->nb[1], qkv->nb[2], 0);
+        auto* k = ggml_view_3d(ctx,
+                               qkv,
+                               C_out,
+                               N_kv,
+                               B_win,
+                               qkv->nb[1],
+                               qkv->nb[2],
+                               static_cast<size_t>(C_out) * qkv_type_size);
+        auto* v = ggml_view_3d(ctx,
+                               qkv,
+                               C_out,
+                               N_kv,
+                               B_win,
+                               qkv->nb[1],
+                               qkv->nb[2],
+                               2 * static_cast<size_t>(C_out) * qkv_type_size);
+        q = ggml_cont(ctx, q);
+        k = ggml_cont(ctx, k);
+        v = ggml_cont(ctx, v);
+
         int64_t win_W = attn_input->ne[1];
         int64_t win_H = attn_input->ne[2];
         auto* q_spatial = ggml_reshape_4d(ctx, q, C_out, win_W, win_H, B_win);
@@ -5152,27 +5183,58 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
         out_H = q_pooled->ne[2];
         N_q = out_W * out_H;
         q = ggml_reshape_3d(ctx, q_pooled, C_out, N_q, B_win);
+
+        Q = ggml_reshape_4d(ctx, q, head_dim, NH, N_q, B_win);
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+        Q = ggml_reshape_3d(ctx, Q, head_dim, N_q, NH * B_win);
+        Q = ggml_reshape_4d(ctx, Q, head_dim, N_q, NH, B_win);
+
+        K = ggml_reshape_4d(ctx, k, head_dim, NH, N_kv, B_win);
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        K = ggml_reshape_3d(ctx, K, head_dim, N_kv, NH * B_win);
+        K = ggml_reshape_4d(ctx, K, head_dim, N_kv, NH, B_win);
+
+        V = ggml_reshape_4d(ctx, v, head_dim, NH, N_kv, B_win);
+        V = ggml_permute(ctx, V, 0, 2, 1, 3);  // non-contiguous OK for flash_attn
     } else {
         out_W = attn_input->ne[1];
         out_H = attn_input->ne[2];
+
+        Q = ggml_view_4d(ctx,
+                         qkv,
+                         head_dim,
+                         NH,
+                         N_kv,
+                         B_win,
+                         static_cast<size_t>(head_dim) * qkv_type_size,
+                         qkv->nb[1],
+                         qkv->nb[2],
+                         0);
+        K = ggml_view_4d(ctx,
+                         qkv,
+                         head_dim,
+                         NH,
+                         N_kv,
+                         B_win,
+                         static_cast<size_t>(head_dim) * qkv_type_size,
+                         qkv->nb[1],
+                         qkv->nb[2],
+                         static_cast<size_t>(C_out) * qkv_type_size);
+        V = ggml_view_4d(ctx,
+                         qkv,
+                         head_dim,
+                         NH,
+                         N_kv,
+                         B_win,
+                         static_cast<size_t>(head_dim) * qkv_type_size,
+                         qkv->nb[1],
+                         qkv->nb[2],
+                         2 * static_cast<size_t>(C_out) * qkv_type_size);
+
+        Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+        K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+        V = ggml_permute(ctx, V, 0, 2, 1, 3);  // non-contiguous OK for flash_attn
     }
-
-    // Multi-head attention — follow SAM3 ViT pattern exactly:
-    // Q: [C_out, N, B_win] → [HD, NH, N, B_win] → permute(0,2,1,3) → cont → [HD, N, NH*B_win]
-    //                       → reshape_4d [HD, N, NH, B_win]
-    int64_t NH = blk.num_heads;
-    auto* Q = ggml_reshape_4d(ctx, q, head_dim, NH, N_q, B_win);
-    Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
-    Q = ggml_reshape_3d(ctx, Q, head_dim, N_q, NH * B_win);
-    Q = ggml_reshape_4d(ctx, Q, head_dim, N_q, NH, B_win);
-
-    auto* K = ggml_reshape_4d(ctx, k, head_dim, NH, N_kv, B_win);
-    K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
-    K = ggml_reshape_3d(ctx, K, head_dim, N_kv, NH * B_win);
-    K = ggml_reshape_4d(ctx, K, head_dim, N_kv, NH, B_win);
-
-    auto* V = ggml_reshape_4d(ctx, v, head_dim, NH, N_kv, B_win);
-    V = ggml_permute(ctx, V, 0, 2, 1, 3);  // non-contiguous OK for flash_attn
 
     float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
     auto* attn_out = sam3_flash_attn_head_dim_supported(head_dim)

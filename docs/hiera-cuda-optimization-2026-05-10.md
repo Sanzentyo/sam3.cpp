@@ -25,6 +25,9 @@ path can be treated as a Rust-wrapper baseline.
 - Added opt-in `SAM3_PROFILE_HIERA_CUTS=1` cumulative cut profiling for SAM2
   Hiera. It times Hiera stage outputs and all FPN outputs separately from the
   normal graph so the dominant region can be identified.
+- Added optional `SAM3_PROFILE_HIERA_CUT_OPS=1` op-count logging for Hiera cuts.
+- Removed avoidable Q/K/V layout copies in non-q-stride Hiera attention blocks
+  by viewing the fused QKV projection as head-split tensors directly.
 
 ## Performance
 
@@ -48,6 +51,7 @@ a cross-implementation win/loss comparison.
 | After fused preprocess | 117.4 | 115.4 | 128.3 | resize and normalize in one pass |
 | After gating debug tensor outputs | 116.6 | 115.8 | 126.2 | removes nonessential debug graph outputs unless requested |
 | After Hiera PE backend cache | 113.6 | 113.8 | 121.6 | avoids repeated CPU upload of Hiera positional embedding |
+| After direct QKV head views | 110.1 | 109.1 | 117.9 | removes extra Q/K/V `cont` and reshape nodes in non-q-stride Hiera blocks |
 
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
@@ -203,6 +207,22 @@ incremental values are noisy and should not be read as exact block costs. The
 stable conclusion is that stage 2 dominates, with blocks 11-16 and the global
 blocks 12/16 worth kernel-level profiling next.
 
+The op-count version of the same focus profile confirms that the middle stage-2
+cuts are dominated by repeated layout and projection work. From `hiera_stage_1`
+to `hiera_stage_2_focus_block_11`, the cumulative graph adds 172 `RESHAPE`, 59
+`CONT`, 57 `ADD`, 39 `PERMUTE`, and 29 `MUL_MAT` nodes per frame. This made
+QKV/head layout handling a lower-risk target than changing attention math.
+
+The direct-QKV-head-view change preserves the previous C++ output exactly on the
+10-frame 1024 full-mask sample: `mask_hash_equal_rows=10`,
+`min_bbox_iou=1.0`, `max_bbox_delta_px=0.0`, and `max_score_abs_delta=0.0`.
+The normal Hiera graph shrinks from 1601 to 1391 nodes. The measured 1024
+bbox-only run improves from `113.6 ms/frame` to `110.1 ms/frame`; the
+full-mask run with JSONL output measures `111.6 ms/frame`. This is still slower
+than official PyTorch at the same 1024 encode size, so the next target remains
+Hiera stage 2, especially the global-attention blocks and projection/MLP
+matmuls.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -251,7 +271,7 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
 2. Reduce Hiera encode graph compute. After caching fixed PE, enabling
    `head_dim=56` tile FlashAttention, and fusing preprocessing, the remaining
    dominant steady-state cost is still the Hiera CUDA graph compute, now roughly
-   72-76 ms after warmup.
+   67-74 ms after warmup after direct QKV head views.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
    official PyTorch 512, C++ 640 with official PyTorch 640, and so on, with the
@@ -298,4 +318,10 @@ outputs/hiera-pos-backend-cache/parity.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_cuts_fpn_all_summary.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_blocks_summary.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_focus_summary.json
+outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_focus_ops_summary.json
+outputs/hiera-qkv-view-opt/bbox_only_summary.json
+outputs/hiera-qkv-view-opt/fullmask_summary.json
+outputs/hiera-qkv-view-opt/profile_summary.json
+outputs/hiera-qkv-view-opt/stage2_focus_summary.json
+outputs/hiera-qkv-view-opt/parity.json
 ```

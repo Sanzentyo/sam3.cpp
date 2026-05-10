@@ -28,6 +28,9 @@ CPU_SPAN_RE = re.compile(r"SAM3_PROFILE cpu name=(\S+) ms=([0-9.]+)")
 HIERA_CUT_RE = re.compile(
     r"SAM3_PROFILE_HIERA_CUT label=(\S+) nodes=(\d+) mean_ms=([0-9.]+) warmup=(\d+) iter=(\d+)"
 )
+HIERA_CUT_OPS_RE = re.compile(
+    r"SAM3_PROFILE_HIERA_CUT_OPS label=(\S+) op=(\S+) count=(\d+) out_elements=(\d+)"
+)
 
 
 def mean(values: list[float]) -> float | None:
@@ -54,6 +57,19 @@ def summarize(path: Path) -> dict[str, Any]:
                 "iter": int(iters),
             }
         )
+    hiera_cut_ops: dict[str, dict[str, dict[str, int | float]]] = {}
+    for label, op, count, elements in HIERA_CUT_OPS_RE.findall(text):
+        op_stats = hiera_cut_ops.setdefault(label, {}).setdefault(
+            op, {"samples": 0, "count": 0, "out_elements": 0}
+        )
+        op_stats["samples"] += 1
+        op_stats["count"] += int(count)
+        op_stats["out_elements"] += int(elements)
+    for ops in hiera_cut_ops.values():
+        for op_stats in ops.values():
+            samples = int(op_stats["samples"])
+            op_stats["mean_count"] = op_stats["count"] / samples
+            op_stats["mean_out_elements"] = op_stats["out_elements"] / samples
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -84,6 +100,13 @@ def summarize(path: Path) -> dict[str, Any]:
                 "values": values,
             }
             for label, values in sorted(hiera_cuts.items())
+        },
+        "hiera_cut_ops": {
+            label: {
+                op: stats
+                for op, stats in sorted(ops.items(), key=lambda item: item[0])
+            }
+            for label, ops in sorted(hiera_cut_ops.items(), key=lambda item: item[0])
         },
     }
     if row:

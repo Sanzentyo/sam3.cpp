@@ -716,6 +716,36 @@ at 1024 and `23.2 ms/frame` at 512. This is useful as a low-risk cleanup, but
 it is not a major speed fix and does not change the conclusion that PyTorch is
 still much faster on the matched comparison.
 
+The next root-level `head_dim=56` attempt moved the D56-to-D64 padding into
+ggml's CUDA FlashAttention op instead of adding SAM graph pad/view nodes. For
+mask-free f32 Q/K/V on tensor-core GPUs, ggml now zero-pads temporary Q/K/V
+buffers to D64, runs the existing D64 f16 MMA FlashAttention path, and slices
+the first 56 output lanes back to the original destination. The old tile path
+can be restored with `GGML_CUDA_DISABLE_FATTN56_PAD_MMA=1`.
+
+This is not bit-identical to the tile path because the f16 MMA accumulation is a
+different numeric path, but the direct attention parity checks stay within the
+same tolerance used for the existing CUDA FlashAttention checks:
+
+| Shape | Max abs | Mean abs | Bad values | Non-finite |
+| --- | ---: | ---: | ---: | ---: |
+| `D=56,N=196,heads=8,batch=25` | `0.0320834816` | `0.00512893543` | `0/2195200` | `0` |
+| `D=56,N=4096,heads=8,batch=1,sampled_q=9` | `0.00513070542` | `0.00105931065` | `0/4032` | `0` |
+
+On the 10-frame Base+ q4_0 1024 bbox-only run, the paired measurements were:
+
+| Path | Track ms/frame runs | Mean | Stdev | P50 mean | P95 mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Tile baseline | `90.0, 90.0, 91.0` | `90.33` | `0.58` | `88.33` | `99.67` |
+| ggml D56->D64 MMA | `81.0, 81.0, 81.0` | `81.00` | `0.00` | `79.00` | `88.67` |
+
+That is a `10.33%` track-ms improvement on this sample. Full-mask output stays
+semantically close but not hash-identical to the tile path:
+`mask_hash_equal_rows=0/10`, `min_bbox_iou=0.9957537155`,
+`max_bbox_delta_px=4.0`, `max_score_abs_delta=0.009795`, and
+`max_abs_mask_area_rel_delta=0.0208719`. Treat this as a fast numeric path, not
+as a bit-exact replacement.
+
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
 1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change
@@ -846,10 +876,10 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
 4. Continue reducing CPU preprocessing cost or move it to GPU. Threaded fused
    resize/normalize is parity-preserving and helps, but the remaining CPU cost
    is still visible relative to the PyTorch baseline.
-5. Treat `head_dim=56` FlashAttention support as a secondary optimization. The
-   tile path is now enabled and gives a modest 1024 speedup plus a large quality
-   improvement. MMA support for 56 did not compile and should be treated as a
-   separate ggml kernel-design task, not a simple allowlist change.
+5. Keep `head_dim=56` FlashAttention as a ggml kernel-design task. The current
+   D56-to-D64 MMA path gives a real speedup, but it is not bit-exact against the
+   tile path. A dedicated D56 MMA kernel would need to handle padded lanes
+   internally rather than simply allowlisting `DKQ=56,DV=56`.
 
 ## Artifacts
 
@@ -942,6 +972,8 @@ outputs/fattn56-mma-gated/mma_ncols32_1024.log
 build/xmake-release-cuda/examples/sam3_fattn_parity --cuda --d 56 --n 196 --heads 8 --batch 25
 build/xmake-release-cuda/examples/sam3_fattn_parity --cuda --d 56 --n 4096 --heads 8 --batch 1 --sample-queries 9
 outputs/fattn56-nbatch64/fullmask_parity.json
+outputs/fattn56-pad-mma/final/bbox_stats.json
+outputs/fattn56-pad-mma/final/fullmask_parity_summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

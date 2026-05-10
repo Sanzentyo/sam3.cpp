@@ -20,6 +20,7 @@ namespace {
 
 struct Args {
     int d = 56;
+    int run_d = 0;
     int n = 196;
     int heads = 8;
     int batch = 1;
@@ -32,7 +33,7 @@ struct Args {
 static void usage(const char* argv0) {
     std::cerr << std::format(
         "Usage: {} [--cpu|--cuda] [--d <head_dim>] [--n <tokens>] "
-        "[--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance <f>]\n",
+        "[--run-d <head_dim>] [--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance <f>]\n",
         argv0);
 }
 
@@ -81,6 +82,11 @@ static bool parse_args(int argc, char** argv, Args& args) {
         } else if (arg == "--n") {
             const char* v = need_value("--n");
             if (!v || !parse_int(v, args.n)) {
+                return false;
+            }
+        } else if (arg == "--run-d") {
+            const char* v = need_value("--run-d");
+            if (!v || !parse_int(v, args.run_d)) {
                 return false;
             }
         } else if (arg == "--heads") {
@@ -141,6 +147,24 @@ static std::vector<float> fp16_rounded(const std::vector<float>& src) {
     ggml_fp32_to_fp16_row(src.data(), tmp.data(), static_cast<int64_t>(src.size()));
     ggml_fp16_to_fp32_row(tmp.data(), dst.data(), static_cast<int64_t>(dst.size()));
     return dst;
+}
+
+static std::vector<float> pad_head_dim(const std::vector<float>& src, const Args& args, int run_d) {
+    if (run_d == args.d) {
+        return src;
+    }
+    std::vector<float> out(static_cast<size_t>(run_d) * args.n * args.heads * args.batch, 0.0f);
+    for (int b = 0; b < args.batch; ++b) {
+        for (int h = 0; h < args.heads; ++h) {
+            for (int n = 0; n < args.n; ++n) {
+                for (int d = 0; d < args.d; ++d) {
+                    out[index4(d, n, h, b, run_d, args.n, args.heads)] =
+                        src[index4(d, n, h, b, args.d, args.n, args.heads)];
+                }
+            }
+        }
+    }
+    return out;
 }
 
 static std::vector<float> reference_attention(const std::vector<float>& q,
@@ -228,6 +252,7 @@ static ggml_backend_t create_backend(const Args& args) {
 }
 
 static bool run_ggml_attention(const Args& args,
+                               int run_d,
                                const std::vector<float>& q_data,
                                const std::vector<float>& k_data,
                                const std::vector<float>& v_data,
@@ -249,9 +274,9 @@ static bool run_ggml_attention(const Args& args,
         return false;
     }
 
-    ggml_tensor* q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, args.d, args.n, args.heads, args.batch);
-    ggml_tensor* k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, args.d, args.n, args.heads, args.batch);
-    ggml_tensor* v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, args.d, args.n, args.heads, args.batch);
+    ggml_tensor* q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, run_d, args.n, args.heads, args.batch);
+    ggml_tensor* k = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, run_d, args.n, args.heads, args.batch);
+    ggml_tensor* v = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, run_d, args.n, args.heads, args.batch);
     ggml_set_input(q);
     ggml_set_input(k);
     ggml_set_input(v);
@@ -306,11 +331,19 @@ int main(int argc, char** argv) {
         usage(argv[0]);
         return 0;
     }
+    const int run_d = args.run_d > 0 ? args.run_d : args.d;
+    if (run_d < args.d) {
+        std::cerr << std::format("--run-d must be >= --d, got {} < {}\n", run_d, args.d);
+        return 2;
+    }
 
     const size_t elements = static_cast<size_t>(args.d) * args.n * args.heads * args.batch;
     auto q = make_input(elements, 1);
     auto k = make_input(elements, 2);
     auto v = make_input(elements, 3);
+    auto q_run = pad_head_dim(q, args, run_d);
+    auto k_run = pad_head_dim(k, args, run_d);
+    auto v_run = pad_head_dim(v, args, run_d);
 
     // CUDA FlashAttention converts K/V to fp16 for this path. Match that in the
     // scalar reference so this test catches kernel bugs instead of conversion noise.
@@ -320,29 +353,44 @@ int main(int argc, char** argv) {
     auto ref = reference_attention(q, k_ref, v_ref, args, query_indices);
 
     std::vector<float> got;
-    if (!run_ggml_attention(args, q, k, v, got)) {
+    if (!run_ggml_attention(args, run_d, q_run, k_run, v_run, got)) {
         return 1;
     }
-    if (got.size() != ref.size()) {
-        std::cerr << std::format("size mismatch: got={} ref={}\n", got.size(), ref.size());
+    const size_t expected_got_size = static_cast<size_t>(run_d) * args.n * args.heads * args.batch;
+    if (got.size() != expected_got_size) {
+        std::cerr << std::format("size mismatch: got={} expected={}\n", got.size(), expected_got_size);
         return 1;
     }
 
     float max_abs = 0.0f;
     double mean_abs = 0.0;
     size_t max_i = 0;
+    float max_got = 0.0f;
+    float max_ref = 0.0f;
     size_t bad = 0;
+    size_t nonfinite = 0;
     size_t checked = 0;
     for (int b = 0; b < args.batch; ++b) {
         for (int h = 0; h < args.heads; ++h) {
             for (const int nq : query_indices) {
                 for (int d = 0; d < args.d; ++d) {
-                    const size_t i = index4(d, nq, h, b, args.d, args.n, args.heads);
-                    const float diff = std::fabs(got[i] - ref[i]);
+                    const size_t got_i = index4(d, nq, h, b, run_d, args.n, args.heads);
+                    const size_t ref_i = index4(d, nq, h, b, args.d, args.n, args.heads);
+                    if (!std::isfinite(got[got_i]) || !std::isfinite(ref[ref_i])) {
+                        ++nonfinite;
+                        if (nonfinite == 1) {
+                            max_i = got_i;
+                        }
+                        ++checked;
+                        continue;
+                    }
+                    const float diff = std::fabs(got[got_i] - ref[ref_i]);
                     mean_abs += diff;
                     if (diff > max_abs) {
                         max_abs = diff;
-                        max_i = i;
+                        max_i = got_i;
+                        max_got = got[got_i];
+                        max_ref = ref[ref_i];
                     }
                     if (diff > args.tolerance) {
                         ++bad;
@@ -352,13 +400,15 @@ int main(int argc, char** argv) {
             }
         }
     }
-    mean_abs /= static_cast<double>(checked);
+    mean_abs = nonfinite == checked ? std::numeric_limits<double>::quiet_NaN()
+                                    : mean_abs / static_cast<double>(checked - nonfinite);
 
     std::cout << std::format(
-        "backend={} D={} N={} heads={} batch={} sampled_q={} max_abs={:.9g} "
-        "mean_abs={:.9g} bad={}/{} max_i={}\n",
+        "backend={} D={} run_D={} N={} heads={} batch={} sampled_q={} max_abs={:.9g} "
+        "mean_abs={:.9g} bad={}/{} nonfinite={} max_i={}\n",
         args.cuda ? "CUDA" : "CPU",
         args.d,
+        run_d,
         args.n,
         args.heads,
         args.batch,
@@ -367,17 +417,19 @@ int main(int argc, char** argv) {
         mean_abs,
         bad,
         checked,
+        nonfinite,
         max_i);
 
-    if (bad != 0) {
+    if (bad != 0 || nonfinite != 0) {
         std::cerr << std::format(
-            "parity failed: max_abs {:.9g} exceeds tolerance {:.9g} at index {} "
+            "parity failed: max_abs {:.9g} exceeds tolerance {:.9g}, nonfinite={} at index {} "
             "(got {:.9g} ref {:.9g})\n",
             max_abs,
             args.tolerance,
+            nonfinite,
             max_i,
-            got[max_i],
-            ref[max_i]);
+            max_got,
+            max_ref);
         return 1;
     }
     return 0;

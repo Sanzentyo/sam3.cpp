@@ -89,14 +89,21 @@ Current precision spot-check after the Hiera graph cleanups:
 | `sam2.1_hiera_base_plus_q8_0` | 105.9 | 103.2 | 115.7 | fastest bbox-only spot-check |
 | `sam2.1_hiera_base_plus_q4_0` | 107.6 | 105.2 | 117.4 | current quality baseline |
 
-Official PyTorch SAM2.1 Base+ on the same 10-frame clip and default 1024 encode
-size measured `43.4 ms/frame` for propagation with `855.2 MiB` CUDA allocation.
-The current C++ CUDA path is therefore still about 3x slower than official
-PyTorch for this prompt/video at the default 1024 encode size, despite the PE
-cache improvement. The lower encode-size rows above are useful for understanding
-scaling, but they must not be used to claim a speed win over the official 1024
-PyTorch baseline. Any lower-resolution comparison needs an official PyTorch run
-configured to the same input encode size.
+The current same-script C++/official-PyTorch comparison uses the same decoded
+source-frame resolution, frame range, point prompt, model family, and explicit
+SAM2 input encode size:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Note |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 105.5 | 57.5 | 0.545 | same `--encode-img-size` / `model.image_size` |
+| 512 | 29.9 | 20.2 | 0.675 | same `--encode-img-size` / `model.image_size` |
+
+Values below `1.0` in the ratio column mean official PyTorch is faster. The
+current C++ CUDA path is therefore still about `1.83x` slower than official
+PyTorch at 1024 and about `1.48x` slower at 512 for this prompt/video. The
+lower encode-size rows above are still useful for understanding scaling, but
+they must not be used to claim a speed win over the official 1024 PyTorch
+baseline.
 
 ## Detailed Profile
 
@@ -396,4 +403,6 @@ outputs/hiera-current-precision/summary.json
 outputs/sam2-official-quality-10-current-q8_0/summary.json
 outputs/hiera-force-mmq/summary.json
 outputs/hiera-window-matmul-flatten/parity.json
+outputs/model-matrix-sam2-base-plus-q4-current-1024/summary.json
+outputs/model-matrix-sam2-base-plus-q4-current-512/summary.json
 ```

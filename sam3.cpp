@@ -1223,7 +1223,10 @@ static int sam3_eff_feat_size(const sam3_state& s, const sam3_hparams& hp) {
 *****************************************************************************/
 
 // graph execution
-static bool sam3_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph, int n_threads);
+static bool sam3_graph_compute(ggml_backend_t backend,
+                               struct ggml_cgraph* graph,
+                               int n_threads,
+                               const char* label = nullptr);
 
 // ggml building blocks
 static struct ggml_tensor* sam3_layer_norm(struct ggml_context* ctx,
@@ -1243,7 +1246,10 @@ static std::optional<std::string_view> sam3_getenv(std::string_view name);
 ** Internal Helper Implementations
 *****************************************************************************/
 
-static bool sam3_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph, int n_threads) {
+static bool sam3_graph_compute(ggml_backend_t backend,
+                               struct ggml_cgraph* graph,
+                               int n_threads,
+                               const char* label) {
     if (ggml_backend_is_cpu(backend)) {
         ggml_backend_cpu_set_n_threads(backend, n_threads);
     }
@@ -1255,7 +1261,8 @@ static bool sam3_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph
         const auto t1 = std::chrono::high_resolution_clock::now();
         const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         fprintf(stderr,
-                "SAM3_PROFILE compute backend=%s nodes=%d ms=%.3f\n",
+                "SAM3_PROFILE compute label=%s backend=%s nodes=%d ms=%.3f\n",
+                label ? label : "unlabeled",
                 ggml_backend_name(backend),
                 ggml_graph_n_nodes(graph),
                 ms);
@@ -5791,7 +5798,7 @@ static bool edgetam_encode_image(sam3_state& state,
     ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
 
     // Compute
-    if (!sam3_graph_compute(model.backend, graph, state.n_threads)) {
+    if (!sam3_graph_compute(model.backend, graph, state.n_threads, "edgetam_encode")) {
         fprintf(stderr, "%s: graph compute failed\n", __func__);
         return false;
     }
@@ -7018,7 +7025,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // Compute
     SAM3_PROFILE_CPU_START(hiera_encode_graph_compute_total);
-    if (!sam3_graph_compute(model.backend, graph, state.n_threads)) {
+    if (!sam3_graph_compute(model.backend, graph, state.n_threads, "hiera_encode")) {
         fprintf(stderr, "%s: graph compute failed\n", __func__);
         return false;
     }
@@ -13279,7 +13286,7 @@ static sam3_prop_output sam3_propagate_single(
         ggml_backend_tensor_copy(state.neck_trk[1], trk_s1);
     }
 
-    if (!sam3_graph_compute(model.backend, graph, 4)) {
+    if (!sam3_graph_compute(model.backend, graph, 4, "propagate_single")) {
         return output;
     }
 
@@ -13529,7 +13536,7 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
     {
         ggml_backend_tensor_copy(state.neck_trk[2], pix_in_raw);
     }
-    if (!sam3_graph_compute(model.backend, g, 4)) {
+    if (!sam3_graph_compute(model.backend, g, 4, "memory_encode")) {
         return false;
     }
 

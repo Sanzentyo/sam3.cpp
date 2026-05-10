@@ -319,6 +319,14 @@ when the Hiera compute itself is smaller. This does not close the 1024 PyTorch
 gap, but it is a low-risk default improvement and removes the need for callers
 to remember `GGML_CUDA_GRAPH_SHAPE_KEY=1`.
 
+Adding labels to `SAM3_PROFILE compute` makes the 512 post-shape-key track path
+clearer. On a 10-frame q4_0 512 profile, steady Hiera graph compute is about
+`16 ms/frame`, CPU preprocess is about `2.6 ms/frame`, and
+`propagate_single` settles at about `5 ms/frame` after its first graph warmup
+frames. The remaining 512 gap to official PyTorch is therefore no longer only
+Hiera encode; it also includes the propagation graph and small CPU overheads.
+For 1024, Hiera graph compute still dominates at roughly `65 ms` steady-state.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -434,4 +442,5 @@ outputs/model-matrix-sam2-base-plus-current-1024/summary.json
 outputs/model-matrix-sam2-base-plus-current-512/summary.json
 outputs/parity-sam2-base-plus-q4-1024-shape-key-default/summary.json
 outputs/parity-sam2-base-plus-q4-512-shape-key-default/summary.json
+outputs/hiera-shape-key-profile-current/q4_0_512_labeled_profile_summary.json
 ```

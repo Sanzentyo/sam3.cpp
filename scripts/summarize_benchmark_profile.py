@@ -21,7 +21,9 @@ TABLE_ROW_RE = re.compile(
     re.M,
 )
 ENCODE_RE = re.compile(r"sam2_encode_image_hiera: SAM2 image encoded in ([0-9.]+) ms")
-COMPUTE_RE = re.compile(r"SAM3_PROFILE compute backend=(\S+) nodes=(\d+) ms=([0-9.]+)")
+COMPUTE_RE = re.compile(
+    r"SAM3_PROFILE compute (?:label=(\S+) )?backend=(\S+) nodes=(\d+) ms=([0-9.]+)"
+)
 TENSOR_SET_RE = re.compile(r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
 TENSOR_GET_RE = re.compile(r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
 CPU_SPAN_RE = re.compile(r"SAM3_PROFILE cpu name=(\S+) ms=([0-9.]+)")
@@ -47,7 +49,10 @@ def summarize(path: Path) -> dict[str, Any]:
     text = path.read_text(encoding="utf-8", errors="replace")
     row = TABLE_ROW_RE.search(text)
     encodes = [float(value) for value in ENCODE_RE.findall(text)]
-    computes = [(backend, int(nodes), float(ms)) for backend, nodes, ms in COMPUTE_RE.findall(text)]
+    computes = [
+        (label or "unlabeled", backend, int(nodes), float(ms))
+        for label, backend, nodes, ms in COMPUTE_RE.findall(text)
+    ]
     tensor_sets = [float(value) for value in TENSOR_SET_RE.findall(text)]
     tensor_gets = [float(value) for value in TENSOR_GET_RE.findall(text)]
     cpu_spans: dict[str, list[float]] = {}
@@ -108,11 +113,25 @@ def summarize(path: Path) -> dict[str, Any]:
         "encode_ms": encodes,
         "encode_mean_ms": mean(encodes),
         "profile_compute_count": len(computes),
-        "profile_compute_sum_ms": sum(ms for _, _, ms in computes),
+        "profile_compute_sum_ms": sum(ms for _, _, _, ms in computes),
         "profile_compute_top": [
-            {"backend": backend, "nodes": nodes, "ms": ms}
-            for backend, nodes, ms in sorted(computes, key=lambda item: item[2], reverse=True)[:5]
+            {"label": label, "backend": backend, "nodes": nodes, "ms": ms}
+            for label, backend, nodes, ms in sorted(computes, key=lambda item: item[3], reverse=True)[:5]
         ],
+        "profile_compute_by_label": {
+            label: {
+                "count": len(values),
+                "sum_ms": sum(values),
+                "mean_ms": mean(values),
+                "values_ms": values,
+            }
+            for label, values in sorted(
+                {
+                    label: [ms for item_label, _, _, ms in computes if item_label == label]
+                    for label in {item_label for item_label, _, _, _ in computes}
+                }.items()
+            )
+        },
         "tensor_set_sum_ms": sum(tensor_sets),
         "tensor_get_sum_ms": sum(tensor_gets),
         "tensor_get_count": len(tensor_gets),

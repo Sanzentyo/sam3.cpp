@@ -63,6 +63,7 @@ only to describe scaling.
 | After direct QKV head views | 110.1 | 109.1 | 117.9 | removes extra Q/K/V `cont` and reshape nodes in non-q-stride Hiera blocks |
 | After LayerNorm broadcast affine | 107.2 | 105.5 | 115.4 | removes explicit Hiera norm weight/bias `REPEAT` nodes |
 | After threaded preprocess | 102.2 | 100.0 | 114.5 | same-size matrix run with `--n-threads 4`; output parity versus `--n-threads 1` |
+| After CUDA conv-transpose k2s2 kernel | 93.9 | 90.5 | 106.0 | five paired 1024 runs; parity versus generic conv-transpose path |
 
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
@@ -87,10 +88,11 @@ Base+ precision sweep after CPU PE caching:
 | `sam2.1_hiera_base_plus_q4_1` | 136.0 | 134.4 | 143.7 | 649.6 |
 | `sam2.1_hiera_base_plus_q4_0` | 134.5 | 133.6 | 142.1 | 647.8 |
 
-Current precision sweep after the Hiera graph cleanups. The C++ rows below use
-the same decoded `1008x568` source frames as the official PyTorch comparison
-for the matching encode-size row; the 512 and 1024 rows should be read as
-separate same-input comparisons, not as cross-resolution wins or losses:
+Precision sweep after the Hiera graph cleanups and before the CUDA
+conv-transpose k2s2 specialization. The C++ rows below use the same decoded
+`1008x568` source frames as the official PyTorch comparison for the matching
+encode-size row; the 512 and 1024 rows should be read as separate same-input
+comparisons, not as cross-resolution wins or losses:
 
 | Encode size | Model | C++ track ms/frame | P50 ms | P95 ms | PyTorch bf16 ms/frame |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -116,15 +118,27 @@ SAM2 input encode size:
 
 | Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Note |
 | --- | ---: | ---: | ---: | --- |
-| 1024 | 102.2 | 56.9 | 0.557 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
-| 512 | 25.0 | 20.7 | 0.827 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
+| 1024 | 93.9 | 56.9 | 0.606 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
+| 512 | 23.6 | 20.7 | 0.877 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
 
 Values below `1.0` in the ratio column mean official PyTorch is faster. The
-current C++ CUDA path is therefore still about `1.80x` slower than official
-PyTorch at 1024 and about `1.21x` slower at 512 for this prompt/video. The
+current C++ CUDA path is therefore still about `1.65x` slower than official
+PyTorch at 1024 and about `1.14x` slower at 512 for this prompt/video. The
 lower encode-size rows above are still useful for understanding scaling, but
 they must not be used to claim a speed win over the official 1024 PyTorch
 baseline.
+
+The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
+shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
+kernel position for every output element even though this shape has exactly one
+contributing input pixel per output pixel. The specialized path preserves the
+same arithmetic and can be disabled with `GGML_CUDA_CONV_TRANSPOSE_K2S2=0` for
+A/B checks.
+
+| Encode size | Generic mean | Specialized mean | Saved mean | Mean speedup | Parity |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1024 | 101.56 | 93.92 | 7.64 | 8.13% | `mask_hash_equal_rows=10/10`, `max_bbox_delta_px=0`, `max_score_abs_delta=0` |
+| 512 | 25.02 | 23.60 | 1.42 | 6.02% | `mask_hash_equal_rows=10/10`, `max_bbox_delta_px=0`, `max_score_abs_delta=0` |
 
 Threaded preprocessing is parity-preserving on the 10-frame 1024 full-mask
 sample: comparing `--n-threads 1` with `--n-threads 4` gives 10 rows on both
@@ -444,18 +458,19 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
    this sample. The f32/f16/q8/q4 sweep shows this is not primarily a
    quantization issue, and the multimask prompt experiment does not close the
    gap at 1024.
-2. Reduce Hiera encode graph compute. After caching fixed PE, enabling
-   `head_dim=56` tile FlashAttention, and fusing preprocessing, the remaining
-   dominant steady-state cost is still the Hiera CUDA graph compute, now roughly
-   65-70 ms after warmup after direct QKV head views and Hiera LayerNorm
-   broadcast affine cleanup.
+2. Reduce Hiera encode graph compute. After PE caching, `head_dim=56` tile
+   FlashAttention, graph cleanups, threaded preprocessing, and the SAM decoder
+   conv-transpose k2s2 kernel, the 1024 path is still about 1.65x slower than
+   official PyTorch. The next speed target is Hiera global/window
+   FlashAttention and stage-2 quantized MLP matmul shapes rather than the SAM
+   decoder upsampling kernel.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
    official PyTorch 512, C++ 640 with official PyTorch 640, and so on, with the
    same decoded source-frame resolution in both runs.
-4. Continue reducing CPU preprocessing cost or move it to GPU. Fused
-   resize/normalize brings it down to roughly 10-15 ms/frame at 1024, but that
-   is still large relative to the PyTorch baseline.
+4. Continue reducing CPU preprocessing cost or move it to GPU. Threaded fused
+   resize/normalize is parity-preserving and helps, but the remaining CPU cost
+   is still visible relative to the PyTorch baseline.
 5. Treat `head_dim=56` FlashAttention support as a secondary optimization. The
    tile path is now enabled and gives a modest 1024 speedup plus a large quality
    improvement. MMA support for 56 did not compile and should be treated as a
@@ -524,4 +539,7 @@ outputs/model-matrix-sam2-base-plus-q4-threaded-1024/summary.json
 outputs/model-matrix-sam2-base-plus-q4-threaded-512/summary.json
 outputs/preprocess-threaded/q4_0_1024_force_cublas.log
 outputs/preprocess-threaded/q4_0_512_force_cublas.log
+outputs/conv-transpose-k2s2/paired_summary.json
+outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
+outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 ```

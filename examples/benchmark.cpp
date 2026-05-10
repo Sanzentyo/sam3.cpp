@@ -24,6 +24,7 @@
  *   --bbox-only           Track/output bbox rows without full-res masks
  *   --filter <substr>     Only run models whose filename contains <substr>
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
+ *   --no-isolation        Run in-process for profilers that do not follow fork
  */
 
 #include "sam3.h"
@@ -802,6 +803,50 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
     return res;
 }
 
+static BenchResult run_benchmark_direct(const ModelEntry& entry,
+                                        bool use_gpu,
+                                        const std::string& video_path,
+                                        int n_frames,
+                                        float px,
+                                        float py,
+                                        int n_threads,
+                                        int encode_img_size = 0,
+                                        bool bbox_only = false,
+                                        int recondition_every = 16,
+                                        const std::string& output_jsonl = "") {
+    BenchResult res;
+    res.model_name = entry.name;
+    res.backend = requested_backend_label(use_gpu);
+    res.file_size = entry.file_size;
+
+    BenchWire wire = run_single_benchmark(entry.path,
+                                          use_gpu,
+                                          video_path,
+                                          n_frames,
+                                          px,
+                                          py,
+                                          n_threads,
+                                          encode_img_size,
+                                          bbox_only,
+                                          recondition_every,
+                                          output_jsonl);
+    if (wire.ok) {
+        res.t_load_ms = wire.t_load_ms;
+        res.t_frame0_ms = wire.t_frame0_ms;
+        res.t_track_avg_ms = wire.t_track_avg_ms;
+        res.t_track_p50_ms = wire.t_track_p50_ms;
+        res.t_track_p95_ms = wire.t_track_p95_ms;
+        res.t_total_ms = wire.t_total_ms;
+        res.max_rss_kib = wire.max_rss_kib;
+        res.n_detections = wire.n_detections;
+        res.backend = display_backend_name(wire.backend.data(), use_gpu);
+        res.success = true;
+    } else {
+        res.error = wire.error.data();
+    }
+    return res;
+}
+
 // ── Table printing ──────────────────────────────────────────────────────────
 
 static void print_table(const std::vector<BenchResult>& results,
@@ -908,6 +953,7 @@ int main(int argc, char** argv) {
     bool cpu_only = false;
     bool gpu_only = false;
     bool bbox_only = false;
+    bool no_isolation = false;
     std::string filter;
     std::string output_jsonl;
 
@@ -935,6 +981,8 @@ int main(int argc, char** argv) {
             gpu_only = true;
         } else if (arg == "--bbox-only") {
             bbox_only = true;
+        } else if (arg == "--no-isolation") {
+            no_isolation = true;
         } else if (arg == "--filter" && i + 1 < argc) {
             filter = argv[++i];
         } else if (arg == "--output-jsonl" && i + 1 < argc) {
@@ -954,7 +1002,8 @@ int main(int argc, char** argv) {
                 "  --gpu-only            Skip CPU runs\n"
                 "  --bbox-only           Track/output bbox rows without full-res masks\n"
                 "  --filter <substr>     Filter model filenames\n"
-                "  --output-jsonl <path> Write first-run target bbox rows\n",
+                "  --output-jsonl <path> Write first-run target bbox rows\n"
+                "  --no-isolation        Run in-process for profiler capture\n",
                 argv[0]);
             return 0;
         } else {
@@ -1034,11 +1083,15 @@ int main(int argc, char** argv) {
         return a.use_gpu > b.use_gpu;  // GPU first
     });
 
+    if (no_isolation) {
+        fprintf(stderr, "\nStarting %zu benchmark runs (in-process)...\n\n", runs.size());
+    } else {
 #ifdef _WIN32
-    fprintf(stderr, "\nStarting %zu benchmark runs (in-process)...\n\n", runs.size());
+        fprintf(stderr, "\nStarting %zu benchmark runs (in-process)...\n\n", runs.size());
 #else
-    fprintf(stderr, "\nStarting %zu benchmark runs (each in a subprocess)...\n\n", runs.size());
+        fprintf(stderr, "\nStarting %zu benchmark runs (each in a subprocess)...\n\n", runs.size());
 #endif
+    }
 
     // Run benchmarks
     int64_t t_wall_start = ggml_time_us();
@@ -1056,17 +1109,28 @@ int main(int argc, char** argv) {
                 run.entry->name.c_str(),
                 backend_str);
 
-        auto res = run_benchmark_isolated(*run.entry,
-                                          run.use_gpu,
-                                          video_path,
-                                          n_frames,
-                                          px,
-                                          py,
-                                          n_threads,
-                                          encode_img_size,
-                                          bbox_only,
-                                          recondition_every,
-                                          (i == 0) ? output_jsonl : "");
+        auto res = no_isolation ? run_benchmark_direct(*run.entry,
+                                                       run.use_gpu,
+                                                       video_path,
+                                                       n_frames,
+                                                       px,
+                                                       py,
+                                                       n_threads,
+                                                       encode_img_size,
+                                                       bbox_only,
+                                                       recondition_every,
+                                                       (i == 0) ? output_jsonl : "")
+                                : run_benchmark_isolated(*run.entry,
+                                                         run.use_gpu,
+                                                         video_path,
+                                                         n_frames,
+                                                         px,
+                                                         py,
+                                                         n_threads,
+                                                         encode_img_size,
+                                                         bbox_only,
+                                                         recondition_every,
+                                                         (i == 0) ? output_jsonl : "");
         results.push_back(res);
 
         if (res.success) {

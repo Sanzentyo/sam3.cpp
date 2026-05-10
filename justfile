@@ -9,6 +9,11 @@ MODELS_DIR := env_var_or_default("SAM3_MODELS_DIR", "models")
 VIDEO := env_var_or_default("SAM3_VIDEO", "data/test_video.mp4")
 PARITY_RUNS := env_var_or_default("PARITY_RUNS", "15")
 PARITY_OUT := env_var_or_default("PARITY_OUT", "outputs/parity-stats")
+TRACK_JSONL_LHS := env_var_or_default("TRACK_JSONL_LHS", "outputs/base-plus-parity/cpu.jsonl")
+TRACK_JSONL_RHS := env_var_or_default("TRACK_JSONL_RHS", "outputs/base-plus-parity/cuda.jsonl")
+TRACK_JSONL_OUT := env_var_or_default("TRACK_JSONL_OUT", "outputs/base-plus-parity/cpu-vs-cuda-summary.json")
+PROFILE_LOGS := env_var_or_default("PROFILE_LOGS", "outputs/hiera-cuda-profile/*.log")
+PROFILE_SUMMARY_OUT := env_var_or_default("PROFILE_SUMMARY_OUT", "outputs/hiera-cuda-profile/summary.json")
 
 CLANG_TIDY := env_var_or_default("CLANG_TIDY", "uvx --from clang-tidy clang-tidy")
 CLANG_FORMAT := env_var_or_default("CLANG_FORMAT", "uvx --from clang-format clang-format")
@@ -90,3 +95,11 @@ parity-stats runs=PARITY_RUNS out=PARITY_OUT: build
         --video {{ VIDEO }} \
         --runs {{ runs }} \
         --out-dir {{ out }}
+
+# Compare two benchmark JSONL tracking outputs.
+compare-tracking-jsonl lhs=TRACK_JSONL_LHS rhs=TRACK_JSONL_RHS out=TRACK_JSONL_OUT:
+    uv run scripts/compare_tracking_jsonl.py {{ lhs }} {{ rhs }} --out {{ out }}
+
+# Summarize SAM3_PROFILE benchmark logs.
+summarize-profile logs=PROFILE_LOGS out=PROFILE_SUMMARY_OUT:
+    uv run scripts/summarize_benchmark_profile.py {{ logs }} --out {{ out }}

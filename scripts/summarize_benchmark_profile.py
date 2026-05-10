@@ -1,0 +1,87 @@
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import statistics
+from pathlib import Path
+from typing import Any
+
+
+TABLE_ROW_RE = re.compile(
+    r"^\s*\d+\s*\|\s*(?P<model>\S+)\s+\|[^\n]*?\|\s*(?P<backend>CUDA|CPU)\s*\|"
+    r"\s*(?P<load>[0-9.]+)\s*\|\s*(?P<init>[0-9.]+)\s*\|"
+    r"\s*(?P<track>[0-9.]+)\s*\|\s*(?P<p50>[0-9.]+)\s*\|"
+    r"\s*(?P<p95>[0-9.]+)\s*\|\s*(?P<total>[0-9.]+)",
+    re.M,
+)
+ENCODE_RE = re.compile(r"sam2_encode_image_hiera: SAM2 image encoded in ([0-9.]+) ms")
+COMPUTE_RE = re.compile(r"SAM3_PROFILE compute backend=(\S+) nodes=(\d+) ms=([0-9.]+)")
+TENSOR_SET_RE = re.compile(r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
+TENSOR_GET_RE = re.compile(r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
+
+
+def mean(values: list[float]) -> float | None:
+    return statistics.mean(values) if values else None
+
+
+def summarize(path: Path) -> dict[str, Any]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    row = TABLE_ROW_RE.search(text)
+    encodes = [float(value) for value in ENCODE_RE.findall(text)]
+    computes = [(backend, int(nodes), float(ms)) for backend, nodes, ms in COMPUTE_RE.findall(text)]
+    tensor_sets = [float(value) for value in TENSOR_SET_RE.findall(text)]
+    tensor_gets = [float(value) for value in TENSOR_GET_RE.findall(text)]
+
+    result: dict[str, Any] = {
+        "path": str(path),
+        "encode_ms": encodes,
+        "encode_mean_ms": mean(encodes),
+        "profile_compute_count": len(computes),
+        "profile_compute_sum_ms": sum(ms for _, _, ms in computes),
+        "profile_compute_top": [
+            {"backend": backend, "nodes": nodes, "ms": ms}
+            for backend, nodes, ms in sorted(computes, key=lambda item: item[2], reverse=True)[:5]
+        ],
+        "tensor_set_sum_ms": sum(tensor_sets),
+        "tensor_get_sum_ms": sum(tensor_gets),
+        "tensor_get_count": len(tensor_gets),
+    }
+    if row:
+        result.update(
+            {
+                "model": row.group("model"),
+                "backend": row.group("backend"),
+                "load_ms": float(row.group("load")),
+                "init_ms": float(row.group("init")),
+                "track_ms": float(row.group("track")),
+                "p50_ms": float(row.group("p50")),
+                "p95_ms": float(row.group("p95")),
+                "total_ms": float(row.group("total")),
+            }
+        )
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("logs", nargs="+", type=Path)
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+
+    result = {"logs": [summarize(path) for path in args.logs]}
+    text = json.dumps(result, indent=2)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text + "\n", encoding="utf-8")
+    print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

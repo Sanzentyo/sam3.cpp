@@ -144,6 +144,22 @@ accepted optimization must either remove the short-run Hiera encode outliers or
 reduce steady Hiera kernel time enough to make the comparable 512 row exceed
 the PyTorch baseline.
 
+Advancing `tracker.frame_index` after the initial point-prompt instance is
+added fixes the internal frame numbering for the first propagated frame and
+avoids an immediate duplicate non-conditioning memory encode. This improves the
+comparable rows but still does not overtake PyTorch:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Quality note |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 88.5 | 56.61 | 0.640 | mean mask IoU `0.4742`, min `0.0` |
+| 512 | 23.8 | 19.71 | 0.828 | mean mask IoU `0.7761`, min `0.7693` |
+
+The profile confirms the expected mechanism: the 512 run now has one
+`memory_encode` call instead of two (`1.205 ms` total), while Hiera encode
+remains the dominant cost. The 512 Hiera compute values are still
+`130.252, 17.613, 17.281, 17.474, 17.044, 34.509, 34.187, 15.280, 15.089,
+14.996 ms`, so the remaining gap is not solved by tracker bookkeeping.
+
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
 kernel position for every output element even though this shape has exactly one
@@ -511,7 +527,7 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
    gap at 1024.
 2. Reduce Hiera encode graph compute. After PE caching, `head_dim=56` tile
    FlashAttention, graph cleanups, threaded preprocessing, and the SAM decoder
-   conv-transpose k2s2 kernel, the 1024 path is still about 1.65x slower than
+   conv-transpose k2s2 kernel, the 1024 path is still about 1.56x slower than
    official PyTorch. The next speed target is Hiera global/window
    FlashAttention and stage-2 quantized MLP matmul shapes rather than the SAM
    decoder upsampling kernel.
@@ -604,4 +620,10 @@ outputs/hiera-inplace-bias/q4_0_1024_parity.json
 outputs/hiera-inplace-bias/q4_0_512_parity.json
 outputs/model-matrix-current-rerun-1024/summary.json
 outputs/model-matrix-current-rerun-512/summary.json
+outputs/model-matrix-frame-index-1024/summary.json
+outputs/model-matrix-frame-index-512/summary.json
+outputs/tracker-frame-index/q4_0_1024_profile_summary.json
+outputs/tracker-frame-index/q4_0_512_profile_summary.json
+outputs/sam2-official-quality-frame-index-1024/summary.json
+outputs/sam2-official-quality-frame-index-512/summary.json
 ```

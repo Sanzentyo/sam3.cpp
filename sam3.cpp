@@ -14224,6 +14224,7 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
     ml.confirmed = true;
     ml.mds_sum = 1;
     tracker.masklets.push_back(ml);
+    tracker.frame_index = std::max(tracker.frame_index, fi + 1);
 
     SAM3_LOG(2, "%s: added instance #%d (score=%.3f)\n", __func__, inst_id, det.score);
     return inst_id;

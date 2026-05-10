@@ -28,6 +28,8 @@ path can be treated as a Rust-wrapper baseline.
 - Added optional `SAM3_PROFILE_HIERA_CUT_OPS=1` op-count logging for Hiera cuts.
 - Removed avoidable Q/K/V layout copies in non-q-stride Hiera attention blocks
   by viewing the fused QKV projection as head-split tensors directly.
+- Removed explicit Hiera LayerNorm affine `REPEAT` nodes and rely on ggml
+  broadcasted `MUL`/`ADD` instead.
 
 ## Performance
 
@@ -52,6 +54,7 @@ a cross-implementation win/loss comparison.
 | After gating debug tensor outputs | 116.6 | 115.8 | 126.2 | removes nonessential debug graph outputs unless requested |
 | After Hiera PE backend cache | 113.6 | 113.8 | 121.6 | avoids repeated CPU upload of Hiera positional embedding |
 | After direct QKV head views | 110.1 | 109.1 | 117.9 | removes extra Q/K/V `cont` and reshape nodes in non-q-stride Hiera blocks |
+| After LayerNorm broadcast affine | 107.2 | 105.5 | 115.4 | removes explicit Hiera norm weight/bias `REPEAT` nodes |
 
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
@@ -223,6 +226,13 @@ than official PyTorch at the same 1024 encode size, so the next target remains
 Hiera stage 2, especially the global-attention blocks and projection/MLP
 matmuls.
 
+Removing explicit Hiera LayerNorm affine `REPEAT` nodes keeps the same full-mask
+output versus the direct-QKV-head-view run:
+`mask_hash_equal_rows=10`, `min_bbox_iou=1.0`, `max_bbox_delta_px=0.0`, and
+`max_score_abs_delta=0.0`. The normal Hiera graph shrinks again from 1391 to
+1295 nodes. The 1024 bbox-only run improves to `107.2 ms/frame`; the full-mask
+JSONL run measures `108.9 ms/frame`.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -271,7 +281,8 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
 2. Reduce Hiera encode graph compute. After caching fixed PE, enabling
    `head_dim=56` tile FlashAttention, and fusing preprocessing, the remaining
    dominant steady-state cost is still the Hiera CUDA graph compute, now roughly
-   67-74 ms after warmup after direct QKV head views.
+   65-70 ms after warmup after direct QKV head views and Hiera LayerNorm
+   broadcast affine cleanup.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
    official PyTorch 512, C++ 640 with official PyTorch 640, and so on, with the
@@ -324,4 +335,8 @@ outputs/hiera-qkv-view-opt/fullmask_summary.json
 outputs/hiera-qkv-view-opt/profile_summary.json
 outputs/hiera-qkv-view-opt/stage2_focus_summary.json
 outputs/hiera-qkv-view-opt/parity.json
+outputs/hiera-norm-broadcast/bbox_only_summary.json
+outputs/hiera-norm-broadcast/fullmask_summary.json
+outputs/hiera-norm-broadcast/profile_summary.json
+outputs/hiera-norm-broadcast/parity.json
 ```

@@ -5093,10 +5093,8 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     // ── 1. Pre-norm ──────────────────────────────────────────────────────
     // x: [C_in, W, H, B]
     auto* normed = ggml_norm(ctx, x, 1e-6f);
-    normed = ggml_mul(
-        ctx, normed, ggml_repeat(ctx, ggml_reshape_4d(ctx, blk.norm1_w, C_in, 1, 1, 1), normed));
-    normed = ggml_add(
-        ctx, normed, ggml_repeat(ctx, ggml_reshape_4d(ctx, blk.norm1_b, C_in, 1, 1, 1), normed));
+    normed = ggml_mul_inplace(ctx, normed, ggml_reshape_4d(ctx, blk.norm1_w, C_in, 1, 1, 1));
+    normed = ggml_add_inplace(ctx, normed, ggml_reshape_4d(ctx, blk.norm1_b, C_in, 1, 1, 1));
     if (dump) {
         ggml_set_name(normed, "dbg_blk0_norm1");
         ggml_set_output(normed);
@@ -5293,10 +5291,8 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     int64_t new_H = res1->ne[2];
     int64_t new_W = res1->ne[1];
     auto* normed2 = ggml_norm(ctx, res1, 1e-6f);
-    normed2 = ggml_mul(
-        ctx, normed2, ggml_repeat(ctx, ggml_reshape_4d(ctx, blk.norm2_w, C_out, 1, 1, 1), normed2));
-    normed2 = ggml_add(
-        ctx, normed2, ggml_repeat(ctx, ggml_reshape_4d(ctx, blk.norm2_b, C_out, 1, 1, 1), normed2));
+    normed2 = ggml_mul_inplace(ctx, normed2, ggml_reshape_4d(ctx, blk.norm2_w, C_out, 1, 1, 1));
+    normed2 = ggml_add_inplace(ctx, normed2, ggml_reshape_4d(ctx, blk.norm2_b, C_out, 1, 1, 1));
 
     auto* flat_mlp = ggml_reshape_2d(ctx, normed2, C_out, new_W * new_H * B);
     auto* mlp1 = ggml_mul_mat(ctx, blk.mlp_fc1_w, flat_mlp);

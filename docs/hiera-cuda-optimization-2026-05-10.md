@@ -337,6 +337,17 @@ semantically weak for SAM2.1 Base+. The implementation is still slower than
 official PyTorch at the same input encode size, but the quality gap is much
 smaller with the CUDA FA tile path.
 
+`scripts/summarize_quality_gap.py` summarizes the latest frame-index-fixed
+quality artifacts. These rows pass the same-input contract: decoded source
+frames are `1008x568`, frame count/prompt match, and each row uses the same
+SAM2 input encode size on the C++ and official PyTorch sides. The gap is not a
+small numeric/hash drift: at 512, C++ masks average about `0.784x` the official
+Python mask area and mean mask IoU is `0.7761`; at 1024, C++ masks average
+about `0.567x` the official Python mask area, mean mask IoU is `0.4742`, and
+official Python has an empty mask at offset 8 while C++ still tracks a non-empty
+mask. The current quality task is therefore mask-selection / semantic parity,
+not just floating-point tolerance.
+
 Fusing resize and normalization in preprocessing preserves the measured quality
 numbers and reduces CPU preprocessing from about `15.7 ms/frame` to
 `12.9 ms/frame` at 1024. The 1024 bbox-only tracking path improves to
@@ -733,6 +744,7 @@ outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json
 outputs/goal-audit/sam2-base-plus-cuda-vs-python.json
+outputs/quality-gap/sam2-base-plus-frame-index.json
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

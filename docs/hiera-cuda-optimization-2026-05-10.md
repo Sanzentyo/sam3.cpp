@@ -32,6 +32,8 @@ path can be treated as a Rust-wrapper baseline.
   by viewing the fused QKV projection as head-split tensors directly.
 - Removed explicit Hiera LayerNorm affine `REPEAT` nodes and rely on ggml
   broadcasted `MUL`/`ADD` instead.
+- Parallelized CPU resize/normalize preprocessing across `n_threads` while
+  preserving per-pixel arithmetic and output parity.
 
 ## Performance
 
@@ -57,6 +59,7 @@ a cross-implementation win/loss comparison.
 | After Hiera PE backend cache | 113.6 | 113.8 | 121.6 | avoids repeated CPU upload of Hiera positional embedding |
 | After direct QKV head views | 110.1 | 109.1 | 117.9 | removes extra Q/K/V `cont` and reshape nodes in non-q-stride Hiera blocks |
 | After LayerNorm broadcast affine | 107.2 | 105.5 | 115.4 | removes explicit Hiera norm weight/bias `REPEAT` nodes |
+| After threaded preprocess | 102.2 | 100.0 | 114.5 | same-size matrix run with `--n-threads 4`; output parity versus `--n-threads 1` |
 
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
@@ -107,15 +110,25 @@ SAM2 input encode size:
 
 | Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Note |
 | --- | ---: | ---: | ---: | --- |
-| 1024 | 105.3 | 56.8 | 0.539 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
-| 512 | 27.7 | 20.4 | 0.736 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
+| 1024 | 102.2 | 56.9 | 0.557 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
+| 512 | 25.0 | 20.7 | 0.827 | same decoded 1008x568 source frames, `--encode-img-size`, and `model.image_size` |
 
 Values below `1.0` in the ratio column mean official PyTorch is faster. The
-current C++ CUDA path is therefore still about `1.85x` slower than official
-PyTorch at 1024 and about `1.36x` slower at 512 for this prompt/video. The
+current C++ CUDA path is therefore still about `1.80x` slower than official
+PyTorch at 1024 and about `1.21x` slower at 512 for this prompt/video. The
 lower encode-size rows above are still useful for understanding scaling, but
 they must not be used to claim a speed win over the official 1024 PyTorch
 baseline.
+
+Threaded preprocessing is parity-preserving on the 10-frame 1024 full-mask
+sample: comparing `--n-threads 1` with `--n-threads 4` gives 10 rows on both
+sides and `diff_rows=0` for frame index, bbox, score, mask area, and mask hash.
+Five paired bbox-only runs show the expected benefit is modest but stable:
+
+| Encode size | Threads=1 mean | Threads=4 mean | Saved | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| 1024 | 105.38 | 101.38 | 4.00 | 1.039x |
+| 512 | 26.24 | 25.08 | 1.16 | 1.046x |
 
 ## Detailed Profile
 
@@ -456,4 +469,8 @@ outputs/hiera-shape-key-profile-current/q4_0_512_labeled_profile_summary.json
 outputs/propagate-profile-current/q4_0_512_graph_ops_summary.json
 outputs/model-matrix-sam2-base-plus-q4-quiet-1024/summary.json
 outputs/model-matrix-sam2-base-plus-q4-quiet-512/summary.json
+outputs/preprocess-threaded/q4_0_1024_profile_summary.json
+outputs/preprocess-threaded/paired_threads_stats/summary.json
+outputs/model-matrix-sam2-base-plus-q4-threaded-1024/summary.json
+outputs/model-matrix-sam2-base-plus-q4-threaded-512/summary.json
 ```

@@ -4284,30 +4284,62 @@ static const sam3_resize_axis_cache& sam3_get_resize_axis_cache(int src, int dst
     return cache;
 }
 
+[[nodiscard]] static int sam3_preprocess_thread_count(int requested, int img_size) {
+    if (requested <= 1 || img_size < 512) {
+        return 1;
+    }
+    const int row_limited = std::max(1, img_size / 128);
+    return std::max(1, std::min(requested, row_limited));
+}
+
+template <typename Fn>
+static void sam3_parallel_rows(int rows, int n_threads, Fn&& fn) {
+    if (n_threads <= 1 || rows <= 1) {
+        fn(0, rows);
+        return;
+    }
+
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(n_threads - 1));
+    for (int tid = 1; tid < n_threads; ++tid) {
+        const int y0 = (rows * tid) / n_threads;
+        const int y1 = (rows * (tid + 1)) / n_threads;
+        workers.emplace_back([&, y0, y1] { fn(y0, y1); });
+    }
+    fn(0, rows / n_threads);
+    for (auto& worker : workers) {
+        worker.join();
+    }
+}
+
 static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
                                                     int img_size,
                                                     const std::array<float, 3>& mean,
-                                                    const std::array<float, 3>& std_d) {
+                                                    const std::array<float, 3>& std_d,
+                                                    int n_threads = 1) {
     constexpr int C = 3;
     const size_t image_area = sam3_count_mul(img_size, img_size);
     std::vector<float> result(static_cast<size_t>(C) * image_area);
     const auto* pixels = image.data.data();
     const int src_w = image.width;
     const int src_h = image.height;
+    const int preprocess_threads = sam3_preprocess_thread_count(n_threads, img_size);
 
     if (src_w == img_size && src_h == img_size) {
-        for (int y = 0; y < img_size; ++y) {
-            for (int x = 0; x < img_size; ++x) {
-                const size_t hwc_base =
-                    (sam3_count_mul(y, img_size) + static_cast<size_t>(x)) * static_cast<size_t>(3);
-                const size_t chw_base = sam3_count_mul(y, img_size) + static_cast<size_t>(x);
-                for (int c = 0; c < C; ++c) {
-                    const float v = pixels[hwc_base + static_cast<size_t>(c)] / 255.0f;
-                    result[static_cast<size_t>(c) * image_area + chw_base] =
-                        (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+        sam3_parallel_rows(img_size, preprocess_threads, [&](int y_begin, int y_end) {
+            for (int y = y_begin; y < y_end; ++y) {
+                for (int x = 0; x < img_size; ++x) {
+                    const size_t hwc_base = (sam3_count_mul(y, img_size) + static_cast<size_t>(x)) *
+                                            static_cast<size_t>(3);
+                    const size_t chw_base = sam3_count_mul(y, img_size) + static_cast<size_t>(x);
+                    for (int c = 0; c < C; ++c) {
+                        const float v = pixels[hwc_base + static_cast<size_t>(c)] / 255.0f;
+                        result[static_cast<size_t>(c) * image_area + chw_base] =
+                            (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+                    }
                 }
             }
-        }
+        });
         return result;
     }
 
@@ -4318,33 +4350,35 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
                 static_cast<size_t>(channel));
     };
 
-    for (int y = 0; y < img_size; ++y) {
-        const auto yi = static_cast<size_t>(y);
-        const int y0 = y_cache.lo[yi];
-        const int y1 = y_cache.hi[yi];
-        const double wy = y_cache.w[yi];
-        const double wy0 = y_cache.w0[yi];
-        for (int x = 0; x < img_size; ++x) {
-            const auto xi = static_cast<size_t>(x);
-            const int x0 = x_cache.lo[xi];
-            const int x1 = x_cache.hi[xi];
-            const double wx = x_cache.w[xi];
-            const double wx0 = x_cache.w0[xi];
-            const size_t chw_base = sam3_count_mul(y, img_size) + xi;
-            for (int c = 0; c < C; ++c) {
-                const double p00 = pixels[pixel_index(y0, x0, c)];
-                const double p01 = pixels[pixel_index(y0, x1, c)];
-                const double p10 = pixels[pixel_index(y1, x0, c)];
-                const double p11 = pixels[pixel_index(y1, x1, c)];
-                const double resized =
-                    (wy0 * ((wx0 * p00) + (wx * p01))) + (wy * ((wx0 * p10) + (wx * p11)));
-                const int iv = std::clamp(static_cast<int>(std::lround(resized)), 0, 255);
-                const float v = static_cast<float>(iv) / 255.0f;
-                result[static_cast<size_t>(c) * image_area + chw_base] =
-                    (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+    sam3_parallel_rows(img_size, preprocess_threads, [&](int y_begin, int y_end) {
+        for (int y = y_begin; y < y_end; ++y) {
+            const auto yi = static_cast<size_t>(y);
+            const int y0 = y_cache.lo[yi];
+            const int y1 = y_cache.hi[yi];
+            const double wy = y_cache.w[yi];
+            const double wy0 = y_cache.w0[yi];
+            for (int x = 0; x < img_size; ++x) {
+                const auto xi = static_cast<size_t>(x);
+                const int x0 = x_cache.lo[xi];
+                const int x1 = x_cache.hi[xi];
+                const double wx = x_cache.w[xi];
+                const double wx0 = x_cache.w0[xi];
+                const size_t chw_base = sam3_count_mul(y, img_size) + xi;
+                for (int c = 0; c < C; ++c) {
+                    const double p00 = pixels[pixel_index(y0, x0, c)];
+                    const double p01 = pixels[pixel_index(y0, x1, c)];
+                    const double p10 = pixels[pixel_index(y1, x0, c)];
+                    const double p11 = pixels[pixel_index(y1, x1, c)];
+                    const double resized =
+                        (wy0 * ((wx0 * p00) + (wx * p01))) + (wy * ((wx0 * p10) + (wx * p11)));
+                    const int iv = std::clamp(static_cast<int>(std::lround(resized)), 0, 255);
+                    const float v = static_cast<float>(iv) / 255.0f;
+                    result[static_cast<size_t>(c) * image_area + chw_base] =
+                        (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+                }
             }
         }
-    }
+    });
 
     return result;
 }
@@ -4352,15 +4386,20 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
 // Preprocess an image: resize to img_size × img_size, convert to float, normalize.
 // Returns a float tensor in [C, H, W] layout (channel-first), range normalized with
 // mean=0.5, std=0.5 → pixel values in [-1, 1].
-static std::vector<float> sam3_preprocess_image(const sam3_image& image, int img_size) {
-    return sam3_preprocess_image_chw(image, img_size, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f});
+static std::vector<float> sam3_preprocess_image(const sam3_image& image,
+                                                int img_size,
+                                                int n_threads = 1) {
+    return sam3_preprocess_image_chw(
+        image, img_size, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, n_threads);
 }
 
 // SAM2 preprocessing: resize + ImageNet normalization.
 // Returns [C, H, W] float, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225].
-static std::vector<float> sam2_preprocess_image(const sam3_image& image, int img_size) {
+static std::vector<float> sam2_preprocess_image(const sam3_image& image,
+                                                int img_size,
+                                                int n_threads = 1) {
     return sam3_preprocess_image_chw(
-        image, img_size, {0.485f, 0.456f, 0.406f}, {0.229f, 0.224f, 0.225f});
+        image, img_size, {0.485f, 0.456f, 0.406f}, {0.229f, 0.224f, 0.225f}, n_threads);
 }
 
 /*****************************************************************************
@@ -5808,7 +5847,7 @@ static bool edgetam_encode_image(sam3_state& state,
     state.orig_height = image.height;
 
     // ── Preprocess (same ImageNet normalization as SAM2) ─────────────────
-    auto img_data = sam2_preprocess_image(image, img_size);
+    auto img_data = sam2_preprocess_image(image, img_size, state.n_threads);
 
     // ── Build graph ──────────────────────────────────────────────────────
     const size_t buf_size = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
@@ -6102,7 +6141,7 @@ bool sam3_profile_edgetam_encode(
             hp.repvit_channels[3]);
 
     // ── Preprocess image ────────────────────────────────────────────────
-    auto img_data = sam2_preprocess_image(image, img_size);
+    auto img_data = sam2_preprocess_image(image, img_size, n_threads);
 
     // ════════════════════════════════════════════════════════════════════
     // PART 1: Full graph — op summary + total timing
@@ -6905,7 +6944,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // ── Preprocess ───────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(hiera_encode_preprocess);
-    auto img_data = sam2_preprocess_image(image, img_size);
+    auto img_data = sam2_preprocess_image(image, img_size, state.n_threads);
     SAM3_PROFILE_CPU_END(hiera_encode_preprocess);
 
     // ── Build graph ──────────────────────────────────────────────────────
@@ -7243,7 +7282,7 @@ bool sam3_encode_image(sam3_state& state, const sam3_model& model, const sam3_im
     state.orig_width = image.width;
     state.orig_height = image.height;
 
-    auto img_data = sam3_preprocess_image(image, img_size);
+    auto img_data = sam3_preprocess_image(image, img_size, state.n_threads);
 
     const size_t buf_size = (ggml_tensor_overhead() * 8192) + (ggml_graph_overhead() * 2);
     struct ggml_init_params gparams = {

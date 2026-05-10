@@ -205,6 +205,8 @@ def run_cpp(args: argparse.Namespace, out_dir: Path) -> list[dict[str, Any]]:
         "--point-y",
         str(args.point_y),
     ]
+    if args.encode_img_size > 0:
+        cmd.extend(["--encode-img-size", str(args.encode_img_size)])
     if args.filter:
         cmd.extend(["--filter", args.filter])
     text = run(cmd, cwd=args.repo, log_path=out_dir / "cpp-benchmark.log")
@@ -325,7 +327,7 @@ import json, sys, time
 import numpy as np
 import torch
 
-sam2_repo, checkpoint, cfg, video_dir, point_x, point_y = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5]), float(sys.argv[6])
+sam2_repo, checkpoint, cfg, video_dir, point_x, point_y, image_size = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], float(sys.argv[5]), float(sys.argv[6]), int(sys.argv[7])
 sys.path.insert(0, sam2_repo)
 torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 if torch.cuda.get_device_properties(0).major >= 8:
@@ -333,7 +335,17 @@ if torch.cuda.get_device_properties(0).major >= 8:
     torch.backends.cudnn.allow_tf32 = True
 from sam2.build_sam import build_sam2_video_predictor
 
-predictor = build_sam2_video_predictor(cfg, checkpoint, device="cuda", vos_optimized=False)
+overrides = []
+if image_size > 0:
+    overrides.append(f"model.image_size={image_size}")
+
+predictor = build_sam2_video_predictor(
+    cfg,
+    checkpoint,
+    device="cuda",
+    vos_optimized=False,
+    hydra_overrides_extra=overrides,
+)
 
 def run_once():
     state = predictor.init_state(video_path=video_dir)
@@ -361,6 +373,7 @@ print(json.dumps({
     "track_ms": elapsed * 1000.0 / max(count, 1),
     "total_ms": elapsed * 1000.0,
     "rss_mib": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
+    "image_size": image_size if image_size > 0 else 1024,
 }))
 '''
     env = os.environ.copy()
@@ -380,6 +393,7 @@ print(json.dumps({
                         str(frame_dir),
                         str(args.point_x),
                         str(args.point_y),
+                        str(args.encode_img_size),
                     ],
                     SAM2_UV_DEPS,
                 ),
@@ -432,6 +446,7 @@ def summarize(cpp_rows: list[dict[str, Any]], py_rows: list[dict[str, Any]], out
                     "python_over_cpp_track_ratio": py["track_ms"] / row["track_ms"] if row["track_ms"] > 0 else None,
                     "cpp_rss_mib": row["rss_mib"],
                     "python_cuda_alloc_mib": py["rss_mib"],
+                    "python_image_size": py.get("image_size"),
                 }
         )
     summary = {"cpp": cpp_rows, "python": py_rows, "comparisons": comparisons}
@@ -449,6 +464,15 @@ def main() -> int:
     parser.add_argument("--point-x", type=float, default=315.0)
     parser.add_argument("--point-y", type=float, default=250.0)
     parser.add_argument("--text-prompt", default="person")
+    parser.add_argument(
+        "--encode-img-size",
+        type=int,
+        default=0,
+        help=(
+            "Override the SAM input encode size for comparable C++/SAM2 Python "
+            "runs. 0 keeps each model default."
+        ),
+    )
     parser.add_argument("--filter", default="")
     parser.add_argument("--download-ggml", action="store_true")
     parser.add_argument("--download-filter", action="append", default=[])

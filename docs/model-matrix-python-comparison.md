@@ -24,6 +24,13 @@ The Python baseline is different by design:
 
 This avoids pretending that `q4_0` or `q8_0` has a direct PyTorch equivalent.
 
+Speed and quality conclusions require matching input conditions. For C++ vs
+official Python, compare only rows with the same decoded source-frame
+resolution, frame range, prompt, model family, and SAM input encode size. Lower
+encode-size or lower source-resolution rows are useful scaling data, but they
+are not evidence that one implementation is faster than another unless the
+official Python row uses the same effective input size.
+
 The `python_over_cpp_track_ratio` field in `summary.json` is:
 
 ```text
@@ -94,11 +101,32 @@ export SAM2_BASE_PLUS_CHECKPOINT=checkpoints/sam2.1_hiera_base_plus.pt
 Python baselines use fresh session/state timing after warmup so cached repeated
 streaming does not under-report latency.
 
+The all-family matrix should normally keep each model's default input size.
+Use `--encode-img-size` only for a targeted same-size comparison where the C++
+row and the official Python row are both configured to that size.
+
+For SAM2 encode-size sweeps, run one matrix per encode size and keep the C++
+and official Python override identical:
+
+```bash
+uv run scripts/model_matrix_compare.py \
+  --models-dir "$SAM3_MODELS_DIR_ALL" \
+  --video "$SAM3_VIDEO" \
+  --filter sam2.1_hiera_base_plus \
+  --encode-img-size 512 \
+  --frames 10 \
+  --point-x 315 \
+  --point-y 250 \
+  --out-dir outputs/model-matrix-sam2-base-plus-512
+```
+
 ## Acceptance Criteria
 
 - The C++ benchmark covers every `.ggml` file in the selected models directory.
 - The Python benchmark records every available official baseline that can run on
   the local machine.
+- C++ vs Python speed/quality claims use the same decoded source-frame
+  resolution, frame range, prompt, model family, and SAM input encode size.
 - Quantized C++ rows are compared only against a family-level Python baseline,
   not treated as precision-equivalent PyTorch rows.
 - The output includes track latency, total latency, and memory columns.

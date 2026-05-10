@@ -514,7 +514,7 @@ def summarize(
                 "same decoded source-frame resolution",
                 "same frame range",
                 "same prompt",
-                "same SAM input encode size",
+                "same SAM model input resolution",
             ],
             "note": (
                 "Rows with comparable_speed_claim=false are scaling or coverage rows. "

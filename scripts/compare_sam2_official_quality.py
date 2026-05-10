@@ -387,7 +387,8 @@ def main() -> int:
             "same_encode_img_size": True,
             "note": (
                 "C++/official PyTorch speed or quality rows are directly comparable "
-                "only when these conditions are true. Other resolutions are scaling studies."
+                "only when the decoded source-frame resolution and SAM model input "
+                "resolution match. Other resolutions are scaling studies."
             ),
         },
     }

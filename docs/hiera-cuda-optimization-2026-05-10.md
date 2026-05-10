@@ -40,15 +40,19 @@ path can be treated as a Rust-wrapper baseline.
 Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 
 Comparison rule: C++ vs official PyTorch speed/quality claims are valid only
-when both runs use the same decoded source-frame resolution, the same frame
-range, the same prompt, and the same SAM2 input encode size
-(`--encode-img-size` in C++, `model.image_size` in official PyTorch). The
-primary comparison must keep both resolution layers fixed: the decoded source
-frame size before preprocessing, and the model input encode size after
-preprocessing. Running multiple source resolutions or encode sizes is still
-useful, but those rows are a scaling study; they must not be used as a
-cross-implementation win/loss comparison unless the matching PyTorch run uses
-the same decoded source resolution and encode size. In short: use matched
+when both runs use the same input-resolution contract:
+
+- the same decoded source-frame resolution before preprocessing,
+- the same frame range,
+- the same prompt,
+- the same SAM2 model input resolution after preprocessing
+  (`--encode-img-size` in C++, `model.image_size` in official PyTorch).
+
+The primary comparison must keep both resolution layers fixed. Running multiple
+source resolutions or encode sizes is still useful, but those rows are a
+scaling study; they must not be used as a cross-implementation win/loss
+comparison unless the matching PyTorch run uses the same decoded source
+resolution and the same model input resolution. In short: use matched
 same-input rows for C++/PyTorch conclusions, and use unmatched resolution rows
 only to describe scaling.
 

@@ -565,6 +565,18 @@ cases cover 64, 80, 96, 112, 128, 256, and a few large GQA shapes, but no
 by another allowlist or shape-key tweak; it needs either a real 56-aware
 MMA/WMMA path or a redesigned tile kernel for the Base+ global/window shapes.
 
+A prototype 56-aware MMA path was tried by instantiating `DKQ=56,DV=56` and
+zero-padding the internal half2 MMA tiles to the next 8-half2 boundary while
+keeping the external tensor shape at 56. It compiled and improved the rough
+1024 q4_0 bbox timing from about `89 ms/frame` to `82 ms/frame`, but it failed
+the parity gate: bbox output collapsed after frame 0 (`mask_hash_equal_rows=0/10`,
+`min_bbox_iou=0.0`, `max_score_abs_delta=0.971792`). Restricting the experiment
+to only the global `4096x4096` attention or only the window attention still
+failed bbox parity. This confirms that the speed target needs a correctness
+first kernel implementation, not just adding 56 instantiations to the existing
+f16 MMA path. The restored tile build was rechecked against the reference JSONL
+with exact bbox/mask parity (`mask_hash_equal_rows=10/10`).
+
 `scripts/summarize_goal_audit.py` combines the matched C++/official-Python
 speed rows, official-Python quality checks, Hiera stage gap, and CUDA node
 hotspots into a single completion audit. The current audit artifact is
@@ -745,6 +757,11 @@ outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json
 outputs/goal-audit/sam2-base-plus-cuda-vs-python.json
 outputs/quality-gap/sam2-base-plus-frame-index.json
+outputs/fattn56-mma/q4_0_1024_bbox.log
+outputs/fattn56-mma/q4_0_1024_global_only_bbox.log
+outputs/fattn56-mma/q4_0_1024_window_only_bbox.log
+outputs/fattn56-mma/default_vs_mma_bbox.json
+outputs/fattn56-mma/default_vs_restored_bbox.json
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

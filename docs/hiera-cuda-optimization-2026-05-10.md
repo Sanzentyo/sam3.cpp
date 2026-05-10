@@ -214,6 +214,14 @@ values are about `16.7-17.0 ms/frame`, with `propagate_single` around
 encoding are secondary unless Hiera is first brought closer to the PyTorch
 `forward_image` range.
 
+`outputs/hiera-gap-priority/summary.json` records the stage-gap summary derived
+from those synchronized profiles. The 512 row is close at the Hiera/forward
+stage alone (`16.87 ms` C++ steady Hiera versus `15.92 ms` PyTorch
+`forward_image`), while the 1024 row still has a large Hiera gap (`66.46 ms`
+versus `30.41 ms`). This makes 1024 Hiera encode the first-priority target; the
+512 end-to-end gap also needs non-Hiera overhead work, but that should not pull
+attention away from the larger 1024 encoder gap.
+
 Rejected follow-up experiments:
 
 - `GGML_CUDA_FORCE_CUBLAS=1` for q4_0 matmuls did not improve the remaining
@@ -714,5 +722,6 @@ outputs/model-matrix-free-prev-state-1024-trackrange/summary.json
 outputs/model-matrix-free-prev-state-512-trackrange/summary.json
 outputs/python-official-profile/base_plus_1024.json
 outputs/python-official-profile/base_plus_512.json
+outputs/hiera-gap-priority/summary.json
 outputs/hiera-free-prev-state/q4_0_1024_profile_summary.json
 ```

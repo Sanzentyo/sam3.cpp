@@ -20,6 +20,13 @@ path can be treated as a Rust-wrapper baseline.
 
 Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 
+Comparison rule: C++ vs official PyTorch speed/quality claims are valid only
+when both runs use the same decoded source-frame resolution, the same frame
+range, the same prompt, and the same SAM2 input encode size
+(`--encode-img-size` in C++, `model.image_size` in official PyTorch). Running
+multiple source resolutions or encode sizes is still useful, but those rows are
+a scaling study rather than a cross-implementation win/loss comparison.
+
 | State | Track ms/frame | P50 ms | P95 ms | Note |
 | --- | ---: | ---: | ---: | --- |
 | Before PE caching | 547.3 | 544.8 | 559.4 | Base+ fallback only |
@@ -27,10 +34,12 @@ Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 | After backend neck PE reuse | 129.8 | 127.3 | 139.7 | avoids repeated neck PE backend upload |
 | After `head_dim=56` FA tile | 120.1 | 119.0 | 127.1 | avoids fallback attention for Base+ |
 | After fused preprocess | 117.4 | 115.4 | 128.3 | resize and normalize in one pass |
+| After gating debug tensor outputs | 116.6 | 115.8 | 126.2 | removes nonessential debug graph outputs unless requested |
 
-Encode-size sweep after PE caching. This is a scaling sweep, not an
-apples-to-apples comparison against the official PyTorch baseline unless the
-official run uses the same input encode size.
+Encode-size sweep after PE caching. These rows use the same decoded source
+video frames and vary only the SAM2 input encode size. This is a scaling sweep,
+not an apples-to-apples comparison against the official PyTorch baseline unless
+the official run uses the same input encode size.
 
 | Encode size | Track ms/frame | P50 ms | P95 ms | RSS MiB | Note |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -49,14 +58,14 @@ Base+ precision sweep after CPU PE caching:
 | `sam2.1_hiera_base_plus_q4_1` | 136.0 | 134.4 | 143.7 | 649.6 |
 | `sam2.1_hiera_base_plus_q4_0` | 134.5 | 133.6 | 142.1 | 647.8 |
 
-Official PyTorch SAM2.1 Base+ on the same 10-frame clip measured
-`43.4 ms/frame` for propagation with `855.2 MiB` CUDA allocation. The current
-C++ CUDA path is therefore still about 3x slower than official PyTorch for this
-prompt/video at the default 1024 encode size, despite the PE cache improvement.
-The lower encode-size rows above are useful for understanding scaling, but they
-must not be used to claim a speed win over the official 1024 PyTorch baseline.
-Any lower-resolution comparison needs an official PyTorch run configured to the
-same input encode size.
+Official PyTorch SAM2.1 Base+ on the same 10-frame clip and default 1024 encode
+size measured `43.4 ms/frame` for propagation with `855.2 MiB` CUDA allocation.
+The current C++ CUDA path is therefore still about 3x slower than official
+PyTorch for this prompt/video at the default 1024 encode size, despite the PE
+cache improvement. The lower encode-size rows above are useful for understanding
+scaling, but they must not be used to claim a speed win over the official 1024
+PyTorch baseline. Any lower-resolution comparison needs an official PyTorch run
+configured to the same input encode size.
 
 ## Detailed Profile
 
@@ -79,8 +88,9 @@ The first frame still pays one-time cache construction:
 
 ## Official Quality Comparison
 
-Compared C++ `sam2.1_hiera_base_plus_q4_0` against official PyTorch
-SAM2.1 Base+ using the same video, same point prompt, and 10 frames.
+Compared C++ `sam2.1_hiera_base_plus_q4_0` against official PyTorch SAM2.1
+Base+ using the same video frames, same point prompt, same input encode size,
+and 10 frames.
 
 | Metric | Value |
 | --- | ---: |
@@ -100,8 +110,8 @@ same q4_0 run improves substantially:
 
 | Encode size | C++ track ms/frame | PyTorch ms/frame | Mean mask IoU | Min mask IoU | Note |
 | --- | ---: | ---: | ---: | ---: | --- |
-| 1024 | 126.8 | 43.7 | 0.4745 | 0.0000 | frame 8 official output is empty |
-| 512 | 39.9 | 21.1 | 0.7798 | 0.7743 | same-resolution comparison |
+| 1024 | 126.8 | 43.7 | 0.4745 | 0.0000 | same source frames and encode size; frame 8 official output is empty |
+| 512 | 39.9 | 21.1 | 0.7798 | 0.7743 | same source frames and encode size |
 
 This indicates the previous no-mask attention fallback was both slower and
 semantically weak for SAM2.1 Base+. The implementation is still slower than
@@ -111,7 +121,11 @@ smaller with the CUDA FA tile path.
 Fusing resize and normalization in preprocessing preserves the measured quality
 numbers and reduces CPU preprocessing from about `15.7 ms/frame` to
 `12.9 ms/frame` at 1024. The 1024 bbox-only tracking path improves to
-`117.4 ms/frame`; the 512 bbox-only path improves to `32.0 ms/frame`.
+`117.4 ms/frame`; the 512 bbox-only path improves to `32.0 ms/frame`. Gating
+debug-only Hiera/FPN graph outputs behind `SAM3_DEBUG_TENSORS` or
+`SAM2_DUMP_DIR` gives only a small additional 1024 bbox-only change to
+`116.6 ms/frame`, so it should be treated as graph cleanup rather than a major
+speedup.
 
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
@@ -197,4 +211,5 @@ outputs/sam2-official-quality-512-head56-tile-q4_0/summary.json
 outputs/preprocess-fused-head56/summary.json
 outputs/sam2-official-quality-10-preprocess-fused-q4_0/summary.json
 outputs/sam2-official-quality-512-preprocess-fused-q4_0/summary.json
+outputs/debug-output-gated/summary.json
 ```

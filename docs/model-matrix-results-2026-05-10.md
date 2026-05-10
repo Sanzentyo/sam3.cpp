@@ -68,6 +68,12 @@ equivalents. These are family-level references, not precision-equivalent rows.
 The SAM 2.1 rows use the official default 1024 input encode size, so only C++
 runs at the same encode size are directly comparable.
 
+For C++ vs Python conclusions, the comparison key is: same decoded source-frame
+resolution, same frame range, same prompt, same model family, and same SAM input
+encode size. Separate source-resolution or encode-size measurements are useful
+for scaling analysis, but they should not be compared against a Python 1024
+baseline as a speed win.
+
 | Family | Backend | Track ms | CUDA alloc MiB |
 | --- | --- | ---: | ---: |
 | SAM 2.1 Tiny | PyTorch CUDA bf16 | 42.1 | 674.5 |
@@ -80,8 +86,8 @@ runs at the same encode size are directly comparable.
 
 Values below `1.0` mean Python is faster for the measured path. On this CUDA
 machine, the current C++ path is not speed-competitive with official Python for
-the same-resolution comparable baselines, although C++ uses much less memory
-for SAM 3.
+the same-source-resolution, same-frame-range, and same-encode-size comparable
+baselines, although C++ uses much less memory for SAM 3.
 
 | C++ model | C++ track ms | Python track ms | Python/C++ ratio |
 | --- | ---: | ---: | ---: |

@@ -1357,6 +1357,11 @@ static void sam3_profile_cpu_span(const char* name,
 #define ggml_backend_tensor_copy(src, dst) \
     sam3_profile_tensor_copy((src), (dst), __FILE__, __LINE__)
 
+static bool sam3_debug_tensor_outputs_enabled() {
+    return sam3_getenv("SAM3_DEBUG_TENSORS").has_value() ||
+           sam3_getenv("SAM2_DUMP_DIR").has_value();
+}
+
 static void sam3_set_name(struct ggml_tensor* tensor, std::string_view name) {
     ggml_set_name(tensor, std::string{name}.c_str());
 }
@@ -4954,7 +4959,7 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     const int64_t C_in = blk.dim_in;
     const int64_t C_out = blk.dim_out;
     const int B = 1;
-    const bool dump = (block_idx == 0);  // dump internals for block 0
+    const bool dump = (block_idx == 0) && sam3_debug_tensor_outputs_enabled();
 
     // ── 1. Pre-norm ──────────────────────────────────────────────────────
     // x: [C_in, W, H, B]
@@ -5153,7 +5158,10 @@ static void sam2_build_hiera_graph(struct ggml_context* ctx,
     // Permute from [OW, OH, E, 1] to [E, OW, OH, 1] (channel-first convention)
     x = ggml_cont(ctx, ggml_permute(ctx, x, 1, 2, 0, 3));
     ggml_set_name(x, "dbg_patch_embed");
-    ggml_set_output(x);
+    const bool debug_outputs = sam3_debug_tensor_outputs_enabled();
+    if (debug_outputs) {
+        ggml_set_output(x);
+    }
 
     // ── Add positional embedding (precomputed on CPU, uploaded as input) ─
     // PE spatial dims match patch embed output (input_size / 4).
@@ -5164,7 +5172,9 @@ static void sam2_build_hiera_graph(struct ggml_context* ctx,
     ggml_set_input(pe);
     x = ggml_add(ctx, x, pe);
     ggml_set_name(x, "dbg_after_pe");
-    ggml_set_output(x);
+    if (debug_outputs) {
+        ggml_set_output(x);
+    }
 
     // ── Process all blocks ───────────────────────────────────────────────
     int spatial_H = pe_spatial;
@@ -5179,7 +5189,9 @@ static void sam2_build_hiera_graph(struct ggml_context* ctx,
         // Mark key block outputs for debugging
         if (i == 0 || i == 1 || i == 2 || i == 5 || i == 21) {
             sam3_set_name(x, std::format("dbg_block_{}", i));
-            ggml_set_output(x);
+            if (debug_outputs) {
+                ggml_set_output(x);
+            }
         }
 
         // Update spatial dims if Q-pooling happened
@@ -5192,7 +5204,9 @@ static void sam2_build_hiera_graph(struct ggml_context* ctx,
         if (i == hiera.stage_ends[stage_idx]) {
             // Store as BCHW: permute [C, W, H, 1] → [C, W, H, 1] (already in this format)
             sam3_set_name(x, std::format("hiera_stage_{}", stage_idx));
-            ggml_set_output(x);
+            if (debug_outputs) {
+                ggml_set_output(x);
+            }
             stage_outs[stage_idx] = x;
             stage_idx++;
         }
@@ -5226,7 +5240,7 @@ static void sam2_build_fpn_neck_graph(struct ggml_context* ctx,
         conv_out = ggml_add(ctx, conv_out, ggml_repeat(ctx, bias, conv_out));
         // Permute back to [D, W, H, 1]
         laterals[i] = ggml_cont(ctx, ggml_permute(ctx, conv_out, 1, 2, 0, 3));
-        {
+        if (sam3_debug_tensor_outputs_enabled()) {
             sam3_set_name(laterals[i], std::format("dbg_fpn_lateral_{}", i));
             ggml_set_output(laterals[i]);
         }

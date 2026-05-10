@@ -384,18 +384,24 @@ needs the same kind of layout reduction or quantized small-GEMM improvement.
 
 The opt-in ggml CUDA node profiler (`GGML_CUDA_PROFILE_NODES=1`) disables CUDA
 graphs and synchronizes after every node, so its totals are not comparable to
-normal benchmark rows. It is useful for ranking kernels and shapes. On a
-3-frame 1024 q4_0 run, the Hiera encode profile shows:
+normal benchmark rows. It is useful for ranking kernels and shapes. The summary
+script now records `sum_ms_drop_max` and `mean_ms_drop_max` for node groups so
+one-time first-use outliers do not hide steady-state hotspots. On the current
+3-frame 1024 q4_0 run after the conv-transpose k2s2 kernel, the Hiera encode
+profile shows:
 
-| Region | Node/signature | Count | Sum ms | Mean ms | Note |
-| --- | --- | ---: | ---: | ---: | --- |
-| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,4096,1]` output | 9 | 36.69 | 4.08 | steady global-attention hotspot |
-| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,196,25]` output | 36 | 18.19 | 0.51 | window-attention hotspot |
-| Hiera | q4_0 MLP `448 -> 1792` / `1792 -> 448` matmuls | 96 | 12.70 | 0.13 | many small/medium calls |
-| Propagate | `CONV_TRANSPOSE_2D` | 4 | 13.07 | 3.27 | top propagation-side kernel |
+| Region | Node/signature | Count | Sum ms | Drop-max sum ms | Mean drop-max ms | Note |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,4096,1]` output | 9 | 36.57 | 32.39 | 4.05 | steady global-attention hotspot |
+| Hiera | `FLASH_ATTN_EXT`, `f32[56,8,196,25]` output | 36 | 18.22 | 17.70 | 0.51 | window-attention hotspot |
+| Hiera | q4_0 MLP `448 -> 1792` matmul | 48 | 6.34 | 6.20 | 0.13 | repeated stage-2 MLP shape |
+| Hiera | q4_0 MLP `1792 -> 448` matmul | 48 | 6.42 | 6.28 | 0.13 | repeated stage-2 MLP shape |
+| Propagate | `CONV_TRANSPOSE_2D` | 6 | 1.98 | 1.42 | 0.28 | no longer a primary bottleneck after k2s2 specialization |
 
-The largest single Hiera `MUL_MAT` sample includes first-use warmup and should
-not be treated as the steady-state bottleneck. The steady 1024 target is now the
+The largest raw `MUL_MAT` signature,
+`f32[147,65536] x f32[147,112] -> f32[65536,112]`, is almost entirely a first-use
+outlier (`69.82 ms` raw sum, `0.38 ms` after dropping the max sample). It should
+not be treated as the steady-state target. The steady 1024 target is now the
 global `FLASH_ATTN_EXT` path for head_dim 56 and 4096 tokens, followed by the
 window-attention and quantized MLP matmul shapes. A simple experiment that cast
 Hiera Q/K/V to f16 before `ggml_flash_attn_ext` was rejected: the current CUDA
@@ -542,4 +548,5 @@ outputs/preprocess-threaded/q4_0_512_force_cublas.log
 outputs/conv-transpose-k2s2/paired_summary.json
 outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
 outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
+outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
 ```

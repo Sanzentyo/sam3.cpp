@@ -200,9 +200,12 @@ def summarize(path: Path) -> dict[str, Any]:
         by_signature: dict[str, dict[str, Any]],
     ) -> None:
         op = node_row["op"]
-        op_stats = by_op.setdefault(op, {"count": 0, "sum_ms": 0.0, "max_ms": 0.0})
+        op_stats = by_op.setdefault(op, {"count": 0, "sum_ms": 0.0, "min_ms": None, "max_ms": 0.0})
         op_stats["count"] += 1
         op_stats["sum_ms"] += node_row["ms"]
+        op_stats["min_ms"] = (
+            node_row["ms"] if op_stats["min_ms"] is None else min(op_stats["min_ms"], node_row["ms"])
+        )
         op_stats["max_ms"] = max(op_stats["max_ms"], node_row["ms"])
         signature = cuda_node_signature(node_row)
         sig_stats = by_signature.setdefault(
@@ -217,11 +220,17 @@ def summarize(path: Path) -> dict[str, Any]:
                 "src1_ne": node_row["src1_ne"],
                 "count": 0,
                 "sum_ms": 0.0,
+                "min_ms": None,
                 "max_ms": 0.0,
             },
         )
         sig_stats["count"] += 1
         sig_stats["sum_ms"] += node_row["ms"]
+        sig_stats["min_ms"] = (
+            node_row["ms"]
+            if sig_stats["min_ms"] is None
+            else min(sig_stats["min_ms"], node_row["ms"])
+        )
         sig_stats["max_ms"] = max(sig_stats["max_ms"], node_row["ms"])
 
     for match in CUDA_NODE_RE.findall(text):
@@ -251,6 +260,10 @@ def summarize(path: Path) -> dict[str, Any]:
         all_stats.extend(by_signature.values())
     for stats in all_stats:
         stats["mean_ms"] = stats["sum_ms"] / max(1, stats["count"])
+        if stats["count"] > 1:
+            stats["sum_ms_drop_max"] = stats["sum_ms"] - stats["max_ms"]
+            stats["mean_ms_drop_max"] = stats["sum_ms_drop_max"] / (stats["count"] - 1)
+            stats["max_fraction_of_sum"] = stats["max_ms"] / stats["sum_ms"] if stats["sum_ms"] else 0.0
 
     result: dict[str, Any] = {
         "path": str(path),

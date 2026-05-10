@@ -43,9 +43,10 @@ Comparison rule: C++ vs official PyTorch speed/quality claims are valid only
 when both runs use the same decoded source-frame resolution, the same frame
 range, the same prompt, and the same SAM2 input encode size
 (`--encode-img-size` in C++, `model.image_size` in official PyTorch). The
-primary comparison must keep both the decoded input resolution and the model
-input encode size fixed. Running multiple source resolutions or encode sizes is
-still useful, but those rows are a scaling study; they must not be used as a
+primary comparison must keep both resolution layers fixed: the decoded source
+frame size before preprocessing, and the model input encode size after
+preprocessing. Running multiple source resolutions or encode sizes is still
+useful, but those rows are a scaling study; they must not be used as a
 cross-implementation win/loss comparison unless the matching PyTorch run uses
 the same decoded source resolution and encode size. In short: use matched
 same-input rows for C++/PyTorch conclusions, and use unmatched resolution rows
@@ -433,6 +434,13 @@ preprocessing on the same 5-frame 1024 profile. `hiera_encode_preprocess` was
 was reverted. The next preprocessing optimization should be a real GPU
 resize/normalize/upload path, not scalar type tuning inside the CPU loop.
 
+Precomputing a 3x256 uint8 normalization lookup table also preserved full-mask
+parity (`mask_hash_equal_rows=10/10`), but did not improve the same 5-frame 1024
+profile. `hiera_encode_preprocess` moved from `8.599 ms` to `8.759 ms`, while
+total tracking stayed at `98.8 ms/frame`. This was reverted; the CPU loop is not
+currently limited by the per-pixel normalize arithmetic enough for this
+micro-optimization to matter.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -567,4 +575,6 @@ outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json
+outputs/preprocess-norm-lut/fullmask_parity.json
+outputs/preprocess-norm-lut/lut_profile_summary.json
 ```

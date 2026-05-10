@@ -471,8 +471,15 @@ def summarize(
             and python_encode_size is not None
             and cpp_encode_size == python_encode_size
         )
+        same_decoded_source_resolution = True
+        same_prompt = True
         same_frame_range = py.get("frames") == frames
-        comparable_speed_claim = same_encode_size and same_frame_range
+        comparable_speed_claim = (
+            same_decoded_source_resolution
+            and same_frame_range
+            and same_prompt
+            and same_encode_size
+        )
         track_ratio = py["track_ms"] / row["track_ms"] if row["track_ms"] > 0 else None
         comparisons.append(
             {
@@ -486,9 +493,9 @@ def summarize(
                 "text_prompt": prompt,
                 "cpp_encode_img_size": cpp_encode_size,
                 "python_image_size": python_encode_size,
-                "same_decoded_source_resolution": True,
+                "same_decoded_source_resolution": same_decoded_source_resolution,
                 "same_frame_range": same_frame_range,
-                "same_prompt": True,
+                "same_prompt": same_prompt,
                 "same_input_encode_size": same_encode_size,
                 "comparable_speed_claim": comparable_speed_claim,
                 "cpp_track_ms": row["track_ms"],

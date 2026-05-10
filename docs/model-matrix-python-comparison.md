@@ -26,10 +26,13 @@ This avoids pretending that `q4_0` or `q8_0` has a direct PyTorch equivalent.
 
 Speed and quality conclusions require matching input conditions. For C++ vs
 official Python, compare only rows with the same decoded source-frame
-resolution, frame range, prompt, model family, and SAM input encode size. Lower
-encode-size or lower source-resolution rows are useful scaling data, but they
-are not evidence that one implementation is faster than another unless the
-official Python row uses the same effective input size.
+resolution, frame range, prompt, model family, and SAM input encode size. The
+decoded source-frame resolution and the SAM input encode size are separate
+conditions: changing either one makes the row scaling data, not direct
+implementation evidence. Lower encode-size or lower source-resolution rows are
+useful scaling data, but they are not evidence that one implementation is
+faster than another unless the official Python row uses the same effective input
+size.
 
 The `python_over_cpp_track_ratio` field in `summary.json` is:
 

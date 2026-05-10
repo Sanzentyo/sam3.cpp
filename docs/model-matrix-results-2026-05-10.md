@@ -70,9 +70,10 @@ runs at the same encode size are directly comparable.
 
 For C++ vs Python conclusions, the comparison key is: same decoded source-frame
 resolution, same frame range, same prompt, same model family, and same SAM input
-encode size. Separate source-resolution or encode-size measurements are useful
-for scaling analysis, but they should not be compared against a Python 1024
-baseline as a speed win.
+encode size. Decoded source-frame resolution and SAM input encode size are both
+part of the key; matching only one of them is not enough. Separate
+source-resolution or encode-size measurements are useful for scaling analysis,
+but they should not be compared against a Python 1024 baseline as a speed win.
 
 | Family | Backend | Track ms | CUDA alloc MiB |
 | --- | --- | ---: | ---: |

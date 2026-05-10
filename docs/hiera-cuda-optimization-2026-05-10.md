@@ -276,6 +276,15 @@ So the immediate path is not to force MMQ globally. The remaining speed work
 should either reduce the number of stage-2 matmuls/layout transitions or improve
 the dequantize-plus-GEMM path for these medium-width Hiera shapes.
 
+Flattening non-q-stride window-attention QKV/projection matmuls from
+`[C, N, B_win]` into `[C, N * B_win]` was tested and rejected. It did not
+improve the 1024 full-mask run (`109.2 ms/frame` versus the current
+`108.9 ms/frame` full-mask reference), and it changed C++ output:
+`mask_hash_equal_rows=0`, `min_bbox_iou=0.9647`, `max_bbox_delta_px=3.0`, and
+`max_score_abs_delta=0.0691`. Because this path changes floating-point grouping
+and does not buy speed, it should not be used as a parity-preserving
+optimization.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -386,4 +395,5 @@ outputs/hiera-matmul-shapes/base_plus_q4_0_1024_two_frame_summary.json
 outputs/hiera-current-precision/summary.json
 outputs/sam2-official-quality-10-current-q8_0/summary.json
 outputs/hiera-force-mmq/summary.json
+outputs/hiera-window-matmul-flatten/parity.json
 ```

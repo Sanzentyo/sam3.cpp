@@ -577,6 +577,16 @@ first kernel implementation, not just adding 56 instantiations to the existing
 f16 MMA path. The restored tile build was rechecked against the reference JSONL
 with exact bbox/mask parity (`mask_hash_equal_rows=10/10`).
 
+The same conclusion was reconfirmed with an env-gated rerun that routed
+`head_dim=56` through the existing generic f16 MMA dispatch while keeping the
+external shape at 56. It improved 1024 q4_0 timing (`93.9 -> 81.1 ms/frame` with
+the default MMA column selection, `93.9 -> 85.5 ms/frame` when capped at
+`ncols=32`), but both variants produced empty masks from the first frame
+(`bbox=[1008,568,0,0]`, `mask_area=0`) and then stayed empty. This is a broken
+kernel path, not acceptable numerical drift. The experiment was reverted; only
+the generator/extern cleanup needed to reproduce the existing tile
+instantiations was kept.
+
 The tile FlashAttention launch was also tested with `stream_k=true` to check
 whether the long 4096-token global attention was limited by the current
 parallel-block combine path. It produced a large rough 1024 bbox speedup
@@ -833,6 +843,9 @@ outputs/fattn56-mma/q4_0_1024_global_only_bbox.log
 outputs/fattn56-mma/q4_0_1024_window_only_bbox.log
 outputs/fattn56-mma/default_vs_mma_bbox.json
 outputs/fattn56-mma/default_vs_restored_bbox.json
+outputs/fattn56-mma-gated/default_1024.log
+outputs/fattn56-mma-gated/mma_1024.log
+outputs/fattn56-mma-gated/mma_ncols32_1024.log
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

@@ -31,6 +31,12 @@ HIERA_CUT_RE = re.compile(
 HIERA_CUT_OPS_RE = re.compile(
     r"SAM3_PROFILE_HIERA_CUT_OPS label=(\S+) op=(\S+) count=(\d+) out_elements=(\d+)"
 )
+HIERA_CUT_MATMUL_RE = re.compile(
+    r"SAM3_PROFILE_HIERA_CUT_MATMUL label=(\S+) "
+    r"src0_type=(\S+) src0_ne=([0-9,]+) "
+    r"src1_type=(\S+) src1_ne=([0-9,]+) "
+    r"dst_type=(\S+) dst_ne=([0-9,]+)"
+)
 
 
 def mean(values: list[float]) -> float | None:
@@ -70,6 +76,32 @@ def summarize(path: Path) -> dict[str, Any]:
             samples = int(op_stats["samples"])
             op_stats["mean_count"] = op_stats["count"] / samples
             op_stats["mean_out_elements"] = op_stats["out_elements"] / samples
+    hiera_cut_matmuls: dict[str, dict[str, dict[str, int | float | str]]] = {}
+    for label, src0_type, src0_ne, src1_type, src1_ne, dst_type, dst_ne in HIERA_CUT_MATMUL_RE.findall(
+        text
+    ):
+        key = (
+            f"src0={src0_type}[{src0_ne}] src1={src1_type}[{src1_ne}] "
+            f"dst={dst_type}[{dst_ne}]"
+        )
+        stats = hiera_cut_matmuls.setdefault(label, {}).setdefault(
+            key,
+            {
+                "count": 0,
+                "src0_type": src0_type,
+                "src0_ne": src0_ne,
+                "src1_type": src1_type,
+                "src1_ne": src1_ne,
+                "dst_type": dst_type,
+                "dst_ne": dst_ne,
+            },
+        )
+        stats["count"] += 1
+    for label, matmuls in hiera_cut_matmuls.items():
+        label_samples = max(1, len(hiera_cuts.get(label, [])))
+        for stats in matmuls.values():
+            stats["samples"] = label_samples
+            stats["mean_count"] = stats["count"] / label_samples
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -107,6 +139,15 @@ def summarize(path: Path) -> dict[str, Any]:
                 for op, stats in sorted(ops.items(), key=lambda item: item[0])
             }
             for label, ops in sorted(hiera_cut_ops.items(), key=lambda item: item[0])
+        },
+        "hiera_cut_matmuls": {
+            label: {
+                key: stats
+                for key, stats in sorted(
+                    matmuls.items(), key=lambda item: (-float(item[1]["mean_count"]), item[0])
+                )
+            }
+            for label, matmuls in sorted(hiera_cut_matmuls.items(), key=lambda item: item[0])
         },
     }
     if row:

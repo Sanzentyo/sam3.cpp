@@ -1301,6 +1301,7 @@ static bool sam3_profile_hiera_cuts(ggml_backend_t backend,
     const int n_warmup = std::max(0, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_WARMUP", 1));
     const int n_iter = std::max(1, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_ITER", 3));
     const bool print_ops = sam3_getenv("SAM3_PROFILE_HIERA_CUT_OPS").has_value();
+    const bool print_matmuls = sam3_getenv("SAM3_PROFILE_HIERA_CUT_MATMULS").has_value();
 
     for (const auto& cut : cuts) {
         if (cut.tensors.empty())
@@ -1335,6 +1336,40 @@ static bool sam3_profile_hiera_cuts(ggml_backend_t backend,
                         op_name.c_str(),
                         stat.first,
                         static_cast<long long>(stat.second));
+            }
+        }
+
+        if (print_matmuls) {
+            const int n_nodes = ggml_graph_n_nodes(graph);
+            for (int i = 0; i < n_nodes; ++i) {
+                auto* node = ggml_graph_node(graph, i);
+                if (node->op != GGML_OP_MUL_MAT || node->src[0] == nullptr ||
+                    node->src[1] == nullptr) {
+                    continue;
+                }
+                const auto* src0 = node->src[0];
+                const auto* src1 = node->src[1];
+                fprintf(stderr,
+                        "SAM3_PROFILE_HIERA_CUT_MATMUL label=%s "
+                        "src0_type=%s src0_ne=%lld,%lld,%lld,%lld "
+                        "src1_type=%s src1_ne=%lld,%lld,%lld,%lld "
+                        "dst_type=%s dst_ne=%lld,%lld,%lld,%lld\n",
+                        cut.label.c_str(),
+                        ggml_type_name(src0->type),
+                        static_cast<long long>(src0->ne[0]),
+                        static_cast<long long>(src0->ne[1]),
+                        static_cast<long long>(src0->ne[2]),
+                        static_cast<long long>(src0->ne[3]),
+                        ggml_type_name(src1->type),
+                        static_cast<long long>(src1->ne[0]),
+                        static_cast<long long>(src1->ne[1]),
+                        static_cast<long long>(src1->ne[2]),
+                        static_cast<long long>(src1->ne[3]),
+                        ggml_type_name(node->type),
+                        static_cast<long long>(node->ne[0]),
+                        static_cast<long long>(node->ne[1]),
+                        static_cast<long long>(node->ne[2]),
+                        static_cast<long long>(node->ne[3]));
             }
         }
 

@@ -26,6 +26,8 @@ path can be treated as a Rust-wrapper baseline.
   Hiera. It times Hiera stage outputs and all FPN outputs separately from the
   normal graph so the dominant region can be identified.
 - Added optional `SAM3_PROFILE_HIERA_CUT_OPS=1` op-count logging for Hiera cuts.
+- Added optional `SAM3_PROFILE_HIERA_CUT_MATMULS=1` Hiera cut matmul shape
+  logging.
 - Removed avoidable Q/K/V layout copies in non-q-stride Hiera attention blocks
   by viewing the fused QKV projection as head-split tensors directly.
 - Removed explicit Hiera LayerNorm affine `REPEAT` nodes and rely on ggml
@@ -78,6 +80,14 @@ Base+ precision sweep after CPU PE caching:
 | `sam2.1_hiera_base_plus_q8_0` | 134.6 | 133.6 | 141.8 | 646.6 |
 | `sam2.1_hiera_base_plus_q4_1` | 136.0 | 134.4 | 143.7 | 649.6 |
 | `sam2.1_hiera_base_plus_q4_0` | 134.5 | 133.6 | 142.1 | 647.8 |
+
+Current precision spot-check after the Hiera graph cleanups:
+
+| Model | Track ms/frame | P50 ms | P95 ms | Note |
+| --- | ---: | ---: | ---: | --- |
+| `sam2.1_hiera_base_plus_f16` | 121.7 | 119.9 | 133.3 | cublas path, still slower here |
+| `sam2.1_hiera_base_plus_q8_0` | 105.9 | 103.2 | 115.7 | fastest bbox-only spot-check |
+| `sam2.1_hiera_base_plus_q4_0` | 107.6 | 105.2 | 117.4 | current quality baseline |
 
 Official PyTorch SAM2.1 Base+ on the same 10-frame clip and default 1024 encode
 size measured `43.4 ms/frame` for propagation with `855.2 MiB` CUDA allocation.
@@ -133,6 +143,12 @@ same q4_0 run improves substantially:
 | --- | ---: | ---: | ---: | ---: | --- |
 | 1024 | 120.2 | 43.4 | 0.4745 | 0.0000 | metadata-validated same decoded resolution, frame range, prompt, and encode size; frame 8 official output is empty |
 | 512 | 36.8 | 15.4 | 0.7798 | 0.7743 | metadata-validated same decoded resolution, frame range, prompt, and encode size |
+
+After the graph cleanups, a current q8_0 1024 quality spot-check against
+official PyTorch gives `105.9 ms/frame` bbox-only, `111.1 ms/frame` for the
+full-mask JSONL run, mean mask IoU `0.4495`, and min mask IoU `0.0` with the
+same metadata checks passing. This is not enough to replace q4_0 as the quality
+baseline even though q8_0 is slightly faster in the bbox-only spot-check.
 
 This indicates the previous no-mask attention fallback was both slower and
 semantically weak for SAM2.1 Base+. The implementation is still slower than
@@ -232,6 +248,22 @@ output versus the direct-QKV-head-view run:
 `max_score_abs_delta=0.0`. The normal Hiera graph shrinks again from 1391 to
 1295 nodes. The 1024 bbox-only run improves to `107.2 ms/frame`; the full-mask
 JSONL run measures `108.9 ms/frame`.
+
+The matmul-shape profile after these graph cleanups shows that stage 2 is now
+mostly repeated quantized projection/MLP work. From `hiera_stage_1` to
+`hiera_stage_2`, the largest added matmul signatures per frame are:
+
+| Mean count | Signature |
+| ---: | --- |
+| 16 | `q4_0[448,1792] x f32[448,4096] -> f32[1792,4096]` |
+| 16 | `q4_0[1792,448] x f32[1792,4096] -> f32[448,4096]` |
+| 12 | `q4_0[448,1344] x f32[448,196,25] -> f32[1344,196,25]` |
+| 12 | `q4_0[448,448] x f32[448,196,25] -> f32[448,196,25]` |
+
+The first two rows are stage-2 MLP expansion/projection at 64x64; the latter
+two rows are window-attention QKV/projection over 25 windows of 14x14 tokens.
+This makes the next optimization target the quantized CUDA matmul path for
+medium-width, many-column Hiera shapes, not FPN.
 
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
@@ -339,4 +371,7 @@ outputs/hiera-norm-broadcast/bbox_only_summary.json
 outputs/hiera-norm-broadcast/fullmask_summary.json
 outputs/hiera-norm-broadcast/profile_summary.json
 outputs/hiera-norm-broadcast/parity.json
+outputs/hiera-matmul-shapes/base_plus_q4_0_1024_two_frame_summary.json
+outputs/hiera-current-precision/summary.json
+outputs/sam2-official-quality-10-current-q8_0/summary.json
 ```

@@ -245,6 +245,13 @@ Rejected follow-up experiments:
   `max_score_abs_delta=0.4663`. Splitting the experiment into global-only and
   window-only attention did not recover parity either (`mask_hash_equal_rows=0/10`
   for both). This is not an acceptable optimization.
+- Forcing only the repeated Hiera stage-2 q4 MLP shapes
+  `q4_0[448,1792] x f32[448,4096]` and
+  `q4_0[1792,448] x f32[1792,4096]` away from MMQ to the cuBLAS fallback also
+  regressed the 1024 bbox-only row (`89.2 -> 92.5 ms/frame`) and increased RSS
+  (`609.9 -> 658.1 MiB`). This confirms the previous global
+  `GGML_CUDA_FORCE_CUBLAS=1` rejection is not just caused by unrelated small
+  matmuls.
 
 The CUDA conv-transpose k2s2 specialization targets the SAM decoder upsampling
 shape `kernel=2,stride=2,padding=0`. The generic CUDA kernel checked every
@@ -726,6 +733,8 @@ outputs/fattn56-nbatchK28/q4_0_1024_summary.json
 outputs/hiera-pad-head64/pad64_1024_parity.json
 outputs/hiera-pad-head64/global_1024_parity.json
 outputs/hiera-pad-head64/window_1024_parity.json
+outputs/hiera-mlp448-cublas/default_1024.log
+outputs/hiera-mlp448-cublas/mlp448_1024.log
 outputs/model-matrix-free-prev-state-1024/summary.json
 outputs/model-matrix-free-prev-state-512/summary.json
 outputs/model-matrix-free-prev-state-1024-trackrange/summary.json

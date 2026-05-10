@@ -24,12 +24,15 @@ public fork.
 ## Validation Commands
 
 ```bash
+export SAM3_MODELS_DIR=models
+export SAM3_VIDEO=data/test_video.mp4
+
 just fmt-check
 git diff --check
 just build-target sam3_smoke
 timeout 240s build/xmake-release-cuda/examples/sam3_smoke \
-  --model /home/sanzentyo/git/signage-backend/analysis/sam/sam3cpp-probe/models/sam3-q4_0.ggml \
-  --video /home/sanzentyo/git/signage-backend/analysis/sam/sam3cpp-probe/first10_1008.mp4 \
+  --model "$SAM3_MODELS_DIR/sam3-q4_0.ggml" \
+  --video "$SAM3_VIDEO" \
   --frame 0 \
   --point-x 315 \
   --point-y 250 \
@@ -49,8 +52,8 @@ The final fork state builds with CUDA enabled:
 
 Real-model smoke used:
 
-- model: `sam3-q4_0.ggml`
-- video: `first10_1008.mp4`
+- model: `$SAM3_MODELS_DIR/sam3-q4_0.ggml`
+- video: `$SAM3_VIDEO`
 - frame: `0`
 - prompt: point `(315, 250)` and text `person`
 

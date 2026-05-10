@@ -9,27 +9,26 @@ State-of-the-art image and video segmentation in portable C/C++
 
 ## Why sam3.cpp?
 
-Running Meta's Segment Anything models typically requires Python, PyTorch, and a CUDA GPU. **sam3.cpp** eliminates all of that. It's a single C++ library that runs SAM 2, SAM 2.1, SAM 3, and EdgeTAM inference on CPU and Apple Metal. No Python runtime, no GPU drivers, no heavyweight dependencies. Just compile and segment.
+Running Meta's Segment Anything models typically requires Python, PyTorch, and a GPU runtime. **sam3.cpp** eliminates the Python runtime from deployment. It is a single C++ library that runs SAM 2, SAM 2.1, SAM 3, and EdgeTAM inference on CPU, Apple Metal, and CUDA through ggml. Just compile and segment.
 
 - **4 model families**: SAM 2, SAM 2.1 (Hiera), SAM 3 (ViT + text detection), EdgeTAM (RepViT, 22x faster than SAM 2 on mobile)
 - **4-bit quantization**: EdgeTAM in **15 MB**, SAM 2.1 Tiny in **22 MB** at ~1 fps on Metal, SAM 3 down to 673 MB
-- **Apple Metal GPU acceleration** for the full backbone and transformer decoder
+- **GPU acceleration** through ggml Metal on macOS and ggml CUDA on NVIDIA systems
 - **Text-prompted detection** (SAM 3 only): type `"cat"` and get every cat in the image, no clicks needed
 - **Point/box segmentation + video tracking** with memory bank across all models
-- **Single-file library**: `sam3.cpp` + `sam3.h`, C++14, no exceptions, no inheritance
+- **Single-file library**: `sam3.cpp` + `sam3.h`, C++23
 - **Zero dependencies** beyond [ggml](https://github.com/ggerganov/ggml) and [stb](https://github.com/nothings/stb)
 
 ## Quick Start
 
 ```bash
 # Clone
-git clone --recursive https://github.com/PABannier/sam3.cpp
+git clone --recursive https://github.com/Sanzentyo/sam3.cpp
 cd sam3.cpp
 
-# Build (Metal GPU enabled automatically on macOS)
-mkdir build && cd build
-cmake ..
-make -j
+# Build with the xmake wrapper around the existing CMake targets.
+# CUDA is enabled by default on Linux when available.
+just build-target sam3_smoke
 
 # Download a model (SAM 2.1 Tiny, 75 MB)
 # See "Model Zoo" below for all available models and download links
@@ -47,7 +46,7 @@ The interactive apps use SDL2 + ImGui. If SDL2 isn't found, only the benchmark a
 
 ## Benchmarks
 
-Video object tracking latency on **Apple M4 Pro (24 GB)**, 5 frames at 1008x1008 resolution, 4 threads. Each run is isolated in a forked subprocess.
+Video object tracking latency from the original Metal-focused benchmark is kept below for historical comparison. Current CUDA/fork validation results are recorded in `docs/final-fork-validation.md`; the full CUDA model/precision matrix and Python comparison are recorded in `docs/model-matrix-results-2026-05-10.md`. The current branch also includes `scripts/sam3_parity_stats.py` for paired parity/performance runs.
 
 ### SAM 3 (Full: text detection + visual tracking)
 
@@ -128,7 +127,7 @@ Options: `--models-dir <path>`, `--video <path>`, `--n-frames <n>`, `--n-threads
 
 All models are available in GGML format on Hugging Face:
 
-**[PABannier/sam3.cpp](https://huggingface.co/PABannier/sam3.cpp)**: 52 model files covering 4 architectures x multiple sizes x up to 5 precisions.
+**[PABannier/sam3.cpp](https://huggingface.co/PABannier/sam3.cpp)**: model files covering 4 architectures x multiple sizes x up to 5 precisions.
 
 ### SAM 3 (850M params, ViT-32 backbone + text encoder + DETR decoder)
 
@@ -189,25 +188,47 @@ All models are available in GGML format on Hugging Face:
 ### Build
 
 ```bash
-git clone --recursive https://github.com/PABannier/sam3.cpp
+git clone --recursive https://github.com/Sanzentyo/sam3.cpp
 cd sam3.cpp
-mkdir build && cd build
-cmake ..
-make -j
+
+# xmake delegates to the CMake targets and keeps the local CUDA configuration
+# in one place. Override CUDA_ARCH/CXX_COMPILER/CUDA_HOST_COMPILER as needed.
+just build
+just build-target sam3_smoke
 ```
 
-Metal is enabled automatically on macOS. To disable it:
+CUDA is enabled by default in the xmake wrapper on Linux. Metal is enabled
+automatically by the CMake build on macOS. To use CMake directly:
 
 ```bash
-cmake .. -DSAM3_METAL=OFF
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
-To build tests:
+To disable Metal in a direct CMake build:
 
 ```bash
-cmake .. -DSAM3_BUILD_TESTS=ON
-make -j
+cmake -S . -B build -DSAM3_METAL=OFF
 ```
+
+To build tests with direct CMake:
+
+```bash
+cmake -S . -B build -DSAM3_BUILD_TESTS=ON
+cmake --build build -j
+```
+
+### Local Validation
+
+```bash
+just fmt-check
+git diff --check
+just build-target sam3_smoke
+PARITY_RUNS=15 PARITY_OUT=outputs/parity-stats just parity-stats
+```
+
+The latest final-fork validation on CUDA is documented in
+`docs/final-fork-validation.md`.
 
 ## Usage
 

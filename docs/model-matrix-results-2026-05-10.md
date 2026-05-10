@@ -32,28 +32,18 @@ Python baselines were run separately for locally available official checkpoints:
 | Matrix | Count |
 | --- | ---: |
 | GGML files downloaded | 52 |
-| C++ CUDA benchmark OK | 42 |
-| C++ CUDA benchmark failed | 10 |
+| C++ CUDA benchmark OK | 52 |
+| C++ CUDA benchmark failed | 0 |
 
-The 10 failures are all SAM 2 / SAM 2.1 Base+ variants. They crash in the CUDA
-flash-attention path during Hiera image encoding:
+The first full run exposed crashes in all SAM 2 / SAM 2.1 Base+ variants. The
+root cause was the Base+ Hiera attention head dimension: `head_dim=56` is not
+covered by the current ggml CUDA FlashAttention kernel set, which aborted in
+`ggml-cuda/fattn.cu`.
 
-```text
-ggml-cuda/fattn.cu:560 fatal error
-```
-
-| Model | Backend | Status |
-| --- | --- | --- |
-| `sam2_hiera_base_plus_f32` | CUDA | crashed, signal 6 |
-| `sam2_hiera_base_plus_f16` | CUDA | crashed, signal 6 |
-| `sam2_hiera_base_plus_q8_0` | CUDA | crashed, signal 6 |
-| `sam2_hiera_base_plus_q4_1` | CUDA | crashed, signal 6 |
-| `sam2_hiera_base_plus_q4_0` | CUDA | crashed, signal 6 |
-| `sam2.1_hiera_base_plus_f32` | CUDA | crashed, signal 6 |
-| `sam2.1_hiera_base_plus_f16` | CUDA | crashed, signal 6 |
-| `sam2.1_hiera_base_plus_q8_0` | CUDA | crashed, signal 6 |
-| `sam2.1_hiera_base_plus_q4_1` | CUDA | crashed, signal 6 |
-| `sam2.1_hiera_base_plus_q4_0` | CUDA | crashed, signal 6 |
+`sam3.cpp` now keeps FlashAttention for supported Hiera head dimensions and
+routes unsupported no-mask Hiera attention through a generic matmul/softmax
+fallback. This is a coverage/correctness fix, not a speed optimization. A
+10-frame Base+ revalidation passed all 10 Base+ precision variants.
 
 ## Best C++ Row By Family
 
@@ -63,9 +53,11 @@ ggml-cuda/fattn.cu:560 fatal error
 | SAM 3 | `sam3-q8_0` | `q8_0` | 1717.9 | 1718.3 | 1752.2 | 632.5 |
 | SAM 3 visual | `sam3-visual-q4_1` | `q4_1` | 1058.8 | 1058.5 | 1070.4 | 754.1 |
 | SAM 2 tiny | `sam2_hiera_tiny_q4_0` | `q4_0` | 486.1 | 483.8 | 496.5 | 611.2 |
+| SAM 2 base+ | `sam2_hiera_base_plus_q4_0` | `q4_0` | 552.0 | 548.4 | 564.8 | 632.6 |
 | SAM 2 small | `sam2_hiera_small_q4_1` | `q4_1` | 489.1 | 486.6 | 500.7 | 621.3 |
 | SAM 2 large | `sam2_hiera_large_q4_0` | `q4_0` | 686.0 | 684.6 | 697.7 | 677.2 |
 | SAM 2.1 tiny | `sam2.1_hiera_tiny_q4_0` | `q4_0` | 479.9 | 478.6 | 490.3 | 611.9 |
+| SAM 2.1 base+ | `sam2.1_hiera_base_plus_q4_0` | `q4_0` | 547.3 | 544.8 | 559.4 | 620.2 |
 | SAM 2.1 small | `sam2.1_hiera_small_q4_1` | `q4_1` | 484.2 | 481.3 | 496.2 | 597.9 |
 | SAM 2.1 large | `sam2.1_hiera_large_q8_0` | `q8_0` | 687.7 | 688.2 | 699.5 | 677.1 |
 
@@ -100,6 +92,11 @@ the comparable baselines, although C++ uses much less memory for SAM 3.
 | `sam2.1_hiera_tiny_q8_0` | 483.9 | 42.1 | 0.087 |
 | `sam2.1_hiera_tiny_q4_1` | 482.8 | 42.1 | 0.087 |
 | `sam2.1_hiera_tiny_q4_0` | 479.9 | 42.1 | 0.088 |
+| `sam2.1_hiera_base_plus_f32` | 560.9 | 58.2 | 0.104 |
+| `sam2.1_hiera_base_plus_f16` | 560.2 | 58.2 | 0.104 |
+| `sam2.1_hiera_base_plus_q8_0` | 551.1 | 58.2 | 0.106 |
+| `sam2.1_hiera_base_plus_q4_1` | 551.3 | 58.2 | 0.106 |
+| `sam2.1_hiera_base_plus_q4_0` | 547.3 | 58.2 | 0.106 |
 
 ## Interpretation
 
@@ -112,8 +109,9 @@ the comparable baselines, although C++ uses much less memory for SAM 3.
 - Quantization reduces model size and load time, but it does not materially
   reduce per-frame CUDA tracking latency for SAM 3 or SAM 2 Hiera in the current
   implementation.
-- SAM 2 / SAM 2.1 Base+ CUDA support is incomplete because all Base+ precision
-  variants crash in `ggml-cuda/fattn.cu`.
+- SAM 2 / SAM 2.1 Base+ CUDA coverage is now complete for the downloaded GGML
+  matrix, but the generic fallback path is much slower than official PyTorch
+  CUDA bf16 for the same family.
 
 ## Artifacts
 
@@ -121,5 +119,6 @@ the comparable baselines, although C++ uses much less memory for SAM 3.
 outputs/model-matrix-compare-all-cpp/summary.json
 outputs/model-matrix-compare-all-cpp/cpp-results.json
 outputs/model-matrix-compare-all-cpp/cpp-benchmark.log
+outputs/model-matrix-compare-all-cpp/base-plus-after-fallback.log
 outputs/model-matrix-compare-local/summary.json
 ```

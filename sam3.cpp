@@ -4908,6 +4908,37 @@ static struct ggml_tensor* sam2_maxpool_2d(struct ggml_context* ctx, struct ggml
     return out;
 }
 
+static bool sam3_flash_attn_head_dim_supported(int64_t head_dim) {
+    switch (head_dim) {
+        case 16:
+        case 32:
+        case 40:
+        case 64:
+        case 72:
+        case 80:
+        case 96:
+        case 112:
+        case 128:
+        case 256:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static struct ggml_tensor* sam3_attention_no_mask_fallback(struct ggml_context* ctx,
+                                                           struct ggml_tensor* Q,
+                                                           struct ggml_tensor* K,
+                                                           struct ggml_tensor* V,
+                                                           float scale) {
+    auto* scores = ggml_mul_mat(ctx, K, Q);  // [N_kv, N_q, NH, B]
+    scores = ggml_scale(ctx, scores, scale);
+    auto* probs = ggml_soft_max(ctx, scores);
+    auto* v_t = ggml_cont(ctx, ggml_permute(ctx, V, 1, 0, 2, 3));  // [N_kv, HD, NH, B]
+    auto* attn_out = ggml_mul_mat(ctx, probs, v_t);                // [N_q, HD, NH, B]
+    return ggml_cont(ctx, ggml_permute(ctx, attn_out, 1, 0, 2, 3));
+}
+
 // Single Hiera MultiScaleBlock forward pass.
 static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
                                                     struct ggml_tensor* x,
@@ -5025,7 +5056,9 @@ static struct ggml_tensor* sam2_hiera_block_forward(struct ggml_context* ctx,
     V = ggml_permute(ctx, V, 0, 2, 1, 3);  // non-contiguous OK for flash_attn
 
     float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
-    auto* attn_out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0, 0);
+    auto* attn_out = sam3_flash_attn_head_dim_supported(head_dim)
+                         ? ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0, 0)
+                         : sam3_attention_no_mask_fallback(ctx, Q, K, V, scale);
 
     // Recombine: flash_attn output is [HD, N_q, NH, B_win]
     // → reshape to [C_out, N_q, B_win]

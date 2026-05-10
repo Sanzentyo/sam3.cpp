@@ -753,6 +753,8 @@ still not parity and remains slower than official PyTorch.
 | q4_0 multimask prompt | 1024 | 96.2 | 0.4731 | 0.4959 | 0.1975 |
 | q4_0 multimask, forced candidate 0 | 1024 | 96.4 | 0.6025 | 0.6375 | 0.3807 |
 | q4_0 + f16 SAM decoder/prompt/obj_ptr | 1024 | 97.8 | 0.4740 | 0.5007 | 0.1379 |
+| q4_0 + q8_0 Hiera/FPN | 1024 | 96.9 | 0.6747 | 0.7769 | 0.6290 |
+| q4_0 + f16 Hiera/FPN | 1024 | 106.4 | 0.6253 | 0.7793 | 0.5314 |
 | q4_1 multimask prompt | 1024 | 96.7 | 0.5835 | 0.6539 | 0.6093 |
 | q8_0 multimask prompt | 1024 | 96.7 | 0.6999 | 0.8591 | 0.6594 |
 | f16 multimask prompt | 1024 | 109.3 | 0.6995 | 0.8397 | 0.6439 |
@@ -777,6 +779,14 @@ and the initial candidate dump still scored candidate 2 highest. That points
 away from SAM decoder quantization as the main cause and toward q4_0 Hiera/FPN
 features or memory propagation state as the next quality target.
 
+The inverse mixed precision diagnostic confirms that direction. Keeping q4_0
+for the rest of the model while replacing only `hiera.*` and `fpn.*` with q8_0
+restores candidate-0 selection and raises mean mask IoU to `0.6747`, close to
+the full q8_0 row. Replacing the same tensors with f16 also restores candidate-0
+selection but reaches only `0.6253` and is slower. The quality target is
+therefore not "make the SAM decoder f16"; it is to avoid q4_0 degradation in
+Hiera/FPN features, or to use a more faithful Hiera quantization format.
+
 At `--encode-img-size 512`, the earlier bbox-only scaling run reached
 `34.4 ms/frame`, but that initial comparison was against the default official
 PyTorch 1024 run and was therefore not a fair speed baseline. The current
@@ -798,10 +808,9 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
 
 1. Fix or explain the SAM2 point-prompt quality gap against official PyTorch.
    The current C++ mask is not a faithful substitute for the official model on
-   this sample. Forced q4_0 candidate selection improves quality but does not
-   close the gap, so the next quality target is the selected mask token,
-   object-pointer extraction, and memory propagation state relative to official
-   PyTorch.
+   this sample. Mixed precision diagnostics now point to q4_0 Hiera/FPN feature
+   degradation as the primary quality issue; q8_0 Hiera/FPN recovers most of
+   the gap while f16 SAM decoder/prompt does not.
 2. Reduce Hiera encode graph compute. After PE caching, `head_dim=56` tile
    FlashAttention, graph cleanups, threaded preprocessing, and the SAM decoder
    conv-transpose k2s2 kernel, the 1024 path is still about 1.56x slower than
@@ -931,6 +940,12 @@ outputs/sam2-official-quality-1024-q4_0-multimask-candidate0/cpp_initial_candida
 outputs/sam2-official-quality-1024-q4_0-samdec-f16-multimask/summary.json
 outputs/sam2-official-quality-1024-q4_0-samdec-f16-multimask/cpp_initial_candidates.jsonl
 outputs/sam2-mixed-q4-samdec-f16-summary.json
+outputs/sam2-official-quality-1024-q4_0-hiera-q8_0-multimask/summary.json
+outputs/sam2-official-quality-1024-q4_0-hiera-q8_0-multimask/cpp_initial_candidates.jsonl
+outputs/sam2-official-quality-1024-q4_0-hiera-f16-multimask/summary.json
+outputs/sam2-official-quality-1024-q4_0-hiera-f16-multimask/cpp_initial_candidates.jsonl
+outputs/sam2-mixed-q4-hiera-q8-summary.json
+outputs/sam2-mixed-q4-hiera-f16-summary.json
 outputs/hiera-free-prev-state/q4_0_512_fixed_summary.json
 outputs/hiera-free-prev-state/q4_0_512_fullmask_summary.json
 outputs/hiera-free-prev-state/q4_0_512_force_cublas_summary.json

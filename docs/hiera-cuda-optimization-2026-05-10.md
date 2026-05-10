@@ -588,6 +588,15 @@ useful only as direction: a correct head_dim 56 stream-k/no-mask kernel could be
 worth pursuing, but the generic tile kernel cannot be enabled with the
 `launch_fattn` flag alone.
 
+For the non-stream-k tile path, forcing the number of KV parallel blocks was
+also tested as a scheduling-level alternative to kernel rewriting. Fixed values
+`1,2,4,8,16` all preserved successful execution, but did not improve the 1024
+bbox timing (`90.1-92.4 ms/frame`, comparable to the current baseline) and
+changed the initial bbox/hash through different reduction order. This means the
+existing auto-selected parallel-block schedule is not the main remaining
+bottleneck; the speedup seen with invalid stream-k still points to a kernel that
+is explicitly written for the stream-k contract.
+
 ## Kernel-Level Optimization Direction
 
 Further work should not be limited to changing the current tile kernel

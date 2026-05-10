@@ -16,10 +16,9 @@
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <SDL_opengl.h>
-
 #include <imgui.h>
-#include <imgui_impl_sdl2.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_impl_sdl2.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -30,10 +29,18 @@
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 static const float INSTANCE_COLORS[][3] = {
-    {1.0f, 0.2f, 0.2f}, {0.2f, 0.6f, 1.0f}, {0.2f, 0.9f, 0.3f},
-    {1.0f, 0.8f, 0.1f}, {0.8f, 0.3f, 0.9f}, {1.0f, 0.5f, 0.1f},
-    {0.1f, 0.9f, 0.9f}, {0.9f, 0.4f, 0.6f}, {0.5f, 0.8f, 0.2f},
-    {0.3f, 0.3f, 1.0f}, {1.0f, 0.6f, 0.7f}, {0.6f, 1.0f, 0.5f},
+    {1.0f, 0.2f, 0.2f},
+    {0.2f, 0.6f, 1.0f},
+    {0.2f, 0.9f, 0.3f},
+    {1.0f, 0.8f, 0.1f},
+    {0.8f, 0.3f, 0.9f},
+    {1.0f, 0.5f, 0.1f},
+    {0.1f, 0.9f, 0.9f},
+    {0.9f, 0.4f, 0.6f},
+    {0.5f, 0.8f, 0.2f},
+    {0.3f, 0.3f, 1.0f},
+    {1.0f, 0.6f, 0.7f},
+    {0.6f, 1.0f, 0.5f},
 };
 static constexpr int N_COLORS = sizeof(INSTANCE_COLORS) / sizeof(INSTANCE_COLORS[0]);
 
@@ -44,124 +51,125 @@ static std::string basename_of(const std::string& path) {
 
 static void apply_theme() {
     ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding    = 6.0f;
-    s.FrameRounding     = 4.0f;
-    s.GrabRounding      = 3.0f;
+    s.WindowRounding = 6.0f;
+    s.FrameRounding = 4.0f;
+    s.GrabRounding = 3.0f;
     s.ScrollbarRounding = 4.0f;
-    s.TabRounding       = 4.0f;
-    s.ChildRounding     = 4.0f;
-    s.PopupRounding     = 4.0f;
-    s.FramePadding      = ImVec2(6, 4);
-    s.ItemSpacing       = ImVec2(8, 5);
-    s.WindowPadding     = ImVec2(10, 10);
-    s.FrameBorderSize   = 0.0f;
-    s.WindowBorderSize  = 0.0f;
-    s.ScrollbarSize     = 12.0f;
+    s.TabRounding = 4.0f;
+    s.ChildRounding = 4.0f;
+    s.PopupRounding = 4.0f;
+    s.FramePadding = ImVec2(6, 4);
+    s.ItemSpacing = ImVec2(8, 5);
+    s.WindowPadding = ImVec2(10, 10);
+    s.FrameBorderSize = 0.0f;
+    s.WindowBorderSize = 0.0f;
+    s.ScrollbarSize = 12.0f;
 
     ImVec4* c = s.Colors;
-    c[ImGuiCol_WindowBg]            = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_ChildBg]             = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_PopupBg]             = ImVec4(0.10f, 0.10f, 0.13f, 0.96f);
-    c[ImGuiCol_Border]              = ImVec4(0.20f, 0.20f, 0.25f, 0.50f);
-    c[ImGuiCol_FrameBg]             = ImVec4(0.14f, 0.14f, 0.18f, 1.00f);
-    c[ImGuiCol_FrameBgHovered]      = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_FrameBgActive]       = ImVec4(0.26f, 0.26f, 0.34f, 1.00f);
-    c[ImGuiCol_TitleBg]             = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
-    c[ImGuiCol_TitleBgActive]       = ImVec4(0.12f, 0.12f, 0.16f, 1.00f);
-    c[ImGuiCol_MenuBarBg]           = ImVec4(0.10f, 0.10f, 0.13f, 1.00f);
-    c[ImGuiCol_ScrollbarBg]         = ImVec4(0.06f, 0.06f, 0.08f, 0.60f);
-    c[ImGuiCol_ScrollbarGrab]       = ImVec4(0.28f, 0.28f, 0.34f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered]= ImVec4(0.36f, 0.36f, 0.42f, 1.00f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.10f, 0.10f, 0.13f, 0.96f);
+    c[ImGuiCol_Border] = ImVec4(0.20f, 0.20f, 0.25f, 0.50f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.14f, 0.14f, 0.18f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.26f, 0.26f, 0.34f, 1.00f);
+    c[ImGuiCol_TitleBg] = ImVec4(0.08f, 0.08f, 0.10f, 1.00f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.12f, 0.12f, 0.16f, 1.00f);
+    c[ImGuiCol_MenuBarBg] = ImVec4(0.10f, 0.10f, 0.13f, 1.00f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.06f, 0.06f, 0.08f, 0.60f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.28f, 0.28f, 0.34f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.36f, 0.36f, 0.42f, 1.00f);
     c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.40f, 0.40f, 0.50f, 1.00f);
-    c[ImGuiCol_CheckMark]           = ImVec4(0.45f, 0.60f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrab]          = ImVec4(0.38f, 0.52f, 0.90f, 1.00f);
-    c[ImGuiCol_SliderGrabActive]    = ImVec4(0.50f, 0.64f, 1.00f, 1.00f);
-    c[ImGuiCol_Button]              = ImVec4(0.18f, 0.20f, 0.28f, 1.00f);
-    c[ImGuiCol_ButtonHovered]       = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
-    c[ImGuiCol_ButtonActive]        = ImVec4(0.36f, 0.40f, 0.56f, 1.00f);
-    c[ImGuiCol_Header]              = ImVec4(0.18f, 0.20f, 0.28f, 1.00f);
-    c[ImGuiCol_HeaderHovered]       = ImVec4(0.26f, 0.30f, 0.42f, 1.00f);
-    c[ImGuiCol_HeaderActive]        = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
-    c[ImGuiCol_Separator]           = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
-    c[ImGuiCol_SeparatorHovered]    = ImVec4(0.36f, 0.42f, 0.60f, 1.00f);
-    c[ImGuiCol_SeparatorActive]     = ImVec4(0.42f, 0.50f, 0.70f, 1.00f);
-    c[ImGuiCol_ResizeGrip]          = ImVec4(0.30f, 0.36f, 0.52f, 0.50f);
-    c[ImGuiCol_ResizeGripHovered]   = ImVec4(0.40f, 0.48f, 0.68f, 0.70f);
-    c[ImGuiCol_ResizeGripActive]    = ImVec4(0.46f, 0.54f, 0.76f, 0.90f);
-    c[ImGuiCol_Tab]                 = ImVec4(0.14f, 0.14f, 0.18f, 1.00f);
-    c[ImGuiCol_TabHovered]          = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
-    c[ImGuiCol_TabSelected]         = ImVec4(0.22f, 0.26f, 0.38f, 1.00f);
-    c[ImGuiCol_TextSelectedBg]      = ImVec4(0.26f, 0.36f, 0.56f, 0.50f);
-    c[ImGuiCol_Text]                = ImVec4(0.90f, 0.90f, 0.94f, 1.00f);
-    c[ImGuiCol_TextDisabled]        = ImVec4(0.44f, 0.44f, 0.50f, 1.00f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.45f, 0.60f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.38f, 0.52f, 0.90f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.50f, 0.64f, 1.00f, 1.00f);
+    c[ImGuiCol_Button] = ImVec4(0.18f, 0.20f, 0.28f, 1.00f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.36f, 0.40f, 0.56f, 1.00f);
+    c[ImGuiCol_Header] = ImVec4(0.18f, 0.20f, 0.28f, 1.00f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.26f, 0.30f, 0.42f, 1.00f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
+    c[ImGuiCol_Separator] = ImVec4(0.22f, 0.22f, 0.28f, 1.00f);
+    c[ImGuiCol_SeparatorHovered] = ImVec4(0.36f, 0.42f, 0.60f, 1.00f);
+    c[ImGuiCol_SeparatorActive] = ImVec4(0.42f, 0.50f, 0.70f, 1.00f);
+    c[ImGuiCol_ResizeGrip] = ImVec4(0.30f, 0.36f, 0.52f, 0.50f);
+    c[ImGuiCol_ResizeGripHovered] = ImVec4(0.40f, 0.48f, 0.68f, 0.70f);
+    c[ImGuiCol_ResizeGripActive] = ImVec4(0.46f, 0.54f, 0.76f, 0.90f);
+    c[ImGuiCol_Tab] = ImVec4(0.14f, 0.14f, 0.18f, 1.00f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.30f, 0.34f, 0.48f, 1.00f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.22f, 0.26f, 0.38f, 1.00f);
+    c[ImGuiCol_TextSelectedBg] = ImVec4(0.26f, 0.36f, 0.56f, 0.50f);
+    c[ImGuiCol_Text] = ImVec4(0.90f, 0.90f, 0.94f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.44f, 0.44f, 0.50f, 1.00f);
 }
 
 enum vtrack_mode { VMODE_TEXT, VMODE_BOX, VMODE_POINTS };
 
 struct vapp_state {
     // Model
-    sam3_params             params;
+    sam3_params params;
     std::shared_ptr<sam3_model> model;
-    sam3_state_ptr          state;
-    sam3_tracker_ptr        tracker;
+    sam3_state_ptr state;
+    sam3_tracker_ptr tracker;
 
     // Video
-    std::string             video_path;
-    sam3_video_info         video_info;
+    std::string video_path;
+    sam3_video_info video_info;
 
     // Current frame
-    sam3_image              frame;
-    int                     frame_index = 0;
-    GLuint                  tex_frame   = 0;
-    bool                    frame_encoded = false;
+    sam3_image frame;
+    int frame_index = 0;
+    GLuint tex_frame = 0;
+    bool frame_encoded = false;
 
     // Tracking
-    char                    text_prompt[256] = {};
-    sam3_video_params       track_params;
-    sam3_result             result;
-    bool                    tracker_created = false;
+    char text_prompt[256] = {};
+    sam3_video_params track_params;
+    sam3_result result;
+    bool tracker_created = false;
 
     // Interaction mode
-    vtrack_mode             init_mode = VMODE_TEXT;
+    vtrack_mode init_mode = VMODE_TEXT;
 
     // Manual instance creation (box/points on paused frame)
     std::vector<sam3_point> init_pos_points;
     std::vector<sam3_point> init_neg_points;
-    sam3_box                init_box = {0, 0, 0, 0};
-    bool                    has_init_box = false;
-    bool                    dragging = false;
-    float                   drag_x0 = 0, drag_y0 = 0;
+    sam3_box init_box = {0, 0, 0, 0};
+    bool has_init_box = false;
+    bool dragging = false;
+    float drag_x0 = 0, drag_y0 = 0;
 
     // Playback
-    bool                    playing   = false;
-    float                   play_speed = 1.0f;
-    Uint32                  last_frame_time = 0;
+    bool playing = false;
+    float play_speed = 1.0f;
+    Uint32 last_frame_time = 0;
 
     // Display
-    bool                    show_masks = true;
-    float                   canvas_x = 0, canvas_y = 0;
-    float                   canvas_w = 0, canvas_h = 0;
+    bool show_masks = true;
+    float canvas_x = 0, canvas_y = 0;
+    float canvas_w = 0, canvas_h = 0;
 
     // Status
-    char                    status[256] = "Ready.";
-    bool                    busy = false;
+    char status[256] = "Ready.";
+    bool busy = false;
 
     // Model type
-    bool                    visual_only = false;
+    bool visual_only = false;
     sam3_visual_track_params visual_track_params;
 
     // Timeline: per-frame instance presence
     // timeline_instances[frame_index] = list of {instance_id, score}
     struct frame_entry {
-        std::vector<std::pair<int, float>> instances; // (id, score)
+        std::vector<std::pair<int, float>> instances;  // (id, score)
     };
     std::vector<frame_entry> timeline;
-    int                     timeline_max_frame = -1; // highest frame tracked so far
+    int timeline_max_frame = -1;  // highest frame tracked so far
 };
 
 static GLuint upload_texture(const uint8_t* data, int w, int h, int ch, GLuint existing = 0) {
     GLuint tex = existing;
-    if (!tex) glGenTextures(1, &tex);
+    if (!tex)
+        glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -171,23 +179,25 @@ static GLuint upload_texture(const uint8_t* data, int w, int h, int ch, GLuint e
 }
 
 static void build_frame_overlay(vapp_state& app, std::vector<uint8_t>& overlay) {
-    if (app.frame.data.empty()) return;
+    if (app.frame.data.empty())
+        return;
     int w = app.frame.width;
     int h = app.frame.height;
 
     overlay.resize(w * h * 4);
     for (int i = 0; i < w * h; ++i) {
-        overlay[4*i+0] = app.frame.data[3*i+0];
-        overlay[4*i+1] = app.frame.data[3*i+1];
-        overlay[4*i+2] = app.frame.data[3*i+2];
-        overlay[4*i+3] = 255;
+        overlay[4 * i + 0] = app.frame.data[3 * i + 0];
+        overlay[4 * i + 1] = app.frame.data[3 * i + 1];
+        overlay[4 * i + 2] = app.frame.data[3 * i + 2];
+        overlay[4 * i + 3] = 255;
     }
 
     if (app.show_masks) {
         for (size_t d = 0; d < app.result.detections.size(); ++d) {
             const auto& det = app.result.detections[d];
-            if (det.mask.data.empty()) continue;
-            int ci = det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int)(d % N_COLORS);
+            if (det.mask.data.empty())
+                continue;
+            int ci = det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int) (d % N_COLORS);
             const float* c = INSTANCE_COLORS[ci];
             float alpha = 0.4f;
 
@@ -197,9 +207,12 @@ static void build_frame_overlay(vapp_state& app, std::vector<uint8_t>& overlay) 
                 for (int x = 0; x < std::min(w, mw); ++x) {
                     if (det.mask.data[y * mw + x] > 127) {
                         int idx = (y * w + x) * 4;
-                        overlay[idx+0] = (uint8_t)(overlay[idx+0]*(1-alpha) + c[0]*255*alpha);
-                        overlay[idx+1] = (uint8_t)(overlay[idx+1]*(1-alpha) + c[1]*255*alpha);
-                        overlay[idx+2] = (uint8_t)(overlay[idx+2]*(1-alpha) + c[2]*255*alpha);
+                        overlay[idx + 0] =
+                            (uint8_t) (overlay[idx + 0] * (1 - alpha) + c[0] * 255 * alpha);
+                        overlay[idx + 1] =
+                            (uint8_t) (overlay[idx + 1] * (1 - alpha) + c[1] * 255 * alpha);
+                        overlay[idx + 2] =
+                            (uint8_t) (overlay[idx + 2] * (1 - alpha) + c[2] * 255 * alpha);
                     }
                 }
             }
@@ -207,9 +220,9 @@ static void build_frame_overlay(vapp_state& app, std::vector<uint8_t>& overlay) 
     }
 }
 
-static bool screen_to_image(const vapp_state& app, float sx, float sy,
-                             float& ix, float& iy) {
-    if (app.canvas_w <= 0 || app.canvas_h <= 0) return false;
+static bool screen_to_image(const vapp_state& app, float sx, float sy, float& ix, float& iy) {
+    if (app.canvas_w <= 0 || app.canvas_h <= 0)
+        return false;
     ix = (sx - app.canvas_x) / app.canvas_w * app.frame.width;
     iy = (sy - app.canvas_y) / app.canvas_h * app.frame.height;
     return ix >= 0 && iy >= 0 && ix < app.frame.width && iy < app.frame.height;
@@ -219,9 +232,9 @@ static void create_tracker(vapp_state& app) {
     if (app.visual_only) {
         // SAM2 / visual-only: use visual tracker (no text detection)
         app.visual_track_params.assoc_iou_threshold = app.track_params.assoc_iou_threshold;
-        app.visual_track_params.max_keep_alive      = app.track_params.max_keep_alive;
-        app.visual_track_params.recondition_every    = app.track_params.recondition_every;
-        app.visual_track_params.fill_hole_area       = app.track_params.fill_hole_area;
+        app.visual_track_params.max_keep_alive = app.track_params.max_keep_alive;
+        app.visual_track_params.recondition_every = app.track_params.recondition_every;
+        app.visual_track_params.fill_hole_area = app.track_params.fill_hole_area;
         app.tracker = sam3_create_visual_tracker(*app.model, app.visual_track_params);
     } else {
         if (app.init_mode == VMODE_TEXT)
@@ -231,9 +244,10 @@ static void create_tracker(vapp_state& app) {
         app.tracker = sam3_create_tracker(*app.model, app.track_params);
     }
     app.tracker_created = (app.tracker != nullptr);
-    snprintf(app.status, sizeof(app.status), app.tracker_created
-             ? "Tracker created. Press Play or add instances."
-             : "Failed to create tracker.");
+    snprintf(app.status,
+             sizeof(app.status),
+             app.tracker_created ? "Tracker created. Press Play or add instances."
+                                 : "Failed to create tracker.");
 }
 
 static void decode_and_track(vapp_state& app, int fi) {
@@ -253,33 +267,41 @@ static void decode_and_track(vapp_state& app, int fi) {
         app.frame_encoded = true;
 
         // Record instance presence in timeline
-        if (fi >= (int)app.timeline.size())
+        if (fi >= (int) app.timeline.size())
             app.timeline.resize(fi + 1);
         app.timeline[fi].instances.clear();
         for (const auto& det : app.result.detections)
             app.timeline[fi].instances.push_back({det.instance_id, det.score});
-        if (fi > app.timeline_max_frame) app.timeline_max_frame = fi;
+        if (fi > app.timeline_max_frame)
+            app.timeline_max_frame = fi;
 
-        snprintf(app.status, sizeof(app.status), "Frame %d/%d — %d objects tracked",
-                 fi, app.video_info.n_frames, (int)app.result.detections.size());
+        snprintf(app.status,
+                 sizeof(app.status),
+                 "Frame %d/%d — %d objects tracked",
+                 fi,
+                 app.video_info.n_frames,
+                 (int) app.result.detections.size());
     } else {
         // Just encode and show the frame without tracking
         sam3_encode_image(*app.state, *app.model, app.frame);
         app.frame_encoded = true;
         app.result = {};
-        snprintf(app.status, sizeof(app.status), "Frame %d/%d — no tracker active",
-                 fi, app.video_info.n_frames);
+        snprintf(app.status,
+                 sizeof(app.status),
+                 "Frame %d/%d — no tracker active",
+                 fi,
+                 app.video_info.n_frames);
     }
 }
 
 // Check if a click position lands on any tracked instance mask.
 // Returns the instance_id or -1.
 static int find_instance_at(const vapp_state& app, float ix, float iy) {
-    int px = (int)ix, py = (int)iy;
+    int px = (int) ix, py = (int) iy;
     for (const auto& det : app.result.detections) {
-        if (det.mask.data.empty()) continue;
-        if (px >= 0 && px < det.mask.width &&
-            py >= 0 && py < det.mask.height &&
+        if (det.mask.data.empty())
+            continue;
+        if (px >= 0 && px < det.mask.width && py >= 0 && py < det.mask.height &&
             det.mask.data[py * det.mask.width + px] > 127) {
             return det.instance_id;
         }
@@ -288,7 +310,8 @@ static int find_instance_at(const vapp_state& app, float ix, float iy) {
 }
 
 static void add_instance_from_prompts(vapp_state& app) {
-    if (!app.tracker_created || !app.frame_encoded) return;
+    if (!app.tracker_created || !app.frame_encoded)
+        return;
     sam3_pvs_params pvs;
     pvs.pos_points = app.init_pos_points;
     pvs.neg_points = app.init_neg_points;
@@ -319,12 +342,13 @@ static void add_instance_from_prompts(vapp_state& app) {
         }
         // Update timeline for current frame
         int fi = app.frame_index;
-        if (fi >= (int)app.timeline.size())
+        if (fi >= (int) app.timeline.size())
             app.timeline.resize(fi + 1);
         app.timeline[fi].instances.clear();
         for (const auto& d : app.result.detections)
             app.timeline[fi].instances.push_back({d.instance_id, d.score});
-        if (fi > app.timeline_max_frame) app.timeline_max_frame = fi;
+        if (fi > app.timeline_max_frame)
+            app.timeline_max_frame = fi;
     } else {
         snprintf(app.status, sizeof(app.status), "Failed to add instance");
     }
@@ -346,8 +370,7 @@ static void clear_init_prompts(vapp_state& app) {
 static void export_frame_masks(const vapp_state& app) {
     for (size_t i = 0; i < app.result.detections.size(); ++i) {
         char path[256];
-        snprintf(path, sizeof(path), "frame%04d_mask%02d.png",
-                 app.frame_index, (int)i);
+        snprintf(path, sizeof(path), "frame%04d_mask%02d.png", app.frame_index, (int) i);
         if (sam3_save_mask(app.result.detections[i].mask, path)) {
             fprintf(stderr, "Exported %s\n", path);
         }
@@ -359,24 +382,25 @@ static void export_frame_masks(const vapp_state& app) {
 int main(int argc, char** argv) {
     vapp_state app;
     app.params.n_threads = 4;
-    app.params.use_gpu   = true;
+    app.params.use_gpu = true;
 
     // Parse args
     for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "--model") == 0 && i+1 < argc) {
+        if (strcmp(argv[i], "--model") == 0 && i + 1 < argc) {
             app.params.model_path = argv[++i];
-        } else if (strcmp(argv[i], "--video") == 0 && i+1 < argc) {
+        } else if (strcmp(argv[i], "--video") == 0 && i + 1 < argc) {
             app.video_path = argv[++i];
-        } else if (strcmp(argv[i], "--threads") == 0 && i+1 < argc) {
+        } else if (strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             app.params.n_threads = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-gpu") == 0) {
             app.params.use_gpu = false;
-        } else if (strcmp(argv[i], "--encode-img-size") == 0 && i+1 < argc) {
+        } else if (strcmp(argv[i], "--encode-img-size") == 0 && i + 1 < argc) {
             app.params.encode_img_size = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                "Usage: %s --model <path.ggml> --video <path>\n"
-                "          [--threads N] [--no-gpu] [--encode-img-size N]\n", argv[0]);
+                    "Usage: %s --model <path.ggml> --video <path>\n"
+                    "          [--threads N] [--no-gpu] [--encode-img-size N]\n",
+                    argv[0]);
             return 0;
         }
     }
@@ -410,11 +434,13 @@ int main(int argc, char** argv) {
         init_title = basename_of(app.video_path) + " \xe2\x80\x94 " + init_title;
     }
 
-    SDL_Window* window = SDL_CreateWindow(
-        init_title.c_str(),
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1280, 800,
-        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    SDL_Window* window =
+        SDL_CreateWindow(init_title.c_str(),
+                         SDL_WINDOWPOS_CENTERED,
+                         SDL_WINDOWPOS_CENTERED,
+                         1280,
+                         800,
+                         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 1;
@@ -429,7 +455,7 @@ int main(int argc, char** argv) {
     int fb_w_init, fb_h_init, win_w_init, win_h_init;
     SDL_GL_GetDrawableSize(window, &fb_w_init, &fb_h_init);
     SDL_GetWindowSize(window, &win_w_init, &win_h_init);
-    float dpi_scale = (win_w_init > 0) ? (float)fb_w_init / (float)win_w_init : 1.0f;
+    float dpi_scale = (win_w_init > 0) ? (float) fb_w_init / (float) win_w_init : 1.0f;
 
     // ── Init ImGui ───────────────────────────────────────────────────────────
 
@@ -450,7 +476,8 @@ int main(int argc, char** argv) {
 #elif defined(_WIN32)
     font = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", font_size, &font_cfg);
 #else
-    font = io.Fonts->AddFontFromFileTTF("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size, &font_cfg);
+    font = io.Fonts->AddFontFromFileTTF(
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", font_size, &font_cfg);
 #endif
     if (!font) {
         font_cfg.SizePixels = 13.0f * dpi_scale;
@@ -479,7 +506,8 @@ int main(int argc, char** argv) {
     app.visual_only = sam3_is_visual_only(*app.model);
     if (app.visual_only) {
         auto mt = sam3_get_model_type(*app.model);
-        fprintf(stderr, "Model: %s — text tracking disabled\n",
+        fprintf(stderr,
+                "Model: %s — text tracking disabled\n",
                 mt == SAM3_MODEL_SAM2 ? "SAM2" : "SAM3 visual-only");
         app.init_mode = VMODE_BOX;
     }
@@ -497,10 +525,13 @@ int main(int argc, char** argv) {
                 app.frame = sam3_decode_video_frame(app.video_path, 0);
                 app.frame_index = 0;
             }
-            snprintf(app.status, sizeof(app.status),
+            snprintf(app.status,
+                     sizeof(app.status),
                      "Video: %dx%d, %d frames, %.1f fps. Pause and annotate to add instances.",
-                     app.video_info.width, app.video_info.height,
-                     app.video_info.n_frames, app.video_info.fps);
+                     app.video_info.width,
+                     app.video_info.height,
+                     app.video_info.n_frames,
+                     app.video_info.fps);
         } else {
             snprintf(app.status, sizeof(app.status), "Failed to read video info.");
         }
@@ -519,15 +550,17 @@ int main(int argc, char** argv) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
             ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) running = false;
-            if (event.type == SDL_WINDOWEVENT &&
-                event.window.event == SDL_WINDOWEVENT_CLOSE) running = false;
+            if (event.type == SDL_QUIT)
+                running = false;
+            if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE)
+                running = false;
 
             // Keyboard shortcuts
             if (event.type == SDL_KEYDOWN && !io.WantCaptureKeyboard) {
                 if (event.key.keysym.sym == SDLK_SPACE) {
                     app.playing = !app.playing;
-                    if (app.playing) app.last_frame_time = SDL_GetTicks();
+                    if (app.playing)
+                        app.last_frame_time = SDL_GetTicks();
                 } else if (event.key.keysym.sym == SDLK_RIGHT) {
                     if (app.frame_index + 1 < app.video_info.n_frames) {
                         decode_and_track(app, app.frame_index + 1);
@@ -553,7 +586,7 @@ int main(int argc, char** argv) {
         if (app.playing && app.video_info.fps > 0) {
             Uint32 now = SDL_GetTicks();
             float interval_ms = 1000.0f / (app.video_info.fps * app.play_speed);
-            if (now - app.last_frame_time >= (Uint32)interval_ms) {
+            if (now - app.last_frame_time >= (Uint32) interval_ms) {
                 int next = app.frame_index + 1;
                 if (next < app.video_info.n_frames) {
                     decode_and_track(app, next);
@@ -574,11 +607,12 @@ int main(int argc, char** argv) {
         int win_w, win_h;
         SDL_GetWindowSize(window, &win_w, &win_h);
         ImGui::SetNextWindowPos(ImVec2(0, 0));
-        ImGui::SetNextWindowSize(ImVec2((float)win_w, (float)win_h));
-        ImGui::Begin("sam3_video", nullptr,
+        ImGui::SetNextWindowSize(ImVec2((float) win_w, (float) win_h));
+        ImGui::Begin("sam3_video",
+                     nullptr,
                      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+                         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                         ImGuiWindowFlags_NoBringToFrontOnFocus);
 
         // ── Top bar ──────────────────────────────────────────────────────────
 
@@ -614,7 +648,8 @@ int main(int argc, char** argv) {
         // Playback buttons
         ImGui::SameLine();
         if (app.playing) {
-            if (ImGui::Button("Pause")) app.playing = false;
+            if (ImGui::Button("Pause"))
+                app.playing = false;
         } else {
             if (ImGui::Button("Play")) {
                 app.playing = true;
@@ -651,9 +686,11 @@ int main(int argc, char** argv) {
         }
 
         ImGui::Text("Frame: %d/%d   FPS: %.1f   Objects: %d   Speed: %.1fx",
-                     app.frame_index, app.video_info.n_frames,
-                     app.video_info.fps, (int)app.result.detections.size(),
-                     app.play_speed);
+                    app.frame_index,
+                    app.video_info.n_frames,
+                    app.video_info.fps,
+                    (int) app.result.detections.size(),
+                    app.play_speed);
 
         // ── Video canvas ─────────────────────────────────────────────────────
 
@@ -665,12 +702,11 @@ int main(int argc, char** argv) {
 
         if (!app.frame.data.empty()) {
             build_frame_overlay(app, overlay_buf);
-            app.tex_frame = upload_texture(overlay_buf.data(),
-                                            app.frame.width, app.frame.height,
-                                            4, app.tex_frame);
+            app.tex_frame = upload_texture(
+                overlay_buf.data(), app.frame.width, app.frame.height, 4, app.tex_frame);
 
-            float iw = (float)app.frame.width;
-            float ih = (float)app.frame.height;
+            float iw = (float) app.frame.width;
+            float ih = (float) app.frame.height;
             float scale = std::min(canvas_max_w / iw, canvas_max_h / ih);
             float dw = iw * scale;
             float dh = ih * scale;
@@ -701,11 +737,13 @@ int main(int argc, char** argv) {
                         if (hit_id >= 0 && app.tracker_created && app.frame_encoded) {
                             std::vector<sam3_point> p = {{ix, iy}};
                             std::vector<sam3_point> neg;
-                            bool ok = sam3_refine_instance(*app.tracker, *app.state, *app.model,
-                                                           hit_id, p, neg);
-                            snprintf(app.status, sizeof(app.status),
+                            bool ok = sam3_refine_instance(
+                                *app.tracker, *app.state, *app.model, hit_id, p, neg);
+                            snprintf(app.status,
+                                     sizeof(app.status),
                                      ok ? "Refined instance #%d with positive point"
-                                        : "Failed to refine instance #%d", hit_id);
+                                        : "Failed to refine instance #%d",
+                                     hit_id);
                         } else if (app.init_mode == VMODE_BOX) {
                             app.dragging = true;
                             app.drag_x0 = ix;
@@ -726,25 +764,31 @@ int main(int argc, char** argv) {
                         if (hit_id >= 0 && app.tracker_created && app.frame_encoded) {
                             std::vector<sam3_point> p;
                             for (const auto& det : app.result.detections) {
-                                if (det.instance_id != hit_id || det.mask.data.empty()) continue;
-                                float cx = 0, cy = 0; int n = 0;
+                                if (det.instance_id != hit_id || det.mask.data.empty())
+                                    continue;
+                                float cx = 0, cy = 0;
+                                int n = 0;
                                 int mw = det.mask.width;
-                                for (int pi = 0; pi < (int)det.mask.data.size(); ++pi) {
+                                for (int pi = 0; pi < (int) det.mask.data.size(); ++pi) {
                                     if (det.mask.data[pi] > 127) {
                                         cx += static_cast<float>(pi % mw);
-                                        cy += static_cast<float>(pi / mw);  // NOLINT: integer row index
+                                        cy += static_cast<float>(pi /
+                                                                 mw);  // NOLINT: integer row index
                                         ++n;
                                     }
                                 }
-                                if (n > 0) p.push_back({cx / n, cy / n});
+                                if (n > 0)
+                                    p.push_back({cx / n, cy / n});
                                 break;
                             }
                             std::vector<sam3_point> neg = {{ix, iy}};
-                            bool ok = sam3_refine_instance(*app.tracker, *app.state, *app.model,
-                                                           hit_id, p, neg);
-                            snprintf(app.status, sizeof(app.status),
+                            bool ok = sam3_refine_instance(
+                                *app.tracker, *app.state, *app.model, hit_id, p, neg);
+                            snprintf(app.status,
+                                     sizeof(app.status),
                                      ok ? "Refined instance #%d with negative point"
-                                        : "Failed to refine instance #%d", hit_id);
+                                        : "Failed to refine instance #%d",
+                                     hit_id);
                         } else if (app.init_mode == VMODE_POINTS) {
                             app.init_neg_points.push_back({ix, iy});
                         }
@@ -759,7 +803,7 @@ int main(int argc, char** argv) {
                 if (screen_to_image(app, mx, my, ix, iy)) {
                     float dx = ix - app.drag_x0;
                     float dy = iy - app.drag_y0;
-                    if (dx*dx + dy*dy > 25.0f) {
+                    if (dx * dx + dy * dy > 25.0f) {
                         app.init_box.x0 = std::min(app.drag_x0, ix);
                         app.init_box.y0 = std::min(app.drag_y0, iy);
                         app.init_box.x1 = std::max(app.drag_x0, ix);
@@ -775,15 +819,16 @@ int main(int argc, char** argv) {
 
             // Draw the frame via DrawList (not ImGui::Image which eats mouse)
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddImage((ImTextureID)(intptr_t)app.tex_frame,
+            dl->AddImage((ImTextureID) (intptr_t) app.tex_frame,
                          ImVec2(pos.x, pos.y),
                          ImVec2(pos.x + dw, pos.y + dh));
             for (size_t d = 0; d < app.result.detections.size(); ++d) {
                 const auto& det = app.result.detections[d];
-                int ci = det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int)(d % N_COLORS);
+                int ci =
+                    det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int) (d % N_COLORS);
                 const float* c = INSTANCE_COLORS[ci];
-                ImU32 col = IM_COL32((int)(c[0]*255), (int)(c[1]*255),
-                                     (int)(c[2]*255), 200);
+                ImU32 col =
+                    IM_COL32((int) (c[0] * 255), (int) (c[1] * 255), (int) (c[2] * 255), 200);
 
                 float sx0 = app.canvas_x + det.box.x0 / iw * dw;
                 float sy0 = app.canvas_y + det.box.y0 / ih * dh;
@@ -816,8 +861,8 @@ int main(int argc, char** argv) {
                 float sy0 = app.canvas_y + app.init_box.y0 / ih * dh;
                 float sx1 = app.canvas_x + app.init_box.x1 / iw * dw;
                 float sy1 = app.canvas_y + app.init_box.y1 / ih * dh;
-                dl->AddRect(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                            IM_COL32(0, 255, 255, 220), 0, 0, 3);
+                dl->AddRect(
+                    ImVec2(sx0, sy0), ImVec2(sx1, sy1), IM_COL32(0, 255, 255, 220), 0, 0, 3);
             }
 
             // Draw drag-in-progress box (yellow)
@@ -828,8 +873,8 @@ int main(int argc, char** argv) {
                     float sy0 = app.canvas_y + app.drag_y0 / ih * dh;
                     float sx1 = app.canvas_x + dix / iw * dw;
                     float sy1 = app.canvas_y + diy / ih * dh;
-                    dl->AddRect(ImVec2(sx0, sy0), ImVec2(sx1, sy1),
-                                IM_COL32(255, 255, 0, 180), 0, 0, 2);
+                    dl->AddRect(
+                        ImVec2(sx0, sy0), ImVec2(sx1, sy1), IM_COL32(255, 255, 0, 180), 0, 0, 2);
                 }
             }
         } else {
@@ -845,45 +890,53 @@ int main(int argc, char** argv) {
 
             ImGui::Spacing();
             ImVec2 tl_pos = ImGui::GetCursorScreenPos();
-            float tl_w = canvas_max_w - 16.0f; // small margin
-            float tl_bar_h = 14.0f;  // main scrubber bar height
+            float tl_w = canvas_max_w - 16.0f;  // small margin
+            float tl_bar_h = 14.0f;             // main scrubber bar height
 
             // Collect unique instance IDs across all timeline entries
             std::vector<int> instance_ids;
             for (const auto& entry : app.timeline) {
                 for (const auto& inst : entry.instances) {
                     bool found = false;
-                    for (int id : instance_ids) if (id == inst.first) { found = true; break; }
-                    if (!found) instance_ids.push_back(inst.first);
+                    for (int id : instance_ids)
+                        if (id == inst.first) {
+                            found = true;
+                            break;
+                        }
+                    if (!found)
+                        instance_ids.push_back(inst.first);
                 }
             }
             std::sort(instance_ids.begin(), instance_ids.end());
 
             float band_h = 6.0f;
-            float total_h = tl_bar_h + 4.0f + (float)instance_ids.size() * (band_h + 2.0f);
-            if (total_h < timeline_h - 16.0f) total_h = timeline_h - 16.0f;
+            float total_h = tl_bar_h + 4.0f + (float) instance_ids.size() * (band_h + 2.0f);
+            if (total_h < timeline_h - 16.0f)
+                total_h = timeline_h - 16.0f;
 
             // Invisible button for click-to-seek
             ImGui::SetCursorScreenPos(tl_pos);
             ImGui::InvisibleButton("timeline", ImVec2(tl_w, total_h));
             bool tl_hovered = ImGui::IsItemHovered();
-            bool tl_active  = ImGui::IsItemActive();
+            bool tl_active = ImGui::IsItemActive();
 
             ImDrawList* tl_dl = ImGui::GetWindowDrawList();
 
             // Background
-            tl_dl->AddRectFilled(tl_pos, ImVec2(tl_pos.x + tl_w, tl_pos.y + tl_bar_h),
-                                 IM_COL32(40, 40, 40, 255), 3.0f);
+            tl_dl->AddRectFilled(tl_pos,
+                                 ImVec2(tl_pos.x + tl_w, tl_pos.y + tl_bar_h),
+                                 IM_COL32(40, 40, 40, 255),
+                                 3.0f);
 
             // Processed range highlight
             if (app.timeline_max_frame >= 0) {
-                float x1 = tl_pos.x + ((float)(app.timeline_max_frame + 1) / n_frames) * tl_w;
-                tl_dl->AddRectFilled(tl_pos, ImVec2(x1, tl_pos.y + tl_bar_h),
-                                     IM_COL32(60, 60, 70, 255), 3.0f);
+                float x1 = tl_pos.x + ((float) (app.timeline_max_frame + 1) / n_frames) * tl_w;
+                tl_dl->AddRectFilled(
+                    tl_pos, ImVec2(x1, tl_pos.y + tl_bar_h), IM_COL32(60, 60, 70, 255), 3.0f);
             }
 
             // Current frame playhead
-            float ph_x = tl_pos.x + ((float)app.frame_index / std::max(n_frames - 1, 1)) * tl_w;
+            float ph_x = tl_pos.x + ((float) app.frame_index / std::max(n_frames - 1, 1)) * tl_w;
             tl_dl->AddRectFilled(ImVec2(ph_x - 1, tl_pos.y),
                                  ImVec2(ph_x + 2, tl_pos.y + tl_bar_h),
                                  IM_COL32(255, 255, 255, 230));
@@ -897,31 +950,39 @@ int main(int argc, char** argv) {
             float band_y = tl_pos.y + tl_bar_h + 4.0f;
             for (size_t ii = 0; ii < instance_ids.size(); ++ii) {
                 int inst_id = instance_ids[ii];
-                int ci = inst_id > 0 ? (inst_id - 1) % N_COLORS : (int)(ii % N_COLORS);
+                int ci = inst_id > 0 ? (inst_id - 1) % N_COLORS : (int) (ii % N_COLORS);
                 const float* c = INSTANCE_COLORS[ci];
-                ImU32 col = IM_COL32((int)(c[0]*255), (int)(c[1]*255), (int)(c[2]*255), 180);
-                ImU32 col_dim = IM_COL32((int)(c[0]*80), (int)(c[1]*80), (int)(c[2]*80), 100);
+                ImU32 col =
+                    IM_COL32((int) (c[0] * 255), (int) (c[1] * 255), (int) (c[2] * 255), 180);
+                ImU32 col_dim =
+                    IM_COL32((int) (c[0] * 80), (int) (c[1] * 80), (int) (c[2] * 80), 100);
 
                 // Draw dim background for the full band
                 tl_dl->AddRectFilled(ImVec2(tl_pos.x, band_y),
                                      ImVec2(tl_pos.x + tl_w, band_y + band_h),
-                                     col_dim, 2.0f);
+                                     col_dim,
+                                     2.0f);
 
                 // Draw bright segments where instance is present
                 // Batch consecutive frames into segments for efficiency
                 int seg_start = -1;
-                for (int f = 0; f < (int)app.timeline.size(); ++f) {
+                for (int f = 0; f < (int) app.timeline.size(); ++f) {
                     bool present = false;
                     for (const auto& p : app.timeline[f].instances)
-                        if (p.first == inst_id) { present = true; break; }
-                    if (present && seg_start < 0) seg_start = f;
-                    if ((!present || f == (int)app.timeline.size() - 1) && seg_start >= 0) {
+                        if (p.first == inst_id) {
+                            present = true;
+                            break;
+                        }
+                    if (present && seg_start < 0)
+                        seg_start = f;
+                    if ((!present || f == (int) app.timeline.size() - 1) && seg_start >= 0) {
                         int seg_end = present ? f + 1 : f;
-                        float sx0 = tl_pos.x + ((float)seg_start / n_frames) * tl_w;
-                        float sx1 = tl_pos.x + ((float)seg_end / n_frames) * tl_w;
-                        if (sx1 - sx0 < 2.0f) sx1 = sx0 + 2.0f;
-                        tl_dl->AddRectFilled(ImVec2(sx0, band_y), ImVec2(sx1, band_y + band_h),
-                                             col, 2.0f);
+                        float sx0 = tl_pos.x + ((float) seg_start / n_frames) * tl_w;
+                        float sx1 = tl_pos.x + ((float) seg_end / n_frames) * tl_w;
+                        if (sx1 - sx0 < 2.0f)
+                            sx1 = sx0 + 2.0f;
+                        tl_dl->AddRectFilled(
+                            ImVec2(sx0, band_y), ImVec2(sx1, band_y + band_h), col, 2.0f);
                         seg_start = -1;
                     }
                 }
@@ -938,7 +999,7 @@ int main(int argc, char** argv) {
             if ((tl_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) || tl_active) {
                 float rel = (io.MousePos.x - tl_pos.x) / tl_w;
                 rel = std::max(0.0f, std::min(1.0f, rel));
-                int target = (int)(rel * (n_frames - 1) + 0.5f);
+                int target = (int) (rel * (n_frames - 1) + 0.5f);
                 if (target != app.frame_index && target >= 0 && target < n_frames) {
                     app.playing = false;
                     if (app.tracker_created) {
@@ -956,14 +1017,14 @@ int main(int argc, char** argv) {
             if (tl_hovered) {
                 float rel = (io.MousePos.x - tl_pos.x) / tl_w;
                 rel = std::max(0.0f, std::min(1.0f, rel));
-                int hover_f = (int)(rel * (n_frames - 1) + 0.5f);
+                int hover_f = (int) (rel * (n_frames - 1) + 0.5f);
                 ImGui::SetTooltip("Frame %d / %d", hover_f, n_frames);
             }
         }
 
         // ── Bottom panel ─────────────────────────────────────────────────────
 
-        ImGui::SetCursorPosY((float)win_h - panel_h);
+        ImGui::SetCursorPosY((float) win_h - panel_h);
         ImGui::Separator();
 
         ImGui::Checkbox("Show masks", &app.show_masks);
@@ -985,23 +1046,25 @@ int main(int argc, char** argv) {
         } else {
             for (size_t d = 0; d < app.result.detections.size(); ++d) {
                 const auto& det = app.result.detections[d];
-                int ci = det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int)(d % N_COLORS);
+                int ci =
+                    det.instance_id > 0 ? (det.instance_id - 1) % N_COLORS : (int) (d % N_COLORS);
                 const float* c = INSTANCE_COLORS[ci];
                 ImGui::SameLine();
-                ImGui::TextColored(ImVec4(c[0], c[1], c[2], 1.0f),
-                                   "#%d:%.2f", det.instance_id, det.score);
+                ImGui::TextColored(
+                    ImVec4(c[0], c[1], c[2], 1.0f), "#%d:%.2f", det.instance_id, det.score);
             }
         }
 
         // Context-sensitive help
         if (app.init_mode == VMODE_TEXT && !app.visual_only)
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
-                "Text mode: auto-detect via text prompt | Click on mask to refine");
+                               "Text mode: auto-detect via text prompt | Click on mask to refine");
         else if (app.init_mode == VMODE_BOX)
             ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
-                "Box mode: drag box to add instance | Click on mask to refine");
+                               "Box mode: drag box to add instance | Click on mask to refine");
         else
-            ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
+            ImGui::TextColored(
+                ImVec4(0.5f, 0.5f, 0.5f, 1.0f),
                 "Points mode: left-click +point, right-click -point | Add Instance to confirm");
 
         ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "%s", app.status);
@@ -1022,7 +1085,8 @@ int main(int argc, char** argv) {
 
     // ── Cleanup ──────────────────────────────────────────────────────────────
 
-    if (app.tex_frame) glDeleteTextures(1, &app.tex_frame);
+    if (app.tex_frame)
+        glDeleteTextures(1, &app.tex_frame);
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL2_Shutdown();

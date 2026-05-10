@@ -1,0 +1,103 @@
+# Clang-Tidy configuration for sam3.cpp (C++23).
+#
+# This mirrors the Irodori-TTS.cpp stance: catch correctness, portability, and
+# performance issues while suppressing style checks that conflict with ggml's C
+# API and the existing single-file porting style.
+
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  cppcoreguidelines-*,
+  hicpp-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  portability-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -cert-err58-cpp,
+  -cppcoreguidelines-avoid-c-arrays,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-avoid-non-const-global-variables,
+  -cppcoreguidelines-init-variables,
+  -cppcoreguidelines-narrowing-conversions,
+  -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-owning-memory,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-constant-array-index,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-vararg,
+  -cppcoreguidelines-special-member-functions,
+  -hicpp-avoid-c-arrays,
+  -hicpp-explicit-conversions,
+  -hicpp-use-auto,
+  -hicpp-named-parameter,
+  -hicpp-no-array-decay,
+  -hicpp-special-member-functions,
+  -hicpp-vararg,
+  -misc-include-cleaner,
+  -misc-non-private-member-variables-in-classes,
+  -modernize-use-trailing-return-type,
+  -modernize-use-auto,
+  -modernize-use-std-print,
+  -modernize-avoid-c-arrays,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-named-parameter,
+  -readability-identifier-naming,
+  -readability-uppercase-literal-suffix,
+  -portability-avoid-pragma-once,
+  -performance-enum-size,
+  -cppcoreguidelines-macro-usage,
+  -readability-implicit-bool-conversion,
+  -readability-braces-around-statements,
+  -hicpp-braces-around-statements,
+  -hicpp-uppercase-literal-suffix,
+  -google-readability-braces-around-statements,
+  -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
+  -hicpp-signed-bitwise,
+  -bugprone-exception-escape,
+  -bugprone-throwing-static-initialization,
+  -cert-err33-c,
+  -bugprone-branch-clone,
+  -bugprone-switch-missing-default-case,
+  -bugprone-unchecked-optional-access,
+  -hicpp-multiway-paths-covered,
+  -misc-use-internal-linkage,
+  -misc-use-anonymous-namespace,
+  -misc-const-correctness,
+  -concurrency-mt-unsafe,
+  -readability-inconsistent-ifelse-braces,
+  -readability-else-after-return,
+  -readability-convert-member-functions-to-static,
+  -readability-container-data-pointer,
+  -readability-redundant-inline-specifier,
+  -readability-avoid-nested-conditional-operator,
+  -readability-static-accessed-through-instance,
+  -modernize-use-nodiscard
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: '^.*/(sam3\.h|sam3\.cpp|examples/.*\.(h|cpp))$'
+
+FormatStyle: file
+
+CheckOptions:
+  readability-identifier-naming.NamespaceCase: lower_case
+  readability-identifier-naming.ClassCase: CamelCase
+  readability-identifier-naming.StructCase: lower_case
+  readability-identifier-naming.EnumCase: UPPER_CASE
+  readability-identifier-naming.EnumConstantCase: UPPER_CASE
+  readability-identifier-naming.FunctionCase: lower_case
+  readability-identifier-naming.MethodCase: lower_case
+  readability-identifier-naming.VariableCase: lower_case
+  readability-identifier-naming.ParameterCase: lower_case
+  readability-identifier-naming.MemberCase: lower_case
+  readability-identifier-naming.MacroDefinitionCase: UPPER_CASE
+  modernize-use-default-member-init.UseAssignment: false
+  performance-move-const-arg.CheckTriviallyCopyableMove: false

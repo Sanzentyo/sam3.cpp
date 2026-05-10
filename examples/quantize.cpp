@@ -12,13 +12,13 @@
 #include <string>
 #include <vector>
 
-static constexpr uint32_t SAM3_MAGIC   = 0x73616D33;  // "sam3"
-static constexpr uint32_t SAM2_MAGIC   = 0x73616D32;  // "sam2"
-static constexpr int      SAM3_VERSION = 3;
-static constexpr int      SAM2_VERSION = 1;
+static constexpr uint32_t SAM3_MAGIC = 0x73616D33;  // "sam3"
+static constexpr uint32_t SAM2_MAGIC = 0x73616D32;  // "sam2"
+static constexpr int SAM3_VERSION = 3;
+static constexpr int SAM2_VERSION = 1;
 
-static bool sam3_quantize_model(const std::string & fname_inp,
-                                const std::string & fname_out,
+static bool sam3_quantize_model(const std::string& fname_inp,
+                                const std::string& fname_out,
                                 ggml_type qtype) {
     auto finp = std::ifstream(fname_inp, std::ios::binary);
     if (!finp) {
@@ -34,24 +34,30 @@ static bool sam3_quantize_model(const std::string & fname_inp,
 
     // ── Read + write header (16 bytes) ──────────────────────────────────────
     uint32_t magic;
-    int32_t  version, ftype, n_tensors;
+    int32_t version, ftype, n_tensors;
 
-    finp.read(reinterpret_cast<char *>(&magic),     4);
-    finp.read(reinterpret_cast<char *>(&version),   4);
-    finp.read(reinterpret_cast<char *>(&ftype),     4);
-    finp.read(reinterpret_cast<char *>(&n_tensors), 4);
+    finp.read(reinterpret_cast<char*>(&magic), 4);
+    finp.read(reinterpret_cast<char*>(&version), 4);
+    finp.read(reinterpret_cast<char*>(&ftype), 4);
+    finp.read(reinterpret_cast<char*>(&n_tensors), 4);
 
     bool is_sam2 = false;
     if (magic == SAM3_MAGIC) {
         if (version != SAM3_VERSION) {
-            fprintf(stderr, "%s: unsupported SAM3 version %d (expected %d)\n",
-                    __func__, version, SAM3_VERSION);
+            fprintf(stderr,
+                    "%s: unsupported SAM3 version %d (expected %d)\n",
+                    __func__,
+                    version,
+                    SAM3_VERSION);
             return false;
         }
     } else if (magic == SAM2_MAGIC) {
         if (version != SAM2_VERSION) {
-            fprintf(stderr, "%s: unsupported SAM2 version %d (expected %d)\n",
-                    __func__, version, SAM2_VERSION);
+            fprintf(stderr,
+                    "%s: unsupported SAM2 version %d (expected %d)\n",
+                    __func__,
+                    version,
+                    SAM2_VERSION);
             return false;
         }
         is_sam2 = true;
@@ -62,14 +68,20 @@ static bool sam3_quantize_model(const std::string & fname_inp,
 
     const int32_t ftype_out = static_cast<int32_t>(qtype);
 
-    fout.write(reinterpret_cast<const char *>(&magic),     4);
-    fout.write(reinterpret_cast<const char *>(&version),   4);
-    fout.write(reinterpret_cast<const char *>(&ftype_out), 4);
-    fout.write(reinterpret_cast<const char *>(&n_tensors), 4);
+    fout.write(reinterpret_cast<const char*>(&magic), 4);
+    fout.write(reinterpret_cast<const char*>(&version), 4);
+    fout.write(reinterpret_cast<const char*>(&ftype_out), 4);
+    fout.write(reinterpret_cast<const char*>(&n_tensors), 4);
 
-    fprintf(stderr, "%s: %s v%d, ftype %d -> %d (%s), %d tensors\n",
-            __func__, is_sam2 ? "SAM2" : "SAM3", version, ftype,
-            ftype_out, ggml_type_name(qtype), n_tensors);
+    fprintf(stderr,
+            "%s: %s v%d, ftype %d -> %d (%s), %d tensors\n",
+            __func__,
+            is_sam2 ? "SAM2" : "SAM3",
+            version,
+            ftype,
+            ftype_out,
+            ggml_type_name(qtype),
+            n_tensors);
 
     // ── Read + write hparams (copy through) ─────────────────────────────────
     // The number of hparam fields differs between SAM2 and SAM3.
@@ -77,24 +89,26 @@ static bool sam3_quantize_model(const std::string & fname_inp,
     // We copy them all byte-for-byte.
     auto copy_i32 = [&]() -> int32_t {
         int32_t v;
-        finp.read(reinterpret_cast<char *>(&v), 4);
-        fout.write(reinterpret_cast<const char *>(&v), 4);
+        finp.read(reinterpret_cast<char*>(&v), 4);
+        fout.write(reinterpret_cast<const char*>(&v), 4);
         return v;
     };
 
     if (is_sam2) {
         // SAM2 standard header: 57 int32 fields total
         // Fields 1-2: img_size, backbone_type
-        copy_i32();                           // img_size
-        int32_t backbone_type = copy_i32();   // backbone_type (1=hiera, 2=repvit)
+        copy_i32();                          // img_size
+        int32_t backbone_type = copy_i32();  // backbone_type (1=hiera, 2=repvit)
         // Fields 3-57: remaining standard SAM2 fields
-        for (int i = 0; i < 55; ++i) copy_i32();
+        for (int i = 0; i < 55; ++i)
+            copy_i32();
         // EdgeTAM extension: 19 additional fields when backbone_type == 2
         // (repvit_num_stages + stages[4] + channels[4] + se_ratio + has_perceiver +
         //  perceiver_depth + perceiver_dim + n_latents_1d + n_latents_2d + ff_mult +
         //  mem_attn_ca_type + ca_q_size + ca_k_size)
         if (backbone_type == 2) {
-            for (int i = 0; i < 19; ++i) copy_i32();
+            for (int i = 0; i < 19; ++i)
+                copy_i32();
         }
     } else {
         // SAM3 header
@@ -148,24 +162,25 @@ static bool sam3_quantize_model(const std::string & fname_inp,
 
     size_t total_size_org = 0;
     size_t total_size_new = 0;
-    int    n_quantized    = 0;
-    int    n_total        = 0;
+    int n_quantized = 0;
+    int n_total = 0;
 
-    std::vector<float>       data_f32;
+    std::vector<float> data_f32;
     std::vector<ggml_fp16_t> data_f16;
-    std::vector<uint8_t>     work;
-    std::vector<char>        data_raw;
+    std::vector<uint8_t> work;
+    std::vector<char> data_raw;
 
     for (int t = 0; t < n_tensors; ++t) {
         int32_t n_dims, name_len, dtype;
-        finp.read(reinterpret_cast<char *>(&n_dims),   4);
-        finp.read(reinterpret_cast<char *>(&name_len), 4);
-        finp.read(reinterpret_cast<char *>(&dtype),    4);
-        if (finp.fail()) break;
+        finp.read(reinterpret_cast<char*>(&n_dims), 4);
+        finp.read(reinterpret_cast<char*>(&name_len), 4);
+        finp.read(reinterpret_cast<char*>(&dtype), 4);
+        if (finp.fail())
+            break;
 
         int32_t ne[4] = {1, 1, 1, 1};
         for (int i = 0; i < n_dims; ++i) {
-            finp.read(reinterpret_cast<char *>(&ne[i]), 4);
+            finp.read(reinterpret_cast<char*>(&ne[i]), 4);
         }
 
         std::string name(name_len, '\0');
@@ -175,11 +190,13 @@ static bool sam3_quantize_model(const std::string & fname_inp,
         {
             size_t pos = finp.tellg();
             size_t pad = (32 - pos % 32) % 32;
-            if (pad > 0) finp.seekg(pad, std::ios::cur);
+            if (pad > 0)
+                finp.seekg(pad, std::ios::cur);
         }
 
         int64_t n_el = 1;
-        for (int i = 0; i < n_dims; ++i) n_el *= ne[i];
+        for (int i = 0; i < n_dims; ++i)
+            n_el *= ne[i];
 
         // Determine input data size
         const ggml_type file_type = static_cast<ggml_type>(dtype);
@@ -197,60 +214,55 @@ static bool sam3_quantize_model(const std::string & fname_inp,
         //  - ne[0] must be divisible by quantization block size
         //  - must not already be quantized
         //  - skip embeddings, tokens, positional encodings (registered as F32 in the model)
-        auto name_contains = [&](const char * sub) {
-            return name.find(sub) != std::string::npos;
-        };
+        auto name_contains = [&](const char* sub) { return name.find(sub) != std::string::npos; };
         // Match tensors registered as F32 in sam3_register_tensors (T2f/T3f/T4f).
         // These are embeddings, lookup tables, positional encodings, and special tokens
         // that must NOT be quantized.  Be specific to avoid catching weight matrices
         // like bbox_embed, mask_embed, or boxRPB_embed which ARE quantizable.
         const bool is_embedding =
-            name_contains("token_embed")   || name_contains("pos_embed")
-         || name_contains("query_embed")   || name_contains("label_embed")
-         || name_contains("cls_embed")     || name_contains("point_embeddings")
-         || name_contains("not_a_point_embed") || name_contains("no_mask_embed")
-         || name_contains("no_mem_embed")  || name_contains("no_obj_embed")
-         || name_contains("presence_token.weight")
-         || name_contains("iou_token")     || name_contains("mask_tokens")
-         || name_contains("obj_score_token")
-         || name_contains("pe_gaussian")   || name_contains("freqs_cis")
-         || name_contains("gamma")         || name_contains("tpos_enc")
-         || name_contains("no_obj_ptr")    || name_contains("no_mem_pos_enc")
-         || name_contains("trk_mask_ds")   || name_contains("latents");
-        const bool quantize = (n_dims >= 2) &&
-                              (ne[0] % blk_size == 0) &&
-                              !ggml_is_quantized(file_type) &&
-                              !is_embedding;
+            name_contains("token_embed") || name_contains("pos_embed") ||
+            name_contains("query_embed") || name_contains("label_embed") ||
+            name_contains("cls_embed") || name_contains("point_embeddings") ||
+            name_contains("not_a_point_embed") || name_contains("no_mask_embed") ||
+            name_contains("no_mem_embed") || name_contains("no_obj_embed") ||
+            name_contains("presence_token.weight") || name_contains("iou_token") ||
+            name_contains("mask_tokens") || name_contains("obj_score_token") ||
+            name_contains("pe_gaussian") || name_contains("freqs_cis") || name_contains("gamma") ||
+            name_contains("tpos_enc") || name_contains("no_obj_ptr") ||
+            name_contains("no_mem_pos_enc") || name_contains("trk_mask_ds") ||
+            name_contains("latents");
+        const bool quantize = (n_dims >= 2) && (ne[0] % blk_size == 0) &&
+                              !ggml_is_quantized(file_type) && !is_embedding;
 
         if (quantize) {
             // Read and convert to F32
             if (file_type == GGML_TYPE_F16) {
                 data_f16.resize(n_el);
-                finp.read(reinterpret_cast<char *>(data_f16.data()), inp_bytes);
+                finp.read(reinterpret_cast<char*>(data_f16.data()), inp_bytes);
                 data_f32.resize(n_el);
                 for (int64_t i = 0; i < n_el; ++i) {
                     data_f32[i] = ggml_fp16_to_fp32(data_f16[i]);
                 }
             } else {
                 data_f32.resize(n_el);
-                finp.read(reinterpret_cast<char *>(data_f32.data()), inp_bytes);
+                finp.read(reinterpret_cast<char*>(data_f32.data()), inp_bytes);
             }
 
             // Quantize
-            const int64_t n_rows     = n_el / ne[0];
-            const size_t  out_row_sz = ggml_row_size(qtype, ne[0]);
+            const int64_t n_rows = n_el / ne[0];
+            const size_t out_row_sz = ggml_row_size(qtype, ne[0]);
             work.resize(n_rows * out_row_sz);
 
-            const size_t cur_size = ggml_quantize_chunk(
-                qtype, data_f32.data(), work.data(), 0, n_rows, ne[0], nullptr);
+            const size_t cur_size =
+                ggml_quantize_chunk(qtype, data_f32.data(), work.data(), 0, n_rows, ne[0], nullptr);
 
             // Write tensor header with quantized dtype
             const int32_t dtype_out = static_cast<int32_t>(qtype);
-            fout.write(reinterpret_cast<const char *>(&n_dims),    4);
-            fout.write(reinterpret_cast<const char *>(&name_len),  4);
-            fout.write(reinterpret_cast<const char *>(&dtype_out), 4);
+            fout.write(reinterpret_cast<const char*>(&n_dims), 4);
+            fout.write(reinterpret_cast<const char*>(&name_len), 4);
+            fout.write(reinterpret_cast<const char*>(&dtype_out), 4);
             for (int i = 0; i < n_dims; ++i) {
-                fout.write(reinterpret_cast<const char *>(&ne[i]), 4);
+                fout.write(reinterpret_cast<const char*>(&ne[i]), 4);
             }
             fout.write(name.data(), name_len);
 
@@ -259,29 +271,35 @@ static bool sam3_quantize_model(const std::string & fname_inp,
                 size_t pos = fout.tellp();
                 size_t pad = (32 - pos % 32) % 32;
                 const char zero = 0;
-                for (size_t i = 0; i < pad; ++i) fout.write(&zero, 1);
+                for (size_t i = 0; i < pad; ++i)
+                    fout.write(&zero, 1);
             }
 
-            fout.write(reinterpret_cast<const char *>(work.data()), cur_size);
+            fout.write(reinterpret_cast<const char*>(work.data()), cur_size);
 
             total_size_new += cur_size;
             n_quantized++;
 
             printf("%64s - [%5d, %5d, %5d, %5d] %6s -> %6s  %8.2f MB -> %8.2f MB\n",
-                   name.c_str(), ne[0], ne[1], ne[2], ne[3],
-                   ggml_type_name(file_type), ggml_type_name(qtype),
+                   name.c_str(),
+                   ne[0],
+                   ne[1],
+                   ne[2],
+                   ne[3],
+                   ggml_type_name(file_type),
+                   ggml_type_name(qtype),
                    inp_bytes / (1024.0 * 1024.0),
-                   cur_size  / (1024.0 * 1024.0));
+                   cur_size / (1024.0 * 1024.0));
         } else {
             // Copy tensor as-is
             data_raw.resize(inp_bytes);
             finp.read(data_raw.data(), inp_bytes);
 
-            fout.write(reinterpret_cast<const char *>(&n_dims),   4);
-            fout.write(reinterpret_cast<const char *>(&name_len), 4);
-            fout.write(reinterpret_cast<const char *>(&dtype),    4);
+            fout.write(reinterpret_cast<const char*>(&n_dims), 4);
+            fout.write(reinterpret_cast<const char*>(&name_len), 4);
+            fout.write(reinterpret_cast<const char*>(&dtype), 4);
             for (int i = 0; i < n_dims; ++i) {
-                fout.write(reinterpret_cast<const char *>(&ne[i]), 4);
+                fout.write(reinterpret_cast<const char*>(&ne[i]), 4);
             }
             fout.write(name.data(), name_len);
 
@@ -290,7 +308,8 @@ static bool sam3_quantize_model(const std::string & fname_inp,
                 size_t pos = fout.tellp();
                 size_t pad = (32 - pos % 32) % 32;
                 const char zero = 0;
-                for (size_t i = 0; i < pad; ++i) fout.write(&zero, 1);
+                for (size_t i = 0; i < pad; ++i)
+                    fout.write(&zero, 1);
             }
 
             fout.write(data_raw.data(), inp_bytes);
@@ -298,7 +317,11 @@ static bool sam3_quantize_model(const std::string & fname_inp,
             total_size_new += inp_bytes;
 
             printf("%64s - [%5d, %5d, %5d, %5d] %6s  (kept)  %8.2f MB\n",
-                   name.c_str(), ne[0], ne[1], ne[2], ne[3],
+                   name.c_str(),
+                   ne[0],
+                   ne[1],
+                   ne[2],
+                   ne[3],
                    ggml_type_name(file_type),
                    inp_bytes / (1024.0 * 1024.0));
         }
@@ -321,16 +344,15 @@ static bool sam3_quantize_model(const std::string & fname_inp,
     printf("\n");
     printf("%s: quantized %d / %d tensors\n", __func__, n_quantized, n_total);
     printf("%s: original size  = %8.2f MB (F32 equivalent)\n",
-           __func__, total_size_org / (1024.0 * 1024.0));
-    printf("%s: quantized size = %8.2f MB\n",
-           __func__, total_size_new / (1024.0 * 1024.0));
-    printf("%s: compression    = %.2fx\n",
-           __func__, (double)total_size_org / total_size_new);
+           __func__,
+           total_size_org / (1024.0 * 1024.0));
+    printf("%s: quantized size = %8.2f MB\n", __func__, total_size_new / (1024.0 * 1024.0));
+    printf("%s: compression    = %.2fx\n", __func__, (double) total_size_org / total_size_new);
 
     return true;
 }
 
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: %s model.ggml model-quant.ggml type\n", argv[0]);
         fprintf(stderr, "  supported types: q4_0, q4_1, q8_0\n");
@@ -339,8 +361,8 @@ int main(int argc, char ** argv) {
 
     // Init ggml (needed for fp16 lookup tables)
     {
-        struct ggml_init_params params = { 0, NULL, false };
-        struct ggml_context * ctx = ggml_init(params);
+        struct ggml_init_params params = {0, NULL, false};
+        struct ggml_context* ctx = ggml_init(params);
         ggml_free(ctx);
     }
 
@@ -348,17 +370,24 @@ int main(int argc, char ** argv) {
     const std::string fname_out = argv[2];
 
     ggml_type qtype = GGML_TYPE_COUNT;
-    if      (strcmp(argv[3], "q4_0") == 0) qtype = GGML_TYPE_Q4_0;
-    else if (strcmp(argv[3], "q4_1") == 0) qtype = GGML_TYPE_Q4_1;
-    else if (strcmp(argv[3], "q8_0") == 0) qtype = GGML_TYPE_Q8_0;
+    if (strcmp(argv[3], "q4_0") == 0)
+        qtype = GGML_TYPE_Q4_0;
+    else if (strcmp(argv[3], "q4_1") == 0)
+        qtype = GGML_TYPE_Q4_1;
+    else if (strcmp(argv[3], "q8_0") == 0)
+        qtype = GGML_TYPE_Q8_0;
     else {
         fprintf(stderr, "%s: unknown quantization type '%s'\n", argv[0], argv[3]);
         fprintf(stderr, "  supported types: q4_0, q4_1, q8_0\n");
         return 1;
     }
 
-    fprintf(stderr, "%s: quantizing '%s' -> '%s' (%s)\n",
-            __func__, fname_inp.c_str(), fname_out.c_str(), ggml_type_name(qtype));
+    fprintf(stderr,
+            "%s: quantizing '%s' -> '%s' (%s)\n",
+            __func__,
+            fname_inp.c_str(),
+            fname_out.c_str(),
+            ggml_type_name(qtype));
 
     const int64_t t_start = ggml_time_us();
 

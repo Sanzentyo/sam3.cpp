@@ -7,10 +7,13 @@ target_link_libraries(sam3_quantize PRIVATE ggml)
 add_executable(sam3_benchmark benchmark.cpp)
 target_link_libraries(sam3_benchmark PRIVATE sam3)
 
+add_executable(sam3_smoke smoke_sam3.cpp)
+target_link_libraries(sam3_smoke PRIVATE sam3)
+
 add_executable(sam3_profile_edgetam profile_edgetam.cpp)
 target_link_libraries(sam3_profile_edgetam PRIVATE sam3)
 
-# SDL2 + ImGui are optional — build only if SDL2 is found.
+# SDL2 + ImGui are optional -- build only if SDL2 is found.
 find_package(SDL2 QUIET)
 
 if(SDL2_FOUND)
@@ -22,5 +25,5 @@ if(SDL2_FOUND)
     add_executable(sam3_video main_video.cpp)
     target_link_libraries(sam3_video PRIVATE sam3 imgui-sdl2 SDL2::SDL2)
 else()
-    message(STATUS "SDL2 not found — skipping GUI examples")
+    message(STATUS "SDL2 not found -- skipping GUI examples")
 endif()

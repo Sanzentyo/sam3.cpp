@@ -577,6 +577,17 @@ first kernel implementation, not just adding 56 instantiations to the existing
 f16 MMA path. The restored tile build was rechecked against the reference JSONL
 with exact bbox/mask parity (`mask_hash_equal_rows=10/10`).
 
+The tile FlashAttention launch was also tested with `stream_k=true` to check
+whether the long 4096-token global attention was limited by the current
+parallel-block combine path. It produced a large rough 1024 bbox speedup
+(`91.3 -> 72.6 ms/frame`) but invalid output immediately (`det=0`; frame 0 bbox
+collapsed to `[1008,568,0,0]`). This is not a valid switch: the existing tile
+kernel indexes work by `blockIdx.x/y/z`, while `stream_k` uses a continuous block
+mapping that only kernels written for that contract can interpret. The result is
+useful only as direction: a correct head_dim 56 stream-k/no-mask kernel could be
+worth pursuing, but the generic tile kernel cannot be enabled with the
+`launch_fattn` flag alone.
+
 ## Kernel-Level Optimization Direction
 
 Further work should not be limited to changing the current tile kernel

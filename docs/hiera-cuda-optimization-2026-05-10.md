@@ -22,6 +22,9 @@ path can be treated as a Rust-wrapper baseline.
 - Cached the Hiera positional embedding as a backend tensor. Steady-state
   frames now copy the cached device tensor into the graph input instead of
   uploading the same 4 MiB CPU buffer every frame.
+- Added opt-in `SAM3_PROFILE_HIERA_CUTS=1` cumulative cut profiling for SAM2
+  Hiera. It times Hiera stage outputs and all FPN outputs separately from the
+  normal graph so the dominant region can be identified.
 
 ## Performance
 
@@ -143,6 +146,22 @@ to `113.6 ms/frame`. Full-mask parity against the previous output is exact on
 the 10-frame sample: `mask_hash_equal_rows=10`, `min_bbox_iou=1.0`, and
 `max_score_abs_delta=0.0`.
 
+The cumulative Hiera cut profiler shows the dominant region is stage 2 of the
+Hiera backbone, not FPN:
+
+| Cut | Cumulative ms | Incremental ms | Nodes |
+| --- | ---: | ---: | ---: |
+| `hiera_stage_0` | 12.6 | 12.6 | 134 |
+| `hiera_stage_1` | 27.5 | 14.9 | 333 |
+| `hiera_stage_2` | 69.9 | 42.4 | 1331 |
+| `hiera_stage_3` | 72.0 | 2.2 | 1539 |
+| `fpn_all` | 75.1 | 3.1 | 1601 |
+
+This means the next meaningful CUDA-side optimization should target the many
+windowed Hiera blocks in stage 2, especially their QKV/projection/MLP `mul_mat`,
+window partition/unpartition, and normalization/add chains. FPN work is no
+longer a first-priority target for Base+ 1024 latency.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -234,4 +253,5 @@ outputs/sam2-official-quality-10-metadata-q4_0/summary.json
 outputs/sam2-official-quality-512-metadata-q4_0/summary.json
 outputs/hiera-pos-backend-cache/summary.json
 outputs/hiera-pos-backend-cache/parity.json
+outputs/hiera-cut-profile/base_plus_q4_0_1024_cuts_fpn_all_summary.json
 ```

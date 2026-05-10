@@ -25,6 +25,9 @@ COMPUTE_RE = re.compile(r"SAM3_PROFILE compute backend=(\S+) nodes=(\d+) ms=([0-
 TENSOR_SET_RE = re.compile(r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
 TENSOR_GET_RE = re.compile(r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
 CPU_SPAN_RE = re.compile(r"SAM3_PROFILE cpu name=(\S+) ms=([0-9.]+)")
+HIERA_CUT_RE = re.compile(
+    r"SAM3_PROFILE_HIERA_CUT label=(\S+) nodes=(\d+) mean_ms=([0-9.]+) warmup=(\d+) iter=(\d+)"
+)
 
 
 def mean(values: list[float]) -> float | None:
@@ -41,6 +44,16 @@ def summarize(path: Path) -> dict[str, Any]:
     cpu_spans: dict[str, list[float]] = {}
     for name, ms in CPU_SPAN_RE.findall(text):
         cpu_spans.setdefault(name, []).append(float(ms))
+    hiera_cuts: dict[str, list[dict[str, Any]]] = {}
+    for label, nodes, ms, warmup, iters in HIERA_CUT_RE.findall(text):
+        hiera_cuts.setdefault(label, []).append(
+            {
+                "nodes": int(nodes),
+                "mean_ms": float(ms),
+                "warmup": int(warmup),
+                "iter": int(iters),
+            }
+        )
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -63,6 +76,14 @@ def summarize(path: Path) -> dict[str, Any]:
                 "values_ms": values,
             }
             for name, values in sorted(cpu_spans.items())
+        },
+        "hiera_cuts": {
+            label: {
+                "count": len(values),
+                "mean_ms": mean([row["mean_ms"] for row in values]),
+                "values": values,
+            }
+            for label, values in sorted(hiera_cuts.items())
         },
     }
     if row:

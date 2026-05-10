@@ -1267,6 +1267,101 @@ static bool sam3_graph_compute(ggml_backend_t backend, struct ggml_cgraph* graph
     return true;
 }
 
+struct sam3_hiera_profile_cut {
+    std::string label;
+    std::vector<struct ggml_tensor*> tensors;
+};
+
+static int sam3_env_int(std::string_view name, int default_value) {
+    const auto value = sam3_getenv(name);
+    if (!value)
+        return default_value;
+    int parsed = default_value;
+    const auto* begin = value->data();
+    const auto* end = value->data() + value->size();
+    const auto [ptr, ec] = std::from_chars(begin, end, parsed);
+    if (ec != std::errc{} || ptr != end) {
+        return default_value;
+    }
+    return parsed;
+}
+
+static bool sam3_profile_hiera_cuts(ggml_backend_t backend,
+                                    ggml_context* ctx,
+                                    const std::vector<sam3_hiera_profile_cut>& cuts,
+                                    struct ggml_tensor* input_tensor,
+                                    const float* input_data,
+                                    size_t input_bytes,
+                                    struct ggml_tensor* pos_cache_tensor,
+                                    int n_threads) {
+    if (!sam3_getenv("SAM3_PROFILE_HIERA_CUTS")) {
+        return true;
+    }
+
+    const int n_warmup = std::max(0, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_WARMUP", 1));
+    const int n_iter = std::max(1, sam3_env_int("SAM3_PROFILE_HIERA_CUTS_ITER", 3));
+
+    for (const auto& cut : cuts) {
+        if (cut.tensors.empty())
+            continue;
+
+        auto* graph = ggml_new_graph_custom(ctx, 32768, false);
+        if (graph == nullptr) {
+            fprintf(stderr,
+                    "SAM3_PROFILE_HIERA_CUT label=%s status=graph_create_failed\n",
+                    cut.label.c_str());
+            return false;
+        }
+        for (auto* tensor : cut.tensors) {
+            if (tensor != nullptr) {
+                ggml_build_forward_expand(graph, tensor);
+            }
+        }
+
+        auto galloc = make_ggml_gallocr(backend);
+        if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+            fprintf(
+                stderr, "SAM3_PROFILE_HIERA_CUT label=%s status=alloc_failed\n", cut.label.c_str());
+            return false;
+        }
+
+        auto* pe_tensor = ggml_graph_get_tensor(graph, "hiera_pos_embed");
+        for (int i = 0; i < n_warmup; ++i) {
+            ggml_backend_tensor_set(input_tensor, input_data, 0, input_bytes);
+            if (pe_tensor != nullptr && pos_cache_tensor != nullptr) {
+                ggml_backend_tensor_copy(pos_cache_tensor, pe_tensor);
+            }
+            if (!sam3_graph_compute(backend, graph, n_threads)) {
+                return false;
+            }
+        }
+
+        double total_ms = 0.0;
+        for (int i = 0; i < n_iter; ++i) {
+            ggml_backend_tensor_set(input_tensor, input_data, 0, input_bytes);
+            if (pe_tensor != nullptr && pos_cache_tensor != nullptr) {
+                ggml_backend_tensor_copy(pos_cache_tensor, pe_tensor);
+            }
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            if (!sam3_graph_compute(backend, graph, n_threads)) {
+                return false;
+            }
+            const auto t1 = std::chrono::high_resolution_clock::now();
+            total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+        }
+
+        fprintf(stderr,
+                "SAM3_PROFILE_HIERA_CUT label=%s nodes=%d mean_ms=%.3f warmup=%d iter=%d\n",
+                cut.label.c_str(),
+                ggml_graph_n_nodes(graph),
+                total_ms / static_cast<double>(n_iter),
+                n_warmup,
+                n_iter);
+    }
+
+    return true;
+}
+
 static void sam3_profile_tensor_set(struct ggml_tensor* tensor,
                                     const void* data,
                                     size_t offset,
@@ -6650,7 +6745,10 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // ── Build graph ──────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(hiera_encode_graph_build);
-    const size_t buf_size = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
+    const bool profile_hiera_cuts = sam3_getenv("SAM3_PROFILE_HIERA_CUTS").has_value();
+    const size_t graph_slots = profile_hiera_cuts ? 64 : 2;
+    const size_t buf_size =
+        (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * graph_slots);
     struct ggml_init_params gparams = {
         .mem_size = buf_size,
         .mem_buffer = nullptr,
@@ -6769,6 +6867,32 @@ static bool sam2_encode_image_hiera(sam3_state& state,
         SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_copy);
         ggml_backend_tensor_copy(state.sam2_hiera_pos_tensor, pe_tensor);
         SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_copy);
+    }
+
+    if (profile_hiera_cuts) {
+        std::vector<sam3_hiera_profile_cut> cuts;
+        cuts.reserve(5);
+        for (int i = 0; i < 4; ++i) {
+            cuts.push_back({std::format("hiera_stage_{}", i), {stage_outs[i]}});
+        }
+        std::vector<struct ggml_tensor*> all_fpn_outs;
+        all_fpn_outs.reserve(static_cast<size_t>(n_fpn));
+        for (int i = 0; i < n_fpn; ++i) {
+            all_fpn_outs.push_back(fpn_outs[i]);
+        }
+        cuts.push_back({"fpn_all", std::move(all_fpn_outs)});
+        SAM3_PROFILE_CPU_START(hiera_encode_profile_cuts);
+        if (!sam3_profile_hiera_cuts(model.backend,
+                                     ctx0.get(),
+                                     cuts,
+                                     inp,
+                                     img_data.data(),
+                                     img_data.size() * sizeof(float),
+                                     state.sam2_hiera_pos_tensor,
+                                     state.n_threads)) {
+            return false;
+        }
+        SAM3_PROFILE_CPU_END(hiera_encode_profile_cuts);
     }
 
     // Compute

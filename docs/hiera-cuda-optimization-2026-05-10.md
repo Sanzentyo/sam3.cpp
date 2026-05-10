@@ -545,6 +545,15 @@ FlashAttention tile asserts `Q->type == GGML_TYPE_F32` for this path, so f16/bf1
 attention would require a real kernel/backend change rather than a graph-level
 cast.
 
+The source-level kernel selection check confirms this is a ggml kernel-design
+task. In `ggml/src/ggml-cuda/fattn.cu`, NVIDIA tensor-core MMA is intentionally
+skipped for head sizes 40, 56, and 72, so SAM2 Base+ head_dim 56 is routed to
+the tile kernel. In `ggml/src/ggml-cuda/fattn-mma-f16.cuh`, the instantiated MMA
+cases cover 64, 80, 96, 112, 128, 256, and a few large GQA shapes, but no
+`DKQ=56,DV=56` cases. Therefore the remaining 1024 Hiera gap cannot be closed
+by another allowlist or shape-key tweak; it needs either a real 56-aware
+MMA/WMMA path or a redesigned tile kernel for the Base+ global/window shapes.
+
 The head_dim 56 tile column width was also tested. Forcing smaller tile widths
 was slower on the same 1024 q4_0 benchmark: 16 cols measured `112.5 ms/frame`,
 8 cols `135.3 ms/frame`, and 4 cols `141.3 ms/frame` against the default

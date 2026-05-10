@@ -441,6 +441,14 @@ total tracking stayed at `98.8 ms/frame`. This was reverted; the CPU loop is not
 currently limited by the per-pixel normalize arithmetic enough for this
 micro-optimization to matter.
 
+Changing Hiera qkv/proj/MLP/patch-embed broadcast bias adds to
+`ggml_add_inplace` preserved full-mask parity at both 1024 and 512
+(`mask_hash_equal_rows=10/10` for each), but did not improve speed. The paired
+current-binary comparison was `94 -> 95 ms/frame` at 1024 and effectively
+unchanged at 512 (`34 -> 34 ms/frame`), so this graph cleanup was reverted.
+The remaining Hiera target is still kernel time, especially head_dim 56
+FlashAttention, not add-node allocation style.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 
@@ -577,4 +585,6 @@ outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json
 outputs/preprocess-norm-lut/fullmask_parity.json
 outputs/preprocess-norm-lut/lut_profile_summary.json
+outputs/hiera-inplace-bias/q4_0_1024_parity.json
+outputs/hiera-inplace-bias/q4_0_512_parity.json
 ```

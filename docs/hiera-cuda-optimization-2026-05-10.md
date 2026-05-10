@@ -384,6 +384,16 @@ FlashAttention tile asserts `Q->type == GGML_TYPE_F32` for this path, so f16/bf1
 attention would require a real kernel/backend change rather than a graph-level
 cast.
 
+The head_dim 56 tile column width was also tested. Forcing smaller tile widths
+was slower on the same 1024 q4_0 benchmark: 16 cols measured `112.5 ms/frame`,
+8 cols `135.3 ms/frame`, and 4 cols `141.3 ms/frame` against the default
+`101.7 ms/frame`. A diagnostic 64-col variant was slightly faster over five
+paired runs (`101.78 -> 100.58 ms/frame`, mean `1.20 ms/frame` saved), but it
+changed full-mask output (`mask_hash_equal_rows=0/10`, `min_bbox_iou=0.9645`,
+`max_bbox_delta_px=3.0`, `max_score_abs_delta=0.0847`). This is not acceptable
+as a parity-preserving optimization, so the default 32-col tile path remains in
+place.
+
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
 

@@ -752,6 +752,7 @@ still not parity and remains slower than official PyTorch.
 | q4_0 single-mask prompt | 1024 | 89-96 | 0.4742 | 0.5020 | 0.2500 |
 | q4_0 multimask prompt | 1024 | 96.2 | 0.4731 | 0.4959 | 0.1975 |
 | q4_0 multimask, forced candidate 0 | 1024 | 96.4 | 0.6025 | 0.6375 | 0.3807 |
+| q4_0 + f16 SAM decoder/prompt/obj_ptr | 1024 | 97.8 | 0.4740 | 0.5007 | 0.1379 |
 | q4_1 multimask prompt | 1024 | 96.7 | 0.5835 | 0.6539 | 0.6093 |
 | q8_0 multimask prompt | 1024 | 96.7 | 0.6999 | 0.8591 | 0.6594 |
 | f16 multimask prompt | 1024 | 109.3 | 0.6995 | 0.8397 | 0.6439 |
@@ -766,6 +767,15 @@ shifted relative to official PyTorch. The remaining gap therefore cannot be
 explained by q4_0 IoU ranking alone; the selected mask/object-pointer/memory
 propagation path needs a deeper comparison before Base+ q4_0 is used as a
 Rust-wrapper quality baseline.
+
+A mixed precision diagnostic then kept Hiera/FPN/memory tensors from the q4_0
+model and replaced only `sam_pe.*`, `sam_dec.*`, and `obj_ptr_proj.*` with f16
+tensors. This required loader support for registering tensors from their file
+dtype rather than assuming one dtype from the model-level `ftype`. The model
+loaded and ran, but quality did not improve: mean mask IoU stayed at `0.4740`,
+and the initial candidate dump still scored candidate 2 highest. That points
+away from SAM decoder quantization as the main cause and toward q4_0 Hiera/FPN
+features or memory propagation state as the next quality target.
 
 At `--encode-img-size 512`, the earlier bbox-only scaling run reached
 `34.4 ms/frame`, but that initial comparison was against the default official
@@ -918,6 +928,9 @@ outputs/sam2-official-quality-frame-index-1024/summary.json
 outputs/sam2-official-quality-frame-index-512/summary.json
 outputs/sam2-official-quality-1024-q4_0-multimask-candidate0/summary.json
 outputs/sam2-official-quality-1024-q4_0-multimask-candidate0/cpp_initial_candidates.jsonl
+outputs/sam2-official-quality-1024-q4_0-samdec-f16-multimask/summary.json
+outputs/sam2-official-quality-1024-q4_0-samdec-f16-multimask/cpp_initial_candidates.jsonl
+outputs/sam2-mixed-q4-samdec-f16-summary.json
 outputs/hiera-free-prev-state/q4_0_512_fixed_summary.json
 outputs/hiera-free-prev-state/q4_0_512_fullmask_summary.json
 outputs/hiera-free-prev-state/q4_0_512_force_cublas_summary.json

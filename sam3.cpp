@@ -1090,6 +1090,7 @@ struct sam3_model {
 
     // tensor lookup
     std::map<std::string, struct ggml_tensor*> tensors;
+    std::unordered_map<std::string, ggml_type> file_tensor_types;
 
     // tokenizer
     sam3_bpe_tokenizer tokenizer;
@@ -2464,6 +2465,14 @@ static void sam2_register_tensors(sam3_model& model) {
     auto* ctx = model.ctx;
     const ggml_type WTYPE = model.weight_type;
     const int64_t WBLK = ggml_blck_size(WTYPE);
+    auto registered_weight_type = [&](const std::string& name, int64_t d0) {
+        if (d0 % WBLK == 0) {
+            if (const auto it = model.file_tensor_types.find(name); it != model.file_tensor_types.end()) {
+                return it->second;
+            }
+        }
+        return (d0 % WBLK == 0) ? WTYPE : GGML_TYPE_F32;
+    };
 
     auto T1f = [&](const std::string& name, int64_t d0) -> ggml_tensor* {
         auto* t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, d0);
@@ -2472,7 +2481,7 @@ static void sam2_register_tensors(sam3_model& model) {
         return t;
     };
     auto T2 = [&](const std::string& name, int64_t d0, int64_t d1) -> ggml_tensor* {
-        const ggml_type type = (d0 % WBLK == 0) ? WTYPE : GGML_TYPE_F32;
+        const ggml_type type = registered_weight_type(name, d0);
         auto* t = ggml_new_tensor_2d(ctx, type, d0, d1);
         ggml_set_name(t, name.c_str());
         tensors[name] = t;
@@ -2492,7 +2501,7 @@ static void sam2_register_tensors(sam3_model& model) {
     };
     auto T4 = [&](const std::string& name, int64_t d0, int64_t d1, int64_t d2, int64_t d3)
         -> ggml_tensor* {
-        const ggml_type type = (d0 % WBLK == 0) ? WTYPE : GGML_TYPE_F32;
+        const ggml_type type = registered_weight_type(name, d0);
         auto* t = ggml_new_tensor_4d(ctx, type, d0, d1, d2, d3);
         ggml_set_name(t, name.c_str());
         tensors[name] = t;
@@ -3839,6 +3848,63 @@ static void sam3_register_tensors(sam3_model& model) {
     T1f("trk_mask_ds.bias", 1);
 }
 
+static size_t sam3_tensor_file_nbytes(ggml_type file_type, const std::vector<int64_t>& shape) {
+    int64_t n_el = 1;
+    for (auto d : shape) {
+        n_el *= d;
+    }
+    if (ggml_is_quantized(file_type)) {
+        const int64_t n_rows = n_el / shape[0];
+        return ggml_row_size(file_type, shape[0]) * n_rows;
+    }
+    const size_t file_elem_size = (file_type == GGML_TYPE_F16) ? 2 : 4;
+    return n_el * file_elem_size;
+}
+
+static bool sam3_scan_tensor_file_types(std::ifstream& fin,
+                                        int n_tensors,
+                                        std::unordered_map<std::string, ggml_type>& out) {
+    const auto tensor_start = fin.tellg();
+    out.clear();
+    out.reserve(static_cast<size_t>(n_tensors));
+
+    for (int t = 0; t < n_tensors; ++t) {
+        int32_t n_dims;
+        int32_t name_len;
+        int32_t dtype;
+        fin.read(reinterpret_cast<char*>(&n_dims), 4);
+        fin.read(reinterpret_cast<char*>(&name_len), 4);
+        fin.read(reinterpret_cast<char*>(&dtype), 4);
+        if (fin.fail())
+            return false;
+
+        std::vector<int64_t> shape(n_dims);
+        for (int i = 0; i < n_dims; ++i) {
+            int32_t d;
+            fin.read(reinterpret_cast<char*>(&d), 4);
+            shape[i] = d;
+        }
+
+        std::string name(name_len, '\0');
+        fin.read(name.data(), name_len);
+
+        size_t pos = fin.tellg();
+        size_t pad = (32 - (pos % 32)) % 32;
+        if (pad > 0)
+            fin.seekg(pad, std::ios::cur);
+
+        const auto file_type = static_cast<ggml_type>(dtype);
+        fin.seekg(static_cast<std::streamoff>(sam3_tensor_file_nbytes(file_type, shape)), std::ios::cur);
+        if (fin.fail())
+            return false;
+        out.emplace(std::move(name), file_type);
+    }
+
+    fin.clear();
+    fin.seekg(tensor_start);
+    return !fin.fail();
+}
+
 // Load tensors from the binary file into the already-registered ggml tensors
 static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tensors) {
     int n_loaded = 0;
@@ -3888,14 +3954,7 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
             n_el *= d;
 
         const ggml_type file_type = static_cast<ggml_type>(dtype);
-        size_t bytes;
-        if (ggml_is_quantized(file_type)) {
-            const int64_t n_rows = n_el / shape[0];
-            bytes = ggml_row_size(file_type, shape[0]) * n_rows;
-        } else {
-            const size_t file_elem_size = (file_type == GGML_TYPE_F16) ? 2 : 4;
-            bytes = n_el * file_elem_size;
-        }
+        const size_t bytes = sam3_tensor_file_nbytes(file_type, shape);
 
         // Read into a temporary CPU buffer, then copy to backend
         std::vector<char> buf(bytes);
@@ -4068,6 +4127,11 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
             return nullptr;
         }
         sam3_print_hparams(model->hparams);
+    }
+
+    if (!sam3_scan_tensor_file_types(fin, n_tensors, model->file_tensor_types)) {
+        fprintf(stderr, "%s: failed to scan tensor metadata\n", __func__);
+        return nullptr;
     }
 
     // ── Init backend ─────────────────────────────────────────────────────

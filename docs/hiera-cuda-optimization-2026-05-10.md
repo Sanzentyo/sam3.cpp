@@ -33,9 +33,11 @@ Model: `sam2.1_hiera_base_plus_q4_0`, 10 frames, CUDA, bbox-only tracking.
 Comparison rule: C++ vs official PyTorch speed/quality claims are valid only
 when both runs use the same decoded source-frame resolution, the same frame
 range, the same prompt, and the same SAM2 input encode size
-(`--encode-img-size` in C++, `model.image_size` in official PyTorch). Running
-multiple source resolutions or encode sizes is still useful, but those rows are
-a scaling study rather than a cross-implementation win/loss comparison.
+(`--encode-img-size` in C++, `model.image_size` in official PyTorch). The
+effective input resolution must match before interpreting speed or quality
+differences as implementation differences. Running multiple source resolutions
+or encode sizes is still useful, but those rows are a scaling study rather than
+a cross-implementation win/loss comparison.
 
 | State | Track ms/frame | P50 ms | P95 ms | Note |
 | --- | ---: | ---: | ---: | --- |
@@ -50,7 +52,8 @@ a scaling study rather than a cross-implementation win/loss comparison.
 Encode-size sweep after PE caching. These rows use the same decoded source
 video frames and vary only the SAM2 input encode size. This is a scaling sweep,
 not an apples-to-apples comparison against the official PyTorch baseline unless
-the official run uses the same input encode size.
+the official run uses the same decoded source-frame resolution and the same
+input encode size.
 
 | Encode size | Track ms/frame | P50 ms | P95 ms | RSS MiB | Note |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -174,10 +177,31 @@ cumulative cut points after blocks 10, 16, and 20:
 | `hiera_stage_2_block_20` | 70.8 | 9.9 | 1331 |
 
 The heaviest block group is therefore the middle of stage 2, roughly blocks
-11-16. These are windowed Hiera blocks at the 64x64 feature resolution, so the
-best next optimization candidate is reducing the per-block overhead of repeated
-window partition/attention projection/MLP sequences rather than tuning late
-global blocks or FPN.
+11-16. This region contains both windowed blocks and global-attention blocks
+12 and 16 at the 64x64 feature resolution, so the next optimization candidate
+is reducing the per-block overhead of repeated window partition/attention
+projection/MLP sequences and the global-attention blocks rather than tuning
+FPN.
+
+A focused cut run around stage-2 blocks 11-16 gives this prioritization signal:
+
+| Cut | Cumulative ms | Incremental ms | Nodes |
+| --- | ---: | ---: | ---: |
+| `hiera_stage_1` | 26.4 | 26.4 | 333 |
+| `hiera_stage_2_focus_block_11` | 43.7 | 17.3 | 796 |
+| `hiera_stage_2_focus_block_12` | 52.1 | 8.4 | 870 |
+| `hiera_stage_2_focus_block_13` | 51.3 | -0.8 | 928 |
+| `hiera_stage_2_focus_block_14` | 51.8 | 0.5 | 986 |
+| `hiera_stage_2_focus_block_15` | 54.1 | 2.3 | 1029 |
+| `hiera_stage_2_focus_block_16` | 58.7 | 4.6 | 1088 |
+| `hiera_stage_2_block_20` | 69.1 | 10.4 | 1331 |
+| `hiera_stage_3` | 74.2 | 5.1 | 1539 |
+| `fpn_all` | 76.7 | 2.5 | 1601 |
+
+Because this focus run uses one profiling iteration per cut, the per-block
+incremental values are noisy and should not be read as exact block costs. The
+stable conclusion is that stage 2 dominates, with blocks 11-16 and the global
+blocks 12/16 worth kernel-level profiling next.
 
 Precision does not explain the quality gap. Re-running the same default 1024
 comparison across Base+ precisions gives nearly identical low IoU:
@@ -230,7 +254,8 @@ about 2.4x slower at the same input encode size for the full-mask quality path:
    72-76 ms after warmup.
 3. Decide whether lower encode sizes are acceptable for the Rust wrapper. This
    requires same-resolution measurements: C++ 512 must be compared with
-   official PyTorch 512, C++ 640 with official PyTorch 640, and so on.
+   official PyTorch 512, C++ 640 with official PyTorch 640, and so on, with the
+   same decoded source-frame resolution in both runs.
 4. Continue reducing CPU preprocessing cost or move it to GPU. Fused
    resize/normalize brings it down to roughly 10-15 ms/frame at 1024, but that
    is still large relative to the PyTorch baseline.
@@ -272,4 +297,5 @@ outputs/hiera-pos-backend-cache/summary.json
 outputs/hiera-pos-backend-cache/parity.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_cuts_fpn_all_summary.json
 outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_blocks_summary.json
+outputs/hiera-cut-profile/base_plus_q4_0_1024_stage2_focus_summary.json
 ```

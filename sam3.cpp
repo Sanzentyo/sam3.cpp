@@ -6750,7 +6750,7 @@ static bool sam2_encode_image_hiera(sam3_state& state,
     // ── Build graph ──────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(hiera_encode_graph_build);
     const bool profile_hiera_cuts = sam3_getenv("SAM3_PROFILE_HIERA_CUTS").has_value();
-    const size_t graph_slots = profile_hiera_cuts ? 128 : 2;
+    const size_t graph_slots = profile_hiera_cuts ? 256 : 2;
     const size_t buf_size =
         (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * graph_slots);
     struct ggml_init_params gparams = {
@@ -6880,13 +6880,16 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     if (profile_hiera_cuts) {
         std::vector<sam3_hiera_profile_cut> cuts;
-        cuts.reserve(5);
+        cuts.reserve(12);
         for (int i = 0; i < 4; ++i) {
             cuts.push_back({std::format("hiera_stage_{}", i), {stage_outs[i]}});
         }
         if (hp.hiera_num_stages >= 3) {
             const int stage2_begin = model.hiera.stage_ends[1] + 1;
             const int stage2_end = model.hiera.stage_ends[2];
+            const int stage2_focus_begin =
+                std::min(stage2_end, std::max(stage2_begin, stage2_begin + 6));
+            const int stage2_focus_end = std::min(stage2_end, stage2_focus_begin + 5);
             for (int block = stage2_begin + 5; block <= stage2_end; block += 6) {
                 cuts.push_back({std::format("hiera_stage_2_block_{}", block),
                                 {block_outs[static_cast<size_t>(block)]}});
@@ -6894,6 +6897,10 @@ static bool sam2_encode_image_hiera(sam3_state& state,
             if ((stage2_end - stage2_begin + 1) % 6 != 0) {
                 cuts.push_back({std::format("hiera_stage_2_block_{}", stage2_end),
                                 {block_outs[static_cast<size_t>(stage2_end)]}});
+            }
+            for (int block = stage2_focus_begin; block <= stage2_focus_end; ++block) {
+                cuts.push_back({std::format("hiera_stage_2_focus_block_{}", block),
+                                {block_outs[static_cast<size_t>(block)]}});
             }
         }
         std::vector<struct ggml_tensor*> all_fpn_outs;

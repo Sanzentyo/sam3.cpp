@@ -520,6 +520,12 @@ one-time first-use outliers do not hide steady-state hotspots. On the current
 3-frame 1024 q4_0 run after the conv-transpose k2s2 kernel, the Hiera encode
 profile shows:
 
+`scripts/summarize_cuda_node_hotspots.py` extracts this ranking from the
+profile summary and tags the primary/secondary kernel classes. The generated
+`outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json` should be
+used after future ggml kernel experiments to confirm that a change actually
+reduces the intended hotspot instead of moving noise between unrelated nodes.
+
 | Region | Node/signature | Count | Sum ms | Drop-max sum ms | Mean drop-max ms | Note |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Hiera | `FLASH_ATTN_EXT`, `f32[56,8,4096,1]` output | 9 | 36.57 | 32.39 | 4.05 | steady global-attention hotspot |
@@ -708,6 +714,7 @@ outputs/conv-transpose-k2s2/paired_summary.json
 outputs/conv-transpose-k2s2/q4_0_1024_bbox_parity.json
 outputs/conv-transpose-k2s2/q4_0_512_bbox_parity.json
 outputs/cuda-node-profile-current/q4_0_1024_nodes_summary.json
+outputs/cuda-node-profile-current/q4_0_1024_hiera_hotspots.json
 outputs/fattn56-nbatch64/fullmask_parity.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json

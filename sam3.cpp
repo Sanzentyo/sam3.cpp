@@ -2467,7 +2467,8 @@ static void sam2_register_tensors(sam3_model& model) {
     const int64_t WBLK = ggml_blck_size(WTYPE);
     auto registered_weight_type = [&](const std::string& name, int64_t d0) {
         if (d0 % WBLK == 0) {
-            if (const auto it = model.file_tensor_types.find(name); it != model.file_tensor_types.end()) {
+            if (const auto it = model.file_tensor_types.find(name);
+                it != model.file_tensor_types.end()) {
                 return it->second;
             }
         }
@@ -3894,7 +3895,8 @@ static bool sam3_scan_tensor_file_types(std::ifstream& fin,
             fin.seekg(pad, std::ios::cur);
 
         const auto file_type = static_cast<ggml_type>(dtype);
-        fin.seekg(static_cast<std::streamoff>(sam3_tensor_file_nbytes(file_type, shape)), std::ios::cur);
+        fin.seekg(static_cast<std::streamoff>(sam3_tensor_file_nbytes(file_type, shape)),
+                  std::ios::cur);
         if (fin.fail())
             return false;
         out.emplace(std::move(name), file_type);

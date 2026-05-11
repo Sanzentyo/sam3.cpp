@@ -37,8 +37,8 @@
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cerrno>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -46,8 +46,8 @@
 #include <cstring>
 #include <expected>
 #include <filesystem>
-#include <fstream>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <ostream>
 #include <print>
@@ -319,8 +319,8 @@ static double percentile(std::vector<double> values, double p) {
     return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
-static const sam3_detection* select_detection(const sam3_result& result,
-                                              std::optional<size_t> candidate_index = std::nullopt) {
+static const sam3_detection* select_detection(
+    const sam3_result& result, std::optional<size_t> candidate_index = std::nullopt) {
     if (result.detections.empty())
         return nullptr;
     if (candidate_index && *candidate_index < result.detections.size()) {
@@ -430,9 +430,8 @@ static void write_detection_row(std::ostream* out,
         mask_hash ^= (uint64_t) v;
         mask_hash *= 1099511628211ULL;
     }
-    const std::string mask_path_json = mask_path.empty()
-                                           ? "null"
-                                           : std::format("\"{}\"", json_escape(mask_path));
+    const std::string mask_path_json =
+        mask_path.empty() ? "null" : std::format("\"{}\"", json_escape(mask_path));
     *out << std::format(
         "{{\"offset\":{},\"expected_frame_index\":{},"
         "\"bbox_xyxy\":[{:.3f},{:.3f},{:.3f},{:.3f}],\"score\":{:.6f},"
@@ -456,7 +455,8 @@ static void write_initial_candidate_rows(std::ostream* out,
                                          std::optional<size_t> selected_index = std::nullopt) {
     if (!out)
         return;
-    for (size_t candidate_index = 0; candidate_index < result.detections.size(); ++candidate_index) {
+    for (size_t candidate_index = 0; candidate_index < result.detections.size();
+         ++candidate_index) {
         const auto& det = result.detections[candidate_index];
         uint64_t mask_hash = 1469598103934665603ULL;
         int mask_area = 0;
@@ -762,9 +762,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                 save_detection_mask(output_mask_dir, 0, first, initial_candidate_index);
             write_detection_row(&out, 0, 0, first, mask_path, initial_candidate_index);
         }
-        write_initial_candidate_rows(candidate_out.is_open() ? &candidate_out : nullptr,
-                                     first,
-                                     initial_candidate_index);
+        write_initial_candidate_rows(
+            candidate_out.is_open() ? &candidate_out : nullptr, first, initial_candidate_index);
     }
 
     int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
@@ -872,22 +871,23 @@ static void child_benchmark(const std::string& model_path,
 }
 #endif
 
-static BenchResult run_benchmark_isolated(const ModelEntry& entry,
-                                          bool use_gpu,
-                                          const std::string& video_path,
-                                          int n_frames,
-                                          float px,
-                                          float py,
-                                          int n_threads,
-                                          int encode_img_size = 0,
-                                          bool bbox_only = false,
-                                          bool multimask = false,
-                                          std::optional<size_t> initial_candidate_index = std::nullopt,
-                                          int recondition_every = 16,
-                                          const std::string& output_jsonl = "",
-                                          const std::string& output_initial_candidates_jsonl = "",
-                                          const std::string& output_mask_dir = "",
-                                          bool quiet = false) {
+static BenchResult run_benchmark_isolated(
+    const ModelEntry& entry,
+    bool use_gpu,
+    const std::string& video_path,
+    int n_frames,
+    float px,
+    float py,
+    int n_threads,
+    int encode_img_size = 0,
+    bool bbox_only = false,
+    bool multimask = false,
+    std::optional<size_t> initial_candidate_index = std::nullopt,
+    int recondition_every = 16,
+    const std::string& output_jsonl = "",
+    const std::string& output_initial_candidates_jsonl = "",
+    const std::string& output_mask_dir = "",
+    bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -998,22 +998,23 @@ static BenchResult run_benchmark_isolated(const ModelEntry& entry,
     return res;
 }
 
-static BenchResult run_benchmark_direct(const ModelEntry& entry,
-                                        bool use_gpu,
-                                        const std::string& video_path,
-                                        int n_frames,
-                                        float px,
-                                        float py,
-                                        int n_threads,
-                                        int encode_img_size = 0,
-                                        bool bbox_only = false,
-                                        bool multimask = false,
-                                        std::optional<size_t> initial_candidate_index = std::nullopt,
-                                        int recondition_every = 16,
-                                        const std::string& output_jsonl = "",
-                                        const std::string& output_initial_candidates_jsonl = "",
-                                        const std::string& output_mask_dir = "",
-                                        bool quiet = false) {
+static BenchResult run_benchmark_direct(
+    const ModelEntry& entry,
+    bool use_gpu,
+    const std::string& video_path,
+    int n_frames,
+    float px,
+    float py,
+    int n_threads,
+    int encode_img_size = 0,
+    bool bbox_only = false,
+    bool multimask = false,
+    std::optional<size_t> initial_candidate_index = std::nullopt,
+    int recondition_every = 16,
+    const std::string& output_jsonl = "",
+    const std::string& output_initial_candidates_jsonl = "",
+    const std::string& output_mask_dir = "",
+    bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
     res.backend = requested_backend_label(use_gpu);
@@ -1074,20 +1075,22 @@ static void print_table(const std::vector<BenchResult>& results,
         "=========================================================================================="
         "===============\n\n");
 
-    std::print("  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8} | {:>3} | {}\n",
-               "#",
-               "Model",
-               "Size",
-               "Backend",
-               "Load (ms)",
-               "Init (ms)",
-               "Track/fr (ms)",
-               "P50 (ms)",
-               "P95 (ms)",
-               "Total (ms)",
-               "RSS MiB",
-               "Det",
-               "Status");
+    std::print(
+        "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | "
+        "{:>8} | {:>3} | {}\n",
+        "#",
+        "Model",
+        "Size",
+        "Backend",
+        "Load (ms)",
+        "Init (ms)",
+        "Track/fr (ms)",
+        "P50 (ms)",
+        "P95 (ms)",
+        "Total (ms)",
+        "RSS MiB",
+        "Det",
+        "Status");
     std::print(
         "------+--------------------------------------+---------+---------+-----------+-----------+"
         "---------------+-----------+-----------+------------+----------+-----+--------\n");
@@ -1096,7 +1099,8 @@ static void print_table(const std::vector<BenchResult>& results,
         const auto& r = results[i];
         if (r.success) {
             std::print(
-                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8.1f} | {:>3} | OK\n",
+                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | "
+                "{:>10} | {:>8.1f} | {:>3} | OK\n",
                 i + 1,
                 r.model_name,
                 format_size(r.file_size),
@@ -1111,7 +1115,8 @@ static void print_table(const std::vector<BenchResult>& results,
                 r.n_detections);
         } else {
             std::print(
-                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | {:>10} | {:>8} | {:>3} | FAIL: {}\n",
+                "  {:>3} | {:<36} | {:>7} | {:>7} | {:>9} | {:>9} | {:>13} | {:>9} | {:>9} | "
+                "{:>10} | {:>8} | {:>3} | FAIL: {}\n",
                 i + 1,
                 r.model_name,
                 format_size(r.file_size),
@@ -1239,11 +1244,13 @@ int main(int argc, char** argv) {
         }
     }
 
-    if ((!output_jsonl.empty() || !output_initial_candidates_jsonl.empty() || !output_mask_dir.empty()) &&
+    if ((!output_jsonl.empty() || !output_initial_candidates_jsonl.empty() ||
+         !output_mask_dir.empty()) &&
         !(gpu_only || cpu_only)) {
-        std::print(stderr,
-                   "ERROR: output JSONL/mask options require --gpu-only or --cpu-only to select one "
-                   "backend\n");
+        std::print(
+            stderr,
+            "ERROR: output JSONL/mask options require --gpu-only or --cpu-only to select one "
+            "backend\n");
         return 1;
     }
 
@@ -1319,7 +1326,8 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
         std::print(stderr, "\nStarting {} benchmark runs (in-process)...\n\n", runs.size());
 #else
-        std::print(stderr, "\nStarting {} benchmark runs (each in a subprocess)...\n\n", runs.size());
+        std::print(
+            stderr, "\nStarting {} benchmark runs (each in a subprocess)...\n\n", runs.size());
 #endif
     }
 
@@ -1332,50 +1340,48 @@ int main(int argc, char** argv) {
         const auto& run = runs[i];
         const char* backend_str = requested_backend_label(run.use_gpu);
 
-        std::print(stderr,
-                   "[{:>3}/{}] {} ({}) ...\n",
-                   i + 1,
-                   runs.size(),
-                   run.entry->name,
-                   backend_str);
+        std::print(
+            stderr, "[{:>3}/{}] {} ({}) ...\n", i + 1, runs.size(), run.entry->name, backend_str);
 
-        auto res = no_isolation ? run_benchmark_direct(*run.entry,
-                                                       run.use_gpu,
-                                                       video_path,
-                                                       n_frames,
-                                                       px,
-                                                       py,
-                                                       n_threads,
-                                                       encode_img_size,
-                                                       bbox_only,
-                                                       multimask,
-                                                       initial_candidate_index,
-                                                       recondition_every,
-                                                       (i == 0) ? output_jsonl : "",
-                                                       (i == 0) ? output_initial_candidates_jsonl : "",
-                                                       (i == 0) ? output_mask_dir : "",
-                                                       quiet)
-                                : run_benchmark_isolated(*run.entry,
-                                                         run.use_gpu,
-                                                         video_path,
-                                                         n_frames,
-                                                         px,
-                                                         py,
-                                                         n_threads,
-                                                         encode_img_size,
-                                                         bbox_only,
-                                                         multimask,
-                                                         initial_candidate_index,
-                                                         recondition_every,
-                                                         (i == 0) ? output_jsonl : "",
-                                                         (i == 0) ? output_initial_candidates_jsonl : "",
-                                                         (i == 0) ? output_mask_dir : "",
-                                                         quiet);
+        auto res = no_isolation
+                       ? run_benchmark_direct(*run.entry,
+                                              run.use_gpu,
+                                              video_path,
+                                              n_frames,
+                                              px,
+                                              py,
+                                              n_threads,
+                                              encode_img_size,
+                                              bbox_only,
+                                              multimask,
+                                              initial_candidate_index,
+                                              recondition_every,
+                                              (i == 0) ? output_jsonl : "",
+                                              (i == 0) ? output_initial_candidates_jsonl : "",
+                                              (i == 0) ? output_mask_dir : "",
+                                              quiet)
+                       : run_benchmark_isolated(*run.entry,
+                                                run.use_gpu,
+                                                video_path,
+                                                n_frames,
+                                                px,
+                                                py,
+                                                n_threads,
+                                                encode_img_size,
+                                                bbox_only,
+                                                multimask,
+                                                initial_candidate_index,
+                                                recondition_every,
+                                                (i == 0) ? output_jsonl : "",
+                                                (i == 0) ? output_initial_candidates_jsonl : "",
+                                                (i == 0) ? output_mask_dir : "",
+                                                quiet);
         results.push_back(res);
 
         if (res.success) {
             std::print(stderr,
-                       "  -> OK  backend={}  load={:.0f}ms  init={:.0f}ms  track/fr={:.0f}ms  p50={:.0f}ms  "
+                       "  -> OK  backend={}  load={:.0f}ms  init={:.0f}ms  track/fr={:.0f}ms  "
+                       "p50={:.0f}ms  "
                        "p95={:.0f}ms  total={:.0f}ms  rss={:.1f}MiB  det={}\n\n",
                        res.backend,
                        res.t_load_ms,

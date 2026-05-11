@@ -20,9 +20,9 @@ SAM2_QUALITY_CPP_JSONL := env_var_or_default("SAM2_QUALITY_CPP_JSONL", "outputs/
 SAM2_QUALITY_OUT := env_var_or_default("SAM2_QUALITY_OUT", "outputs/sam2-official-quality-10")
 SAM2_QUALITY_IMAGE_SIZE := env_var_or_default("SAM2_QUALITY_IMAGE_SIZE", "0")
 
-CLANG_TIDY := env_var_or_default("CLANG_TIDY", "uvx --from clang-tidy clang-tidy")
-CLANG_FORMAT := env_var_or_default("CLANG_FORMAT", "uvx --from clang-format clang-format")
-CPPCHECK := env_var_or_default("CPPCHECK", "uvx --from cppcheck cppcheck")
+CLANG_TIDY := env_var_or_default("CLANG_TIDY", "uvx --from clang-tidy==22.1.0 clang-tidy")
+CLANG_FORMAT := env_var_or_default("CLANG_FORMAT", "uvx --from clang-format==22.1.5 clang-format")
+CPPCHECK := env_var_or_default("CPPCHECK", "uvx --from cppcheck==1.5.1 cppcheck")
 
 # Default: list all recipes.
 default:

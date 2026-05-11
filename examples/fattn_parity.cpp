@@ -33,7 +33,8 @@ struct Args {
 static void usage(const char* argv0) {
     std::cerr << std::format(
         "Usage: {} [--cpu|--cuda] [--d <head_dim>] [--n <tokens>] "
-        "[--run-d <head_dim>] [--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance <f>]\n",
+        "[--run-d <head_dim>] [--heads <n>] [--batch <n>] [--sample-queries <n>] [--tolerance "
+        "<f>]\n",
         argv0);
 }
 
@@ -225,7 +226,8 @@ static std::vector<int> make_query_indices(const Args& args) {
     std::vector<int> out;
     out.reserve(static_cast<size_t>(args.sample_queries));
     for (int i = 0; i < args.sample_queries; ++i) {
-        const int idx = args.sample_queries == 1 ? 0 : (int64_t)i * (args.n - 1) / (args.sample_queries - 1);
+        const int idx =
+            args.sample_queries == 1 ? 0 : (int64_t) i * (args.n - 1) / (args.sample_queries - 1);
         if (out.empty() || out.back() != idx) {
             out.push_back(idx);
         }
@@ -264,9 +266,9 @@ static bool run_ggml_attention(const Args& args,
 
     const size_t ctx_size = ggml_tensor_overhead() * 8 + ggml_graph_overhead();
     ggml_init_params params = {
-        /*.mem_size   =*/ ctx_size,
-        /*.mem_buffer =*/ nullptr,
-        /*.no_alloc   =*/ true,
+        /*.mem_size   =*/ctx_size,
+        /*.mem_buffer =*/nullptr,
+        /*.no_alloc   =*/true,
     };
     ggml_context* ctx = ggml_init(params);
     if (!ctx) {
@@ -358,7 +360,8 @@ int main(int argc, char** argv) {
     }
     const size_t expected_got_size = static_cast<size_t>(run_d) * args.n * args.heads * args.batch;
     if (got.size() != expected_got_size) {
-        std::cerr << std::format("size mismatch: got={} expected={}\n", got.size(), expected_got_size);
+        std::cerr << std::format(
+            "size mismatch: got={} expected={}\n", got.size(), expected_got_size);
         return 1;
     }
 

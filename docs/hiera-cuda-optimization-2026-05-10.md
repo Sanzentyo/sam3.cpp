@@ -807,6 +807,29 @@ The paired mean delta is `2.16 ms/frame` (`2.87%`), with a 95% CI of
 show `fused=1 skipped=4`, which means the CUDA path is actually crossing the
 weight/bias reshape/view nodes instead of only handling already-adjacent chains.
 
+The next lower-risk CUDA pass targeted the Hiera MLP `ADD(bias) + GELU` pattern
+instead of changing the q4_0 matmul algorithm itself. Profiling showed that the
+q4_0 MLP matmuls already use the MMQ path on the current NVIDIA target, while
+the following bias add and GELU still launched separately for each MLP block.
+The CUDA backend now fuses F32 `ADD + GELU`, `ADD + GELU_ERF`, and
+`ADD + GELU_QUICK` through the existing broadcast add launcher, writing directly
+to the unary node output. The fallback gate is
+`GGML_CUDA_DISABLE_ADD_UNARY_FUSION=1`.
+
+Same-binary 1024 q4_0 bbox-only paired checks showed:
+
+| Path | Track ms/frame mean | Median | Stdev | Min..Max |
+| --- | ---: | ---: | ---: | ---: |
+| Add+GELU fusion disabled | `75.98` | `76.10` | `0.45` | `75.5..76.4` |
+| Add+GELU fusion enabled | `74.50` | `74.50` | `0.82` | `73.7..75.7` |
+
+The paired mean delta is `1.48 ms/frame` (`1.99%`). Full-mask JSONL parity is
+bit-identical against the disabled path on the same 10-frame sample:
+`mask_hash_equal_rows=10/10`, `min_bbox_iou=1.0`, `max_bbox_delta_px=0.0`, and
+`max_score_abs_delta=0.0`. Node profiling confirms the graph change: fused ADD
+nodes with `skipped=1` appear 74 times, and standalone UNARY executions drop
+from 137 to 63 in the 3-frame profile.
+
 The same history pass checked other recent upstream or Metal-only candidates:
 `CONV_TRANSPOSE_1D` is not in the SAM2/Base+ graph, `OUT_PROD` and `SNAKE` are
 also absent, `DKQ=192,DV=128` FlashAttention support does not match the Hiera
@@ -1053,6 +1076,10 @@ outputs/root-perf-next/cuda-norm-fusion/fullmask/summary.json
 outputs/root-perf-next/hiera-norm-affine-fusion/bbox_stats.json
 outputs/root-perf-next/hiera-norm-affine-fusion/fullmask/rn_summary.json
 outputs/root-perf-next/hiera-norm-affine-fusion/profile/q4_0_1024_inplace_nonseq_profile.log
+outputs/root-perf-next/add-gelu-fusion/bbox_stats.json
+outputs/root-perf-next/add-gelu-fusion/fullmask/summary.json
+outputs/root-perf-next/add-gelu-fusion/profile/fused_profile_summary.json
+outputs/root-perf-next/add-gelu-fusion/profile/no_fusion_profile_summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

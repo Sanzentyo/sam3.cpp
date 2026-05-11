@@ -211,6 +211,16 @@ The conclusion is unchanged: C++ CUDA remains slower than official PyTorch on
 the matched input contract. At 1024 the current C++ path needs about `1.8x`
 speedup to match PyTorch, and at 512 it needs about `1.6x`.
 
+A more direct `head_dim=56` MMA experiment was also attempted by adding D56/D56
+MMA template configurations and routing the no-mask SAM2 Hiera attention path to
+that kernel under an explicit env gate. It built after regenerating CUDA
+template instances, but the standalone attention parity check produced invalid
+results during the WIP test (`nonfinite=6104/7168` at `N=196`, and
+`nonfinite=3584/3584` at `N=4096`). The experiment was reverted before commit.
+This rules out "just instantiate DKQ=56/DV=56 in the existing MMA kernel" as a
+safe shortcut; a real D56 kernel needs changes inside the MMA tile/combine
+assumptions, not only new config rows.
+
 Official PyTorch was also instrumented with synchronized wrappers around
 `forward_image`, `track_step`, and `_run_memory_encoder`. These wrapper timings
 add synchronization overhead and are not the speed baseline, but they identify

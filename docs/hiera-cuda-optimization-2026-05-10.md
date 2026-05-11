@@ -432,6 +432,21 @@ semantically weak for SAM2.1 Base+. The implementation is still slower than
 official PyTorch at the same input encode size, but the quality gap is much
 smaller with the CUDA FA tile path.
 
+The current `960x540` test video shows that initial point-prompt multimask
+selection is a major quality variable. At 1024, forcing C++ to use the first
+initial multimask candidate matches official PyTorch closely:
+
+| Encode size | Initial C++ mode | Mean mask IoU | Min mask IoU | Min bbox IoU | Evidence |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1024 | `--multimask --initial-candidate-index 0` | 0.9831 | 0.9812 | 0.8661 | `outputs/quality-candidate0-current-1024/summary.json` |
+| 512 | `--multimask --initial-candidate-index 0` | 0.2678 | 0.1797 | 0.2760 | `outputs/quality-candidate0-current-512/summary.json` |
+
+This is not a universal fixed-candidate solution. It does show that the 1024
+quality gap is largely caused by the initial mask candidate contract rather
+than mask-hash-level numeric drift. The 512 row still needs separate
+investigation; the earlier frame-index-fixed 512 default row remains better
+(`mean_mask_iou=0.7761`) than candidate 0 on the current video.
+
 `scripts/summarize_quality_gap.py` summarizes the latest frame-index-fixed
 quality artifacts. These rows pass the same-input contract: decoded source
 frames are `1008x568`, frame count/prompt match, and each row uses the same

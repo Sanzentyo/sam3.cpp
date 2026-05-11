@@ -765,6 +765,21 @@ the full-mask semantic delta is also unchanged:
 this is a faster non-bit-exact numeric path; official PyTorch quality and speed
 remain the primary gate for keeping it enabled by default.
 
+A smaller follow-up fused the normal same-shape Q/K/V D56-to-D64 pack into one
+CUDA launch while preserving the separate-pack fallback behind
+`GGML_CUDA_DISABLE_FATTN56_COMBINED_PACK=1`. This does not change the numeric
+path. Same-binary 1024 bbox-only paired checks showed:
+
+| Path | Track ms/frame runs | Mean | Stdev | P50 runs | P95 runs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Separate Q/K/V pack | `79.9, 79.9, 78.5` | `79.43` | `0.81` | `77.6, 77.8, 76.8` | `90.2, 89.3, 86.1` |
+| Combined Q/K/V pack | `78.3, 78.2, 78.7` | `78.40` | `0.26` | `76.5, 76.3, 77.3` | `86.0, 86.0, 85.9` |
+
+That is a small `1.30%` improvement over the direct K/V f16 pack path on this
+sample. Full-mask JSONL output is identical between the separate and combined
+pack paths (`diff_rows=0/10`), so this is a launch-count optimization, not a new
+numeric approximation.
+
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
 1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change
@@ -995,6 +1010,8 @@ outputs/fattn56-pad-mma/final/bbox_stats.json
 outputs/fattn56-pad-mma/final/fullmask_parity_summary.json
 outputs/fattn56-pad-mma/kv-f16/bbox_stats.json
 outputs/fattn56-pad-mma/kv-f16/fullmask_summary.json
+outputs/root-perf-next/fattn56-combined-pack/bbox_stats.json
+outputs/root-perf-next/fattn56-combined-pack/fullmask/summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

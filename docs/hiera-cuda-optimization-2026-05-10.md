@@ -786,17 +786,35 @@ uses plain `ggml_norm` before applying norm weights and biases. The CUDA backend
 now mirrors the Metal optimization for F32 Norm and keeps an A/B gate through
 `GGML_CUDA_DISABLE_NORM_FUSION=1`.
 
-Same-binary 1024 bbox-only paired checks showed a small, safe improvement:
+Commit-history audit found that this was not only a missing kernel but also a
+missing Metal-side graph behavior: Metal can fuse across non-compute
+`RESHAPE`/`VIEW` nodes, while CUDA's generic `ggml_can_fuse` only sees adjacent
+cgraph nodes. The CUDA Norm affine path now skips those non-compute nodes for
+this exact pattern, so Hiera's weight/bias reshapes no longer block the fusion.
+The fused affine step uses explicit round-to-nearest multiply and add operations
+to preserve the old two-kernel rounding order.
+
+Same-binary 1024 bbox-only paired checks showed a measurable improvement:
 
 | Path | Track ms/frame mean | 95% CI | Median | Stdev |
 | --- | ---: | ---: | ---: | ---: |
-| Norm fusion disabled | `77.76` | `76.74..78.78` | `77.50` | `0.82` |
-| Norm fusion enabled | `77.24` | `76.82..77.66` | `77.20` | `0.34` |
+| Norm fusion disabled | `77.64` | `76.83..78.45` | `77.70` | `0.65` |
+| Norm fusion enabled | `75.48` | `74.83..76.13` | `75.20` | `0.53` |
 
-The paired mean delta is `0.52 ms/frame` (`0.67%`), with a wide 95% CI
-(`-0.13..1.17 ms/frame`), so this is not a large standalone win. It is still
-worth keeping because it removes two CUDA launches per fused Norm chain and the
-full-mask JSONL parity check is bit-identical (`diff_rows=0/10`).
+The paired mean delta is `2.16 ms/frame` (`2.87%`), with a 95% CI of
+`1.13..3.19 ms/frame`. Full-mask JSONL parity is bit-identical
+(`diff_rows=0/10`). The node profiler confirms Hiera Norm affine chains now
+show `fused=1 skipped=4`, which means the CUDA path is actually crossing the
+weight/bias reshape/view nodes instead of only handling already-adjacent chains.
+
+The same history pass checked other recent upstream or Metal-only candidates:
+`CONV_TRANSPOSE_1D` is not in the SAM2/Base+ graph, `OUT_PROD` and `SNAKE` are
+also absent, `DKQ=192,DV=128` FlashAttention support does not match the Hiera
+`head_dim=56` shapes, and the older Metal direct `CONV_2D` /
+`CONV_TRANSPOSE_2D` work already has CUDA direct kernels or the SAM-specific
+`k2s2` specialization in this branch. The remaining active CUDA targets are
+therefore still the profiled Hiera FlashAttention and q4_0 MLP matmul shapes,
+not another obvious Metal-only op gap.
 
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
@@ -1032,6 +1050,9 @@ outputs/root-perf-next/fattn56-combined-pack/bbox_stats.json
 outputs/root-perf-next/fattn56-combined-pack/fullmask/summary.json
 outputs/root-perf-next/cuda-norm-fusion/bbox_stats.json
 outputs/root-perf-next/cuda-norm-fusion/fullmask/summary.json
+outputs/root-perf-next/hiera-norm-affine-fusion/bbox_stats.json
+outputs/root-perf-next/hiera-norm-affine-fusion/fullmask/rn_summary.json
+outputs/root-perf-next/hiera-norm-affine-fusion/profile/q4_0_1024_inplace_nonseq_profile.log
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

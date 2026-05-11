@@ -915,6 +915,28 @@ shows `131.0 -> 115.0 ms/frame`, or about `13.9%`, so the padded-MMA strategy
 remains the correct baseline while further work should target the D56
 attention kernel itself.
 
+An env-gated D56 stage profiler was added to ggml CUDA as
+`GGML_CUDA_PROFILE_FATTN56=1`. It disables CUDA graph capture while active,
+records CUDA events around pack, padded D64 MMA, and slice, and prints Q/K/V
+shape and stride metadata. The profiler is diagnostic only; normal runs do not
+create events or synchronize. The 1024 Base+ q4_0 stage profile shows that the
+remaining head56 cost is mostly the MMA body, not the padding kernels:
+
+| Shape | Combined pack | Mean pack ms | Mean MMA ms | Mean slice ms | Mean total ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `Q=[56,4096,8,1]` | yes | `0.0557` | `1.1161` | `0.0176` | `1.1894` |
+| `Q=[56,196,8,25]` | yes | `0.0776` | `0.1987` | `0.0217` | `0.2980` |
+| `Q=[56,64,2,1024]` | yes | `0.2962` | `0.3495` | `0.1020` | `0.7478` |
+
+Two follow-up CUDA experiments were rejected from this evidence. A
+Q/K-contiguous plus V-transposed-view pack kernel reduced pack time on some
+small shapes, but normal five-pair 1024 runs regressed from `112.4` to
+`113.2 ms/frame` on average. Retuning the padded D64 MMA `ncols=64` config for
+Blackwell also regressed: `256` threads raised global D56 MMA to about
+`1.89 ms`, and `nbatch_fa=128` raised it to about `1.33 ms`. The Ampere-style
+`128` thread, `nbatch_fa=64` config remains the best measured setting on the
+RTX 5070 Ti Laptop GPU so far.
+
 An attempted MMQ `MUL_MAT + ADD(bias)` fusion was rejected. Switching the
 fusion matcher from CUDA same-shape fusion to generic adjacency made the
 intended Base+ q4_0 MMQ nodes fire in the CUDA node profile, including the
@@ -1155,6 +1177,10 @@ outputs/root-perf-next/mmq-bias-fusion/fullmask-postadd/summary.json
 outputs/root-perf-next/mmq-bias-fusion/fullmask-skip-unary/summary.json
 outputs/root-perf-next/mmq-bias-fusion/nondet-check/summary.json
 outputs/root-perf-next/mmq-bias-fusion/rejected-postadd-wip.patch
+outputs/root-perf-next/fattn56-stage-profile/q4_0_1024_nb.log
+outputs/root-perf-next/fattn56-qk-v-pack/
+outputs/root-perf-next/fattn64-config-256t/
+outputs/root-perf-next/fattn64-config-nbatch128/
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

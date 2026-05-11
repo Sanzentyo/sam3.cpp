@@ -118,23 +118,27 @@ bool sam3_cuda_preprocess_image_chw_cached(const uint8_t* src,
     }
 
     auto* src_device = static_cast<uint8_t*>(*src_device_cache);
-    bool ok = cudaMemcpy(src_device, src, src_bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+    bool ok =
+        cudaMemcpyAsync(src_device, src, src_bytes, cudaMemcpyHostToDevice, cudaStreamPerThread) ==
+        cudaSuccess;
     if (ok) {
         constexpr int block_size = 256;
         const int area = dst_size * dst_size;
         const int grid_size = (area + block_size - 1) / block_size;
-        sam3_preprocess_image_chw_kernel<<<grid_size, block_size>>>(src_device,
-                                                                    src_w,
-                                                                    src_h,
-                                                                    dst,
-                                                                    dst_size,
-                                                                    mean[0],
-                                                                    mean[1],
-                                                                    mean[2],
-                                                                    std_d[0],
-                                                                    std_d[1],
-                                                                    std_d[2]);
-        ok = cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess;
+        sam3_preprocess_image_chw_kernel<<<grid_size, block_size, 0, cudaStreamPerThread>>>(
+            src_device,
+            src_w,
+            src_h,
+            dst,
+            dst_size,
+            mean[0],
+            mean[1],
+            mean[2],
+            std_d[0],
+            std_d[1],
+            std_d[2]);
+        ok = cudaGetLastError() == cudaSuccess &&
+             cudaStreamSynchronize(cudaStreamPerThread) == cudaSuccess;
     }
 
     return ok;

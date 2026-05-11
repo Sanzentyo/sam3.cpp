@@ -211,6 +211,24 @@ The conclusion is unchanged: C++ CUDA remains slower than official PyTorch on
 the matched input contract. At 1024 the current C++ path needs about `1.8x`
 speedup to match PyTorch, and at 512 it needs about `1.6x`.
 
+The same current-state check was repeated for the Base+ precision candidates
+that matter for quality. `q8_0` remains the practical quality fallback
+candidate because its speed is close to `q4_0` in this short run, while `f16`
+is clearly slower. Neither precision closes the official PyTorch speed gap:
+
+| Precision | Encode size | C++ track ms/frame | PyTorch bf16 ms/frame | PyTorch/C++ ratio | Evidence |
+| --- | ---: | ---: | ---: | ---: | --- |
+| q4_0 | 1024 | 116.0 | 64.53 | 0.556 | `outputs/model-matrix-latest-q4-1024/summary.json` |
+| q8_0 | 1024 | 114.7 | 66.62 | 0.581 | `outputs/model-matrix-latest-q8_0-1024/summary.json` |
+| f16 | 1024 | 134.4 | 65.72 | 0.489 | `outputs/model-matrix-latest-f16-1024/summary.json` |
+| q4_0 | 512 | 24.3 | 14.98 | 0.616 | `outputs/model-matrix-latest-q4-512/summary.json` |
+| q8_0 | 512 | 24.3 | 14.57 | 0.600 | `outputs/model-matrix-latest-q8_0-512/summary.json` |
+| f16 | 512 | 28.2 | 14.62 | 0.518 | `outputs/model-matrix-latest-f16-512/summary.json` |
+
+This means quality-driven fallback selection should prefer `q8_0` over `f16`,
+but speed work still has to target the shared Hiera CUDA path rather than model
+precision alone.
+
 A more direct `head_dim=56` MMA experiment was also attempted by adding D56/D56
 MMA template configurations and routing the no-mask SAM2 Hiera attention path to
 that kernel under an explicit env gate. It built after regenerating CUDA
@@ -1289,5 +1307,9 @@ outputs/hiera-gap-priority/summary.json
 outputs/hiera-free-prev-state/q4_0_1024_profile_summary.json
 outputs/model-matrix-latest-q4-1024/summary.json
 outputs/model-matrix-latest-q4-512/summary.json
+outputs/model-matrix-latest-q8_0-1024/summary.json
+outputs/model-matrix-latest-q8_0-512/summary.json
+outputs/model-matrix-latest-f16-1024/summary.json
+outputs/model-matrix-latest-f16-512/summary.json
 outputs/goal-audit/latest-summary.json
 ```

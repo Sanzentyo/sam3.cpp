@@ -915,6 +915,21 @@ shows `131.0 -> 115.0 ms/frame`, or about `13.9%`, so the padded-MMA strategy
 remains the correct baseline while further work should target the D56
 attention kernel itself.
 
+An attempted MMQ `MUL_MAT + ADD(bias)` fusion was rejected. Switching the
+fusion matcher from CUDA same-shape fusion to generic adjacency made the
+intended Base+ q4_0 MMQ nodes fire in the CUDA node profile, including the
+`112x65536`, `1792x4096`, and `448x4096` Hiera shapes. However, adding bias
+inside MMQ broke full-mask parity badly because the NVIDIA MMQ path uses
+stream-k partial sums. Moving the bias to a single post-MMQ row-bias kernel
+fixed the gross failure but still changed masks by about `1%` area on the
+10-frame 1024 q4_0 sample (`mask_hash_equal_rows=0/10`,
+`min_bbox_iou=0.998745`, `max_bbox_delta_px=1.0`). A control run comparing two
+disabled-fusion executions was bit-identical (`mask_hash_equal_rows=10/10`), so
+this was not run-to-run nondeterminism. The branch was reverted. Future MMQ
+bias work should either preserve the original MUL_MAT output buffer and prove
+bit-identical ADD replacement, or avoid this route and target MMQ arithmetic
+throughput directly.
+
 Precision alone does not explain the quality gap, but precision affects the
 multimask candidate scoring. Re-running the same default 1024 comparison across
 Base+ precisions without fixing candidate selection gave similarly poor
@@ -1134,6 +1149,12 @@ outputs/root-perf-next/metal-gap-refresh/q4_0_1024_profile_summary.json
 outputs/root-perf-next/fattn56-contiguous-pack/bbox_stats.json
 outputs/root-perf-next/fattn56-contiguous-pack/fullmask/summary.json
 outputs/root-perf-next/fattn56-current-ab/
+outputs/root-perf-next/mmq-bias-fusion/profile-verify/fusion_summary.json
+outputs/root-perf-next/mmq-bias-fusion/fullmask-clean/summary.json
+outputs/root-perf-next/mmq-bias-fusion/fullmask-postadd/summary.json
+outputs/root-perf-next/mmq-bias-fusion/fullmask-skip-unary/summary.json
+outputs/root-perf-next/mmq-bias-fusion/nondet-check/summary.json
+outputs/root-perf-next/mmq-bias-fusion/rejected-postadd-wip.patch
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

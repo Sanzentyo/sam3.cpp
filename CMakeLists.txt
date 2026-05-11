@@ -25,6 +25,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # sam3 static library
 add_library(sam3 STATIC sam3.cpp sam3.h)
+if(GGML_CUDA)
+    enable_language(CUDA)
+    target_sources(sam3 PRIVATE sam3_cuda_preprocess.cu sam3_cuda_preprocess.cuh)
+    target_compile_definitions(sam3 PRIVATE SAM3_USE_CUDA_PREPROCESS=1)
+    set_source_files_properties(sam3_cuda_preprocess.cu PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_EXTENSIONS OFF
+    )
+endif()
 target_include_directories(sam3 PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/stb
@@ -35,6 +45,9 @@ set_target_properties(sam3 PROPERTIES
     CXX_STANDARD 23
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    CUDA_EXTENSIONS OFF
 )
 
 # Examples (only when top-level)

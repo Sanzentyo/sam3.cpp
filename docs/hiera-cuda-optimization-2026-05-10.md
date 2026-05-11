@@ -324,6 +324,40 @@ Five paired bbox-only runs show the expected benefit is modest but stable:
 | 1024 | 105.38 | 101.38 | 4.00 | 1.039x |
 | 512 | 26.24 | 25.08 | 1.16 | 1.046x |
 
+The Hiera input resize/normalize path now has a CUDA implementation that writes
+directly into the allocated input tensor. It is enabled by default for CUDA
+backends and can be disabled with `SAM3_DISABLE_CUDA_PREPROCESS=1`. The kernel
+uses the same bilinear sampling, integer rounding, CHW layout, and ImageNet
+normalization as the CPU path. A cached device RGB input buffer avoids per-frame
+`cudaMalloc`/`cudaFree`.
+
+Full-mask parity against the CPU preprocessing path is exact on the 10-frame
+Base+ q4_0 sample:
+
+| Check | Result | Evidence |
+| --- | ---: | --- |
+| rows | 10 vs 10 | `outputs/hiera-cuda-preprocess-default/parity/summary.json` |
+| mask hash equal rows | 10/10 | `outputs/hiera-cuda-preprocess-default/parity/summary.json` |
+| minimum bbox IoU | 1.0 | `outputs/hiera-cuda-preprocess-default/parity/summary.json` |
+| maximum score delta | 0.0 | `outputs/hiera-cuda-preprocess-default/parity/summary.json` |
+
+Five paired bbox-only runs show a small but real 1024 improvement and a noisier
+512 improvement:
+
+| Encode size | CPU preprocess mean | CUDA preprocess mean | Saved mean | Speedup | Evidence |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1024 | 113.02 | 110.16 | 2.86 | 1.026x | `outputs/hiera-cuda-preprocess-cached/ab/summary.json` |
+| 512 | 24.20 | 23.08 | 1.12 | 1.049x | `outputs/hiera-cuda-preprocess-cached/ab/summary.json` |
+
+The matched official PyTorch comparison was rerun after enabling CUDA
+preprocessing by default. The gap is smaller, but C++ CUDA still does not beat
+official PyTorch:
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 ms/frame | PyTorch/C++ ratio | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 111.4 | 68.24 | 0.613 | `outputs/model-matrix-cuda-preprocess-q4-1024/summary.json` |
+| 512 | 22.5 | 14.55 | 0.647 | `outputs/model-matrix-cuda-preprocess-q4-512/summary.json` |
+
 ## Detailed Profile
 
 After backend neck PE reuse, Base+ q4_0 still spends most of steady-state frame

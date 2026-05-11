@@ -14,6 +14,10 @@
 #include "ggml-cuda.h"
 #endif
 
+#ifdef SAM3_USE_CUDA_PREPROCESS
+#include "sam3_cuda_preprocess.cuh"
+#endif
+
 /* stb (implementation compiled here -- order is pinned) */
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -1150,6 +1154,11 @@ struct sam3_state {
     std::array<int, 4> sam2_cached_neck_pe_w = {};
     std::array<int, 4> sam2_cached_neck_pe_dim = {};
     std::array<std::vector<float>, 4> sam2_cached_neck_pe;
+
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    void* cuda_preprocess_src = nullptr;
+    size_t cuda_preprocess_src_bytes = 0;
+#endif
 };
 
 /*
@@ -1511,6 +1520,45 @@ static void sam3_profile_tensor_set(struct ggml_tensor* tensor,
     }
 }
 
+static void sam3_profile_tensor_set_async(ggml_backend_t backend,
+                                          struct ggml_tensor* tensor,
+                                          const void* data,
+                                          size_t offset,
+                                          size_t size,
+                                          const char* file,
+                                          int line) {
+    const bool profile = sam3_getenv("SAM3_PROFILE").has_value();
+    const auto t0 = profile ? std::chrono::high_resolution_clock::now()
+                            : std::chrono::high_resolution_clock::time_point{};
+    ggml_backend_tensor_set_async(backend, tensor, data, offset, size);
+    if (profile) {
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        fprintf(stderr,
+                "SAM3_PROFILE tensor_set_async name=%s bytes=%zu offset=%zu ms=%.3f at %s:%d\n",
+                tensor ? ggml_get_name(tensor) : "<null>",
+                size,
+                offset,
+                ms,
+                file,
+                line);
+    }
+}
+
+static void sam3_profile_tensor_set_prefer_async(ggml_backend_t backend,
+                                                 struct ggml_tensor* tensor,
+                                                 const void* data,
+                                                 size_t offset,
+                                                 size_t size,
+                                                 const char* file,
+                                                 int line) {
+    if (sam3_getenv("SAM3_HIERA_SYNC_UPLOAD").has_value()) {
+        sam3_profile_tensor_set(tensor, data, offset, size, file, line);
+        return;
+    }
+    sam3_profile_tensor_set_async(backend, tensor, data, offset, size, file, line);
+}
+
 static void sam3_profile_tensor_get(const struct ggml_tensor* tensor,
                                     void* data,
                                     size_t offset,
@@ -1575,6 +1623,9 @@ static void sam3_profile_cpu_span(const char* name,
 
 #define ggml_backend_tensor_set(tensor, data, offset, size) \
     sam3_profile_tensor_set((tensor), (data), (offset), (size), __FILE__, __LINE__)
+#define sam3_backend_tensor_set_prefer_async(backend, tensor, data, offset, size) \
+    sam3_profile_tensor_set_prefer_async(                                         \
+        (backend), (tensor), (data), (offset), (size), __FILE__, __LINE__)
 #define ggml_backend_tensor_get(tensor, data, offset, size) \
     sam3_profile_tensor_get((tensor), (data), (offset), (size), __FILE__, __LINE__)
 #define ggml_backend_tensor_copy(src, dst) \
@@ -4302,6 +4353,10 @@ static void sam3_clear_hiera_pos_backend_cache(sam3_state& state) {
 }
 
 void sam3_free_state(sam3_state& state) {
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    sam3_cuda_preprocess_free_cache(state.cuda_preprocess_src);
+    state.cuda_preprocess_src_bytes = 0;
+#endif
     sam3_reset_gallocr(state.galloc);
     sam3_clear_prompt_backend_cache(state);
     sam3_clear_hiera_pos_backend_cache(state);
@@ -7021,9 +7076,19 @@ static bool sam2_encode_image_hiera(sam3_state& state,
         state.neck_trk[i] = nullptr;
     }
 
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    const bool use_cuda_preprocess = !sam3_getenv("SAM3_DISABLE_CUDA_PREPROCESS").has_value() &&
+                                     ggml_backend_is_cuda(model.backend);
+#else
+    const bool use_cuda_preprocess = false;
+#endif
+
     // ── Preprocess ───────────────────────────────────────────────────────
+    std::vector<float> img_data;
     SAM3_PROFILE_CPU_START(hiera_encode_preprocess);
-    auto img_data = sam2_preprocess_image(image, img_size, state.n_threads);
+    if (!use_cuda_preprocess) {
+        img_data = sam2_preprocess_image(image, img_size, state.n_threads);
+    }
     SAM3_PROFILE_CPU_END(hiera_encode_preprocess);
 
     // ── Build graph ──────────────────────────────────────────────────────
@@ -7085,7 +7150,28 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 
     // Set input image
     SAM3_PROFILE_CPU_START(hiera_encode_input_upload);
-    ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    if (use_cuda_preprocess) {
+        const float mean[3] = {0.485f, 0.456f, 0.406f};
+        const float std_d[3] = {0.229f, 0.224f, 0.225f};
+        if (!sam3_cuda_preprocess_image_chw_cached(image.data.data(),
+                                                   image.width,
+                                                   image.height,
+                                                   static_cast<float*>(inp->data),
+                                                   img_size,
+                                                   mean,
+                                                   std_d,
+                                                   &state.cuda_preprocess_src,
+                                                   &state.cuda_preprocess_src_bytes)) {
+            fprintf(stderr, "%s: CUDA preprocessing failed\n", __func__);
+            return false;
+        }
+    } else
+#endif
+    {
+        sam3_backend_tensor_set_prefer_async(
+            model.backend, inp, img_data.data(), 0, img_data.size() * sizeof(float));
+    }
     SAM3_PROFILE_CPU_END(hiera_encode_input_upload);
 
     // Set positional embedding (precomputed on CPU)
@@ -7141,10 +7227,12 @@ static bool sam2_encode_image_hiera(sam3_state& state,
             SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_alloc);
 
             SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_upload);
-            ggml_backend_tensor_set(state.sam2_hiera_pos_tensor,
-                                    state.sam2_cached_hiera_pos_embed.data(),
-                                    0,
-                                    state.sam2_cached_hiera_pos_embed.size() * sizeof(float));
+            sam3_backend_tensor_set_prefer_async(
+                model.backend,
+                state.sam2_hiera_pos_tensor,
+                state.sam2_cached_hiera_pos_embed.data(),
+                0,
+                state.sam2_cached_hiera_pos_embed.size() * sizeof(float));
             SAM3_PROFILE_CPU_END(hiera_encode_pos_embed_backend_upload);
         } else {
             SAM3_PROFILE_CPU_START(hiera_encode_pos_embed_backend_cache_hit);

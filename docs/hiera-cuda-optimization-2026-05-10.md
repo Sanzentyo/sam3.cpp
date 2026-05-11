@@ -830,6 +830,26 @@ bit-identical against the disabled path on the same 10-frame sample:
 nodes with `skipped=1` appear 74 times, and standalone UNARY executions drop
 from 137 to 63 in the 3-frame profile.
 
+Metal also specializes common binary broadcast layouts to avoid the fully
+generic broadcast kernel. CUDA still used the generic unraveling path for Hiera
+F32 axis-broadcast bias adds. A CUDA fast path now handles the contiguous case
+where `src0` and `dst` have the same shape and `src1` broadcasts along one
+axis, including the already-fused `ADD + GELU` path. The fallback gate is
+`GGML_CUDA_DISABLE_BIN_BCAST_AXIS_FAST=1`.
+
+Same-binary 1024 q4_0 bbox-only paired checks showed a small improvement:
+
+| Path | Track ms/frame mean | Median | Stdev | Min..Max |
+| --- | ---: | ---: | ---: | ---: |
+| Axis broadcast fast path disabled | `114.90` | `115.30` | `1.85` | `112.9..117.1` |
+| Axis broadcast fast path enabled | `113.64` | `113.50` | `1.09` | `112.2..115.2` |
+
+The paired mean delta is `1.26 ms/frame` (`1.11%`). This is below the larger
+Norm and Add+GELU fusions but still parity-preserving on the same 10-frame
+full-mask sample: `mask_hash_equal_rows=10/10`, `min_bbox_iou=1.0`,
+`max_bbox_delta_px=0.0`, `max_score_abs_delta=0.0`, and
+`max_abs_mask_area_rel_delta=0.0`.
+
 The same history pass checked other recent upstream or Metal-only candidates:
 `CONV_TRANSPOSE_1D` is not in the SAM2/Base+ graph, `OUT_PROD` and `SNAKE` are
 also absent, `DKQ=192,DV=128` FlashAttention support does not match the Hiera
@@ -1080,6 +1100,10 @@ outputs/root-perf-next/add-gelu-fusion/bbox_stats.json
 outputs/root-perf-next/add-gelu-fusion/fullmask/summary.json
 outputs/root-perf-next/add-gelu-fusion/profile/fused_profile_summary.json
 outputs/root-perf-next/add-gelu-fusion/profile/no_fusion_profile_summary.json
+outputs/root-perf-next/bin-bcast-axis/bbox_stats.json
+outputs/root-perf-next/bin-bcast-axis/fullmask/summary.json
+outputs/root-perf-next/metal-gap-refresh/q4_0_1024_hotspots.json
+outputs/root-perf-next/metal-gap-refresh/q4_0_1024_profile_summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

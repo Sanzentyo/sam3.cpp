@@ -780,6 +780,24 @@ sample. Full-mask JSONL output is identical between the separate and combined
 pack paths (`diff_rows=0/10`), so this is a launch-count optimization, not a new
 numeric approximation.
 
+Metal already fuses `NORM + MUL (+ ADD)` for affine layer normalization. CUDA
+had the equivalent RMSNorm fusion but not plain Norm fusion, even though Hiera
+uses plain `ggml_norm` before applying norm weights and biases. The CUDA backend
+now mirrors the Metal optimization for F32 Norm and keeps an A/B gate through
+`GGML_CUDA_DISABLE_NORM_FUSION=1`.
+
+Same-binary 1024 bbox-only paired checks showed a small, safe improvement:
+
+| Path | Track ms/frame mean | 95% CI | Median | Stdev |
+| --- | ---: | ---: | ---: | ---: |
+| Norm fusion disabled | `77.76` | `76.74..78.78` | `77.50` | `0.82` |
+| Norm fusion enabled | `77.24` | `76.82..77.66` | `77.20` | `0.34` |
+
+The paired mean delta is `0.52 ms/frame` (`0.67%`), with a wide 95% CI
+(`-0.13..1.17 ms/frame`), so this is not a large standalone win. It is still
+worth keeping because it removes two CUDA launches per fused Norm chain and the
+full-mask JSONL parity check is bit-identical (`diff_rows=0/10`).
+
 Changing the NVIDIA FP32 tile config for `head_dim=56,ncols=32` from
 `nbatch_fa=32` to `64` compiled and preserved full-mask parity on the 10-frame
 1024 q4_0 sample (`mask_hash_equal_rows=10/10`), but the measured speed change
@@ -1012,6 +1030,8 @@ outputs/fattn56-pad-mma/kv-f16/bbox_stats.json
 outputs/fattn56-pad-mma/kv-f16/fullmask_summary.json
 outputs/root-perf-next/fattn56-combined-pack/bbox_stats.json
 outputs/root-perf-next/fattn56-combined-pack/fullmask/summary.json
+outputs/root-perf-next/cuda-norm-fusion/bbox_stats.json
+outputs/root-perf-next/cuda-norm-fusion/fullmask/summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

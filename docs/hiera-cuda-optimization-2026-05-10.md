@@ -195,6 +195,22 @@ This makes the remaining target larger: matching PyTorch requires roughly a
 2x reduction in the steady C++ tracking path, not just removing the previous
 short-run outliers.
 
+After the ggml CUDA follow-ups for axis broadcast add, head_dim=56 packing,
+and same-shape contiguous binary ops, the latest matched rerun still does not
+overtake official PyTorch. This rerun uses the current default test video
+decoded at `960x540`; the source resolution differs from some earlier
+`1008x568` rows, so it should be read as the latest current-state speed check,
+not as a replacement for older profile attribution artifacts.
+
+| Encode size | C++ q4_0 track ms/frame | PyTorch bf16 track ms/frame | PyTorch/C++ ratio | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| 1024 | 116.0 | 64.53 | 0.556 | `outputs/model-matrix-latest-q4-1024/summary.json` |
+| 512 | 24.3 | 14.98 | 0.616 | `outputs/model-matrix-latest-q4-512/summary.json` |
+
+The conclusion is unchanged: C++ CUDA remains slower than official PyTorch on
+the matched input contract. At 1024 the current C++ path needs about `1.8x`
+speedup to match PyTorch, and at 512 it needs about `1.6x`.
+
 Official PyTorch was also instrumented with synchronized wrappers around
 `forward_image`, `track_step`, and `_run_memory_encoder`. These wrapper timings
 add synchronization overhead and are not the speed baseline, but they identify
@@ -682,11 +698,11 @@ parameters. The remaining gap is large enough that the next branch should treat
 
 `scripts/summarize_goal_audit.py` combines the matched C++/official-Python
 speed rows, official-Python quality checks, Hiera stage gap, and CUDA node
-hotspots into a single completion audit. The current audit artifact is
-`outputs/goal-audit/sam2-base-plus-cuda-vs-python.json`; it marks the profiling
-and prioritization work as complete, but keeps the overall objective
-`not_complete` because C++ is still slower than official PyTorch on matched
-512/1024 rows and Base+ mask quality is not at parity.
+hotspots into a single completion audit. The latest audit artifact is
+`outputs/goal-audit/latest-summary.json`; it marks the profiling and
+prioritization work as complete, but keeps the overall objective `not_complete`
+because C++ is still slower than official PyTorch on matched 512/1024 rows and
+Base+ mask quality is not at parity.
 
 The head_dim 56 tile column width was also tested. Forcing smaller tile widths
 was slower on the same 1024 q4_0 benchmark: 16 cols measured `112.5 ms/frame`,
@@ -1261,4 +1277,7 @@ outputs/python-official-profile/base_plus_1024.json
 outputs/python-official-profile/base_plus_512.json
 outputs/hiera-gap-priority/summary.json
 outputs/hiera-free-prev-state/q4_0_1024_profile_summary.json
+outputs/model-matrix-latest-q4-1024/summary.json
+outputs/model-matrix-latest-q4-512/summary.json
+outputs/goal-audit/latest-summary.json
 ```

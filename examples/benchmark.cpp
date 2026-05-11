@@ -330,6 +330,18 @@ static const sam3_detection* select_detection(
         result.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
 }
 
+static std::optional<size_t> selected_detection_index(
+    const sam3_result& result, std::optional<size_t> candidate_index = std::nullopt) {
+    if (result.detections.empty())
+        return std::nullopt;
+    if (candidate_index && *candidate_index < result.detections.size()) {
+        return candidate_index;
+    }
+    const auto best = std::ranges::max_element(
+        result.detections, {}, [](const sam3_detection& det) { return det.iou_score; });
+    return static_cast<size_t>(std::ranges::distance(result.detections.begin(), best));
+}
+
 static std::string json_escape(std::string_view value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -757,13 +769,14 @@ static BenchWire run_single_benchmark(const std::string& model_path,
 
     if (out.is_open() || candidate_out.is_open()) {
         sam3_result first = sam3_segment_pvs(*state, *model, pvs);
+        const auto selected_index = selected_detection_index(first, initial_candidate_index);
         if (out.is_open()) {
             const auto mask_path =
                 save_detection_mask(output_mask_dir, 0, first, initial_candidate_index);
             write_detection_row(&out, 0, 0, first, mask_path, initial_candidate_index);
         }
         write_initial_candidate_rows(
-            candidate_out.is_open() ? &candidate_out : nullptr, first, initial_candidate_index);
+            candidate_out.is_open() ? &candidate_out : nullptr, first, selected_index);
     }
 
     int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);

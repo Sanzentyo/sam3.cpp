@@ -78,6 +78,72 @@ def split_cpp_rows(rows: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, l
     return metadata, detections
 
 
+def selected_candidate(rows: list[dict[str, Any]]) -> int | None:
+    selected = [int(row["candidate_index"]) for row in rows if row.get("selected")]
+    if not selected:
+        return None
+    if len(selected) > 1:
+        raise ValueError(f"multiple selected candidates: {selected}")
+    return selected[0]
+
+
+def summarize_initial_candidates(
+    cpp_candidates_path: Path | None,
+    official_candidates_path: Path,
+) -> dict[str, Any]:
+    official_rows = [
+        row
+        for row in read_jsonl(official_candidates_path)
+        if row.get("source") == "official-sam2-initial-candidate"
+    ]
+    result: dict[str, Any] = {
+        "official_candidates": len(official_rows),
+        "official_selected_index": selected_candidate(official_rows),
+        "official_path": str(official_candidates_path),
+    }
+    if cpp_candidates_path is None:
+        result["status"] = "not_checked"
+        result["message"] = "pass --cpp-initial-candidates-jsonl to compare initial multimask selection"
+        return result
+
+    cpp_rows = [
+        row
+        for row in read_jsonl(cpp_candidates_path)
+        if row.get("source") == "sam3cpp-initial-candidate"
+    ]
+    cpp_by_index = {int(row["candidate_index"]): row for row in cpp_rows}
+    official_by_index = {int(row["candidate_index"]): row for row in official_rows}
+    common = sorted(set(cpp_by_index) & set(official_by_index))
+    per_candidate = []
+    for idx in common:
+        cpp = cpp_by_index[idx]
+        official = official_by_index[idx]
+        per_candidate.append(
+            {
+                "candidate_index": idx,
+                "cpp_iou_score": cpp.get("iou_score"),
+                "official_iou_score": official.get("iou_score"),
+                "cpp_mask_area": cpp.get("mask_area"),
+                "official_mask_area": official.get("mask_area"),
+                "bbox_iou": bbox_iou(cpp.get("bbox_xyxy"), official.get("bbox_xyxy")),
+            }
+        )
+
+    cpp_selected = selected_candidate(cpp_rows)
+    result.update(
+        {
+            "status": "checked",
+            "cpp_path": str(cpp_candidates_path),
+            "cpp_candidates": len(cpp_rows),
+            "cpp_selected_index": cpp_selected,
+            "candidate_count_match": len(cpp_rows) == len(official_rows),
+            "selected_index_match": cpp_selected == result["official_selected_index"],
+            "per_candidate": per_candidate,
+        }
+    )
+    return result
+
+
 def frame_size(frame_dir: Path) -> tuple[int, int]:
     first = sorted(frame_dir.glob("*.jpg"))[0]
     with Image.open(first) as img:
@@ -178,6 +244,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 import torch
+import torch.nn.functional as F
 
 sam2_repo = Path(sys.argv[1])
 checkpoint = sys.argv[2]
@@ -212,6 +279,27 @@ predictor = build_sam2_video_predictor(
 state = predictor.init_state(video_path=str(frame_dir))
 points = np.array([[point_x, point_y]], dtype=np.float32)
 labels = np.array([1], np.int32)
+captures = []
+original_forward = predictor._forward_sam_heads
+
+def bbox_from_bool_mask(mask):
+    ys, xs = np.where(mask)
+    if xs.size == 0:
+        return None
+    return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
+
+def wrapped_forward(*f_args, **f_kwargs):
+    out = original_forward(*f_args, **f_kwargs)
+    low_res_multimasks, high_res_multimasks, ious, *_ = out
+    if f_kwargs.get("point_inputs") is not None:
+        captures.append({
+            "multimask_output": bool(f_kwargs.get("multimask_output", False)),
+            "high_res_multimasks": high_res_multimasks.detach().float().cpu(),
+            "ious": ious.detach().float().cpu(),
+        })
+    return out
+
+predictor._forward_sam_heads = wrapped_forward
 
 def save_row(frame_idx, obj_ids, mask_logits, elapsed_ms=None):
     if frame_idx >= frames:
@@ -245,6 +333,44 @@ with torch.inference_mode():
     row = save_row(frame_idx, obj_ids, mask_logits)
     if row is not None:
         rows[int(frame_idx)] = row
+
+    if captures:
+        capture = captures[-1]
+        ious = capture["ious"][0]
+        selected_index = int(torch.argmax(ious).item())
+        frame_h, frame_w = mask_logits.shape[-2:]
+        resized = F.interpolate(
+            capture["high_res_multimasks"],
+            size=(frame_h, frame_w),
+            mode="bilinear",
+            align_corners=False,
+        )[0]
+        candidate_rows = []
+        candidate_dir = out_dir / "official_initial_candidates"
+        candidate_dir.mkdir(parents=True, exist_ok=True)
+        for candidate_index in range(resized.shape[0]):
+            mask = (resized[candidate_index].numpy() > 0.0)
+            path = candidate_dir / f"candidate_{candidate_index:02d}.png"
+            Image.fromarray(mask.astype(np.uint8) * 255).save(path)
+            candidate_rows.append({
+                "source": "official-sam2-initial-candidate",
+                "frame_index": int(frame_idx),
+                "candidate_index": int(candidate_index),
+                "selected_index": selected_index,
+                "selected": int(candidate_index) == selected_index,
+                "multimask_output": capture["multimask_output"],
+                "iou_score": float(ious[candidate_index].item()),
+                "mask_area": int(mask.sum()),
+                "bbox_xyxy": bbox_from_bool_mask(mask),
+                "mask_path": str(path),
+                "frame_width": int(frame_w),
+                "frame_height": int(frame_h),
+                "image_size": image_size if image_size > 0 else 1024,
+            })
+        (out_dir / "official-initial-candidates.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in candidate_rows),
+            encoding="utf-8",
+        )
     torch.cuda.synchronize()
     t0 = time.perf_counter()
     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(state):
@@ -316,6 +442,7 @@ def main() -> int:
     parser.add_argument("--repo", type=Path, default=Path.cwd())
     parser.add_argument("--video", type=Path, required=True)
     parser.add_argument("--cpp-jsonl", type=Path, required=True)
+    parser.add_argument("--cpp-initial-candidates-jsonl", type=Path)
     parser.add_argument("--sam2-repo", type=Path, default=Path("../sam2"))
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--config", default="configs/sam2.1/sam2.1_hiera_b+.yaml")
@@ -334,6 +461,8 @@ def main() -> int:
     args.repo = args.repo.resolve()
     args.video = args.video.resolve()
     args.cpp_jsonl = args.cpp_jsonl.resolve()
+    if args.cpp_initial_candidates_jsonl is not None:
+        args.cpp_initial_candidates_jsonl = args.cpp_initial_candidates_jsonl.resolve()
     args.sam2_repo = args.sam2_repo.resolve()
     args.checkpoint = args.checkpoint.resolve()
     args.out_dir = args.out_dir.resolve()
@@ -378,6 +507,10 @@ def main() -> int:
         "comparisons": comparisons,
         "python_summary": python_summary,
         "metadata_validation": metadata_validation,
+        "initial_candidate_comparison": summarize_initial_candidates(
+            args.cpp_initial_candidates_jsonl,
+            args.out_dir / "python_masks" / "official-initial-candidates.jsonl",
+        ),
         "comparison_contract": {
             "same_decoded_source_resolution": True,
             "decoded_source_width": source_width,

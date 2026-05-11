@@ -18,6 +18,7 @@ from PIL import Image
 
 
 SAM2_UV_DEPS = [
+    "decord",
     "numpy",
     "torch",
     "torchvision",
@@ -249,7 +250,7 @@ import torch.nn.functional as F
 sam2_repo = Path(sys.argv[1])
 checkpoint = sys.argv[2]
 cfg = sys.argv[3]
-frame_dir = Path(sys.argv[4])
+video_source = sys.argv[4]
 out_dir = Path(sys.argv[5])
 point_x = float(sys.argv[6])
 point_y = float(sys.argv[7])
@@ -276,7 +277,7 @@ predictor = build_sam2_video_predictor(
     vos_optimized=False,
     hydra_overrides_extra=overrides,
 )
-state = predictor.init_state(video_path=str(frame_dir))
+state = predictor.init_state(video_path=video_source)
 points = np.array([[point_x, point_y]], dtype=np.float32)
 labels = np.array([1], np.int32)
 captures = []
@@ -408,7 +409,7 @@ print(json.dumps({
             str(args.sam2_repo),
             str(args.checkpoint),
             args.config,
-            str(frame_dir),
+            str(args.video if args.python_video_source == "video" else frame_dir),
             str(out_dir / "python_masks"),
             str(args.point_x),
             str(args.point_y),
@@ -446,6 +447,12 @@ def main() -> int:
     parser.add_argument("--sam2-repo", type=Path, default=Path("../sam2"))
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--config", default="configs/sam2.1/sam2.1_hiera_b+.yaml")
+    parser.add_argument(
+        "--python-video-source",
+        choices=("video", "frames"),
+        default="video",
+        help="Feed official SAM2 either the original video file or extracted JPEG frames.",
+    )
     parser.add_argument("--frames", type=int, default=10)
     parser.add_argument(
         "--image-size",
@@ -518,6 +525,7 @@ def main() -> int:
             "same_frame_count": True,
             "same_point_prompt": True,
             "same_encode_img_size": True,
+            "python_video_source": args.python_video_source,
             "note": (
                 "C++/official PyTorch speed or quality rows are directly comparable "
                 "only when the decoded source-frame resolution and SAM model input "

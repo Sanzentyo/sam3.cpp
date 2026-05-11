@@ -924,6 +924,15 @@ total tracking stayed at `98.8 ms/frame`. This was reverted; the CPU loop is not
 currently limited by the per-pixel normalize arithmetic enough for this
 micro-optimization to matter.
 
+A separable two-pass CPU bilinear resize was checked as another preprocessing
+candidate. It preserved full-mask output exactly (`mask_hash_equal_rows=10/10`,
+`min_bbox_iou=1.0`), but did not reduce preprocessing: the measured
+`hiera_encode_preprocess` mean moved from `7.34 ms` to `7.73 ms` on the
+10-frame 1024 q4_0 run. The apparent total-track difference came from Hiera
+compute variance, so this path was reverted. The remaining preprocessing target
+is still a fused GPU resize/normalize/upload path rather than more CPU loop
+restructuring.
+
 Changing Hiera qkv/proj/MLP/patch-embed broadcast bias adds to
 `ggml_add_inplace` preserved full-mask parity at both 1024 and 512
 (`mask_hash_equal_rows=10/10` for each), but did not improve speed. The paired
@@ -1255,6 +1264,9 @@ outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json
 outputs/preprocess-norm-lut/fullmask_parity.json
 outputs/preprocess-norm-lut/lut_profile_summary.json
+outputs/preprocess-separable/fullmask_compare.json
+outputs/preprocess-separable/default/profile_summary.json
+outputs/preprocess-separable/separable/profile_summary.json
 outputs/hiera-inplace-bias/q4_0_1024_parity.json
 outputs/hiera-inplace-bias/q4_0_512_parity.json
 outputs/model-matrix-current-rerun-1024/summary.json

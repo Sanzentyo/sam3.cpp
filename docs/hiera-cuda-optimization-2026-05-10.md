@@ -358,6 +358,23 @@ official PyTorch:
 | 1024 | 111.4 | 68.24 | 0.613 | `outputs/model-matrix-cuda-preprocess-q4-1024/summary.json` |
 | 512 | 22.5 | 14.55 | 0.647 | `outputs/model-matrix-cuda-preprocess-q4-512/summary.json` |
 
+Additional root-level follow-ups on 2026-05-11 did not produce an accepted
+speedup:
+
+| Candidate | Result | Decision | Evidence |
+| --- | --- | --- | --- |
+| Merge current `ggml-org/ggml` upstream CUDA changes | Build required resolving local head56 conflicts; matched 1024 row was `112.3 ms/frame` C++ vs `68.91 ms/frame` PyTorch | Rejected; no speed gain over the current `111.4 ms/frame` CUDA-preprocess baseline | `outputs/upstream-merge/model-matrix-q4-1024/summary.json` |
+| Keep Hiera graph allocation alive and use FPN outputs directly as state tensors | Full parity passed, but matched 1024 row regressed to `129.9 ms/frame` | Rejected; retaining the large Hiera allocation hurts the following propagation path more than it saves copy time | `outputs/hiera-retain-graph/model-matrix-q4-1024/summary.json` |
+| Alias Hiera positional embedding graph input to the cached backend tensor | Full-mask parity was exact (`mask_hash_equal_rows=10/10`), but five paired bbox-only runs saved only `0.74 ms/frame` on average | Rejected; the small gain does not justify mutating internal ggml tensor buffer/data pointers | `outputs/hiera-alias-pos/compare.json`, `outputs/hiera-alias-pos/ab/` |
+
+These results narrow the remaining useful work. Avoid broad upstream merges or
+state-lifetime rewrites unless they are tied to a measured Hiera hotspot. The
+first-priority CUDA target remains the steady 1024 Hiera graph body:
+`head_dim=56` FlashAttention and the repeated q4 stage-2 MLP matmul shapes.
+Secondary work can target small graph-input copies only after the Hiera kernel
+gap is reduced, because those copies are now below the scale required to catch
+official PyTorch.
+
 ## Detailed Profile
 
 After backend neck PE reuse, Base+ q4_0 still spends most of steady-state frame

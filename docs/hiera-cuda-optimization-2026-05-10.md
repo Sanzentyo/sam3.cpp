@@ -937,6 +937,17 @@ Blackwell also regressed: `256` threads raised global D56 MMA to about
 `128` thread, `nbatch_fa=64` config remains the best measured setting on the
 RTX 5070 Ti Laptop GPU so far.
 
+The CUDA binary broadcast path now has a same-shape contiguous fast path for
+ordinary binary ops. This is the CUDA analogue of avoiding unnecessary index
+unraveling for non-broadcast elementwise work. It is gated by
+`GGML_CUDA_DISABLE_BIN_CONTIGUOUS_FAST=1`. Full-mask parity against the generic
+binary path is exact on the 10-frame 1024 q4_0 sample
+(`mask_hash_equal_rows=10/10`). Node profiling shows the intended ADD reduction:
+`ADD sum_ms_drop_max` moved from `41.78` to `37.31 ms` on the 3-frame 1024
+profile. The normal five-pair bbox timing is a small improvement,
+`113.4 -> 113.0 ms/frame` (`0.35%`), so this is useful hygiene but not a
+PyTorch-closing change.
+
 An attempted MMQ `MUL_MAT + ADD(bias)` fusion was rejected. Switching the
 fusion matcher from CUDA same-shape fusion to generic adjacency made the
 intended Base+ q4_0 MMQ nodes fire in the CUDA node profile, including the
@@ -1181,6 +1192,10 @@ outputs/root-perf-next/fattn56-stage-profile/q4_0_1024_nb.log
 outputs/root-perf-next/fattn56-qk-v-pack/
 outputs/root-perf-next/fattn64-config-256t/
 outputs/root-perf-next/fattn64-config-nbatch128/
+outputs/root-perf-next/bin-contiguous-fast/fullmask/summary.json
+outputs/root-perf-next/bin-contiguous-fast/bbox/stats.json
+outputs/root-perf-next/bin-contiguous-fast/profile/enabled_summary.json
+outputs/root-perf-next/bin-contiguous-fast/profile/disabled_summary.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

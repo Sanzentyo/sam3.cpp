@@ -948,6 +948,15 @@ profile. The normal five-pair bbox timing is a small improvement,
 `113.4 -> 113.0 ms/frame` (`0.35%`), so this is useful hygiene but not a
 PyTorch-closing change.
 
+MMQ tile-size retuning was also checked for the q4 Hiera MLP hotspot. Changing
+NVIDIA `mmq_y` from `128` to `64` is not viable as a global setting: existing
+MMA MMQ template instantiations assert that the writeback tile height matches
+the selected warp/tile shape. Capping `mmq_x` at runtime was buildable, but not
+faster on the 1024 Base+ q4_0 bbox run: default `128` averaged
+`114.0 ms/frame`, cap `96` averaged `114.3 ms/frame`, and cap `64` averaged
+`116.3 ms/frame`. The existing MMQ x/y selection remains the best measured
+setting for these shapes.
+
 An attempted MMQ `MUL_MAT + ADD(bias)` fusion was rejected. Switching the
 fusion matcher from CUDA same-shape fusion to generic adjacency made the
 intended Base+ q4_0 MMQ nodes fire in the CUDA node profile, including the
@@ -1196,6 +1205,7 @@ outputs/root-perf-next/bin-contiguous-fast/fullmask/summary.json
 outputs/root-perf-next/bin-contiguous-fast/bbox/stats.json
 outputs/root-perf-next/bin-contiguous-fast/profile/enabled_summary.json
 outputs/root-perf-next/bin-contiguous-fast/profile/disabled_summary.json
+outputs/root-perf-next/mmq-x-cap/bbox/stats.json
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

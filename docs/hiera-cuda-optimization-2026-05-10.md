@@ -888,6 +888,33 @@ unchanged at 512 (`34 -> 34 ms/frame`), so this graph cleanup was reverted.
 The remaining Hiera target is still kernel time, especially head_dim 56
 FlashAttention, not add-node allocation style.
 
+The head_dim 56 FlashAttention padded-MMA path was also tightened for the
+common contiguous Hiera layout. The existing path already combines Q/K/V packing
+and converts K/V directly to f16 before running the D64 MMA kernel. The new
+contiguous pack/slice kernels avoid the generic stride decomposition for this
+layout while preserving the generic fallback through
+`GGML_CUDA_DISABLE_FATTN56_CONTIGUOUS_PACK=1`.
+
+Standalone D56 checks still pass for both profiled shapes:
+`N=196, heads=8, batch=25` and `N=4096, heads=8, batch=1` both report
+`bad=0`. Full-mask JSONL parity against the generic pack/slice path is
+bit-identical on the 10-frame 1024 q4_0 sample:
+`mask_hash_equal_rows=10/10`, `min_bbox_iou=1.0`,
+`max_bbox_delta_px=0.0`, and `max_score_abs_delta=0.0`.
+
+Same-binary bbox-only paired checks show a small but non-negative improvement:
+
+| Path | Track ms/frame mean | Median | Stdev | Min..Max |
+| --- | ---: | ---: | ---: | ---: |
+| Generic head56 pack/slice | `115.00` | `115.00` | `1.22` | `114.0..117.0` |
+| Contiguous head56 pack/slice | `114.20` | `114.00` | `0.45` | `114.0..115.0` |
+
+The paired mean delta is `0.80 ms/frame` (`0.70%`). The larger comparison is
+still the padded-MMA path versus the original generic tile path: current A/B
+shows `131.0 -> 115.0 ms/frame`, or about `13.9%`, so the padded-MMA strategy
+remains the correct baseline while further work should target the D56
+attention kernel itself.
+
 Precision alone does not explain the quality gap, but precision affects the
 multimask candidate scoring. Re-running the same default 1024 comparison across
 Base+ precisions without fixing candidate selection gave similarly poor
@@ -1104,6 +1131,9 @@ outputs/root-perf-next/bin-bcast-axis/bbox_stats.json
 outputs/root-perf-next/bin-bcast-axis/fullmask/summary.json
 outputs/root-perf-next/metal-gap-refresh/q4_0_1024_hotspots.json
 outputs/root-perf-next/metal-gap-refresh/q4_0_1024_profile_summary.json
+outputs/root-perf-next/fattn56-contiguous-pack/bbox_stats.json
+outputs/root-perf-next/fattn56-contiguous-pack/fullmask/summary.json
+outputs/root-perf-next/fattn56-current-ab/
 outputs/preprocess-float-resize/fullmask_parity.json
 outputs/preprocess-float-resize/default_profile_summary.json
 outputs/preprocess-float-resize/float_profile_summary.json

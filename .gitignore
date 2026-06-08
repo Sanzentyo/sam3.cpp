@@ -40,3 +40,6 @@ outputs/
 
 # Test data
 data/
+
+# Local external checkouts used for parity/debugging
+external/

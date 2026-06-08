@@ -9,18 +9,119 @@ The tokenizer (vocab.json + merges.txt) is embedded in the output file.
 """
 
 import argparse
+import json
 import struct
 import sys
 import os
 import re
+from collections import Counter
 import numpy as np
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 MAGIC   = 0x73616D33   # "sam3"
-VERSION = 3
+VERSION = 4
 FTYPE_F32 = 0
 FTYPE_F16 = 1
+FTYPE_BF16 = 24
+GGML_TYPE_BF16 = 30
+MODEL_TYPE_SAM3 = 0
+MODEL_TYPE_SAM3_VISUAL = 1
+MODEL_TYPE_SAM31 = 4
+
+SAM31_CONTRACT = {
+    "model_type": "sam3.1",
+    "image_size": 1008,
+    "backbone_stride": 14,
+    "multiplex_count": 16,
+    "eval_multiplex_count": 16,
+    "max_num_objects": 16,
+    "num_maskmem": 7,
+    "max_obj_ptrs_in_encoder": 16,
+    "tracker_mem_dim": 256,
+    "num_multimask_outputs": 3,
+    "multimask_output_in_sam": True,
+    "propagation_masks_per_object": 3,
+    "propagation_mask_token_count": 48,
+    "propagation_output_token_count": 80,
+    "use_obj_ptrs_in_encoder": True,
+    "use_high_res_features_in_sam": True,
+    "is_dynamic_multiplex": True,
+}
+
+
+def detect_sam31_checkpoint(keys) -> bool:
+    """Return True for SAM3.1 Object Multiplex checkpoints."""
+    key_set = set(keys)
+    return (
+        any(k.startswith("tracker.model.") for k in key_set)
+        or any(".interactive_convs." in k for k in key_set)
+        or any(".propagation_convs." in k for k in key_set)
+        or "tracker.model.output_valid_embed" in key_set
+    )
+
+
+def print_checkpoint_summary(ckpt: dict, *, max_keys: int = 40) -> None:
+    """Print a compact checkpoint inventory for converter bring-up."""
+    keys = list(ckpt)
+    print(f"Checkpoint has {len(keys)} tensors")
+    print(f"SAM3.1 Object Multiplex detected: {detect_sam31_checkpoint(keys)}")
+    print("Top-level prefixes:")
+    for prefix, count in Counter(k.split(".", 1)[0] for k in keys).most_common(20):
+        print(f"  {prefix}: {count}")
+    print("First tensors:")
+    for key in keys[:max_keys]:
+        value = ckpt[key]
+        shape = list(value.shape) if hasattr(value, "shape") else type(value).__name__
+        print(f"  {key}  {shape}")
+
+
+def checkpoint_inventory(ckpt: dict) -> dict:
+    """Build a machine-readable checkpoint inventory for converter bring-up."""
+    keys = list(ckpt)
+    renamed = []
+    skipped = []
+    tensors = []
+    for key in keys:
+        value = ckpt[key]
+        new_name = rename_key(key)
+        if new_name is None:
+            skipped.append(key)
+        else:
+            renamed.append(new_name)
+        shape = list(value.shape) if hasattr(value, "shape") else None
+        dtype = str(value.dtype) if hasattr(value, "dtype") else type(value).__name__
+        numel = int(value.numel()) if hasattr(value, "numel") else None
+        tensors.append({
+            "key": key,
+            "renamed": new_name,
+            "shape": shape,
+            "dtype": dtype,
+            "numel": numel,
+        })
+
+    top_prefixes = Counter(k.split(".", 1)[0] for k in keys)
+    second_prefixes = Counter(".".join(k.split(".")[:2]) for k in keys if "." in k)
+    sam31_markers = {
+        "output_valid_embed": "tracker.model.output_valid_embed" in keys,
+        "output_invalid_embed": "tracker.model.output_invalid_embed" in keys,
+        "interactive_convs": any(".interactive_convs." in k for k in keys),
+        "propagation_convs": any(".propagation_convs." in k for k in keys),
+        "tracker_model": any(k.startswith("tracker.model.") for k in keys),
+    }
+
+    return {
+        "num_tensors": len(keys),
+        "sam31_detected": detect_sam31_checkpoint(keys),
+        "sam31_contract": SAM31_CONTRACT if detect_sam31_checkpoint(keys) else None,
+        "top_prefixes": dict(top_prefixes.most_common()),
+        "second_prefixes": dict(second_prefixes.most_common()),
+        "renamed_tensors": len(renamed),
+        "skipped_tensors": len(skipped),
+        "skipped_keys": skipped,
+        "sam31_markers": sam31_markers,
+        "tensors": tensors,
+    }
 
 # ── Hyperparameter defaults ───────────────────────────────────────────────────
 
@@ -199,16 +300,34 @@ def rename_key(k: str) -> str | None:
 
 # ── I/O helpers ───────────────────────────────────────────────────────────────
 
-def write_header(fout, ftype: int, n_tensors: int, visual_only: bool = False):
+def write_header(
+    fout,
+    ftype: int,
+    n_tensors: int,
+    visual_only: bool = False,
+    model_type: int = MODEL_TYPE_SAM3,
+):
     """Write file header: magic, version, ftype, n_tensors, hparams."""
     fout.write(struct.pack("<I", MAGIC))
     fout.write(struct.pack("<i", VERSION))
     fout.write(struct.pack("<i", ftype))
     fout.write(struct.pack("<i", n_tensors))
+    if visual_only and model_type != MODEL_TYPE_SAM31:
+        model_type = MODEL_TYPE_SAM3_VISUAL
     for name, val in HPARAMS_FIELDS:
         if name == "visual_only" and visual_only:
             val = 1
         fout.write(struct.pack("<i", val))
+    fout.write(struct.pack("<i", model_type))
+
+
+def fp32_to_bf16_bytes(data: np.ndarray) -> bytes:
+    """Return round-to-nearest-even BF16 storage bytes for float32 data."""
+    f32 = data.astype(np.float32, copy=False)
+    u32 = f32.view(np.uint32)
+    lsb = (u32 >> 16) & 1
+    rounded = u32 + np.uint32(0x7FFF) + lsb.astype(np.uint32)
+    return (rounded >> 16).astype(np.uint16).tobytes()
 
 
 def write_tensor(fout, name: str, data: np.ndarray, ftype: int):
@@ -218,23 +337,29 @@ def write_tensor(fout, name: str, data: np.ndarray, ftype: int):
 
     # Determine storage dtype
     # 1D tensors, embeddings, and positions → always f32
-    use_f16 = (ftype == FTYPE_F16 and n_dims >= 2
-               and "embed" not in name
-               and "pos_embed" not in name
-               and "tpos" not in name
-               and "pe_gaussian" not in name
-               and "freqs_cis" not in name
-               and "token" not in name
-               and "no_obj" not in name
-               and "no_mem" not in name
-               and "gamma" not in name)
+    use_lowp = (ftype in (FTYPE_F16, FTYPE_BF16) and n_dims >= 2
+                and "embed" not in name
+                and "pos_embed" not in name
+                and "tpos" not in name
+                and "pe_gaussian" not in name
+                and "freqs_cis" not in name
+                and "token" not in name
+                and "no_obj" not in name
+                and "no_mem" not in name
+                and "gamma" not in name)
 
-    dtype_id = FTYPE_F16 if use_f16 else FTYPE_F32
-
-    if use_f16:
+    if use_lowp and ftype == FTYPE_F16:
+        dtype_id = FTYPE_F16
         data = data.astype(np.float16)
-    else:
+        payload = data.tobytes()
+    elif use_lowp and ftype == FTYPE_BF16:
+        dtype_id = GGML_TYPE_BF16
         data = data.astype(np.float32)
+        payload = fp32_to_bf16_bytes(data)
+    else:
+        dtype_id = FTYPE_F32
+        data = data.astype(np.float32)
+        payload = data.tobytes()
 
     # Write: n_dims, name_len, dtype, shape (reversed), name, padding, data
     fout.write(struct.pack("<i", n_dims))
@@ -252,7 +377,7 @@ def write_tensor(fout, name: str, data: np.ndarray, ftype: int):
     pad = (32 - pos % 32) % 32
     fout.write(b"\x00" * pad)
 
-    fout.write(data.tobytes())
+    fout.write(payload)
 
 
 # ── Tokenizer embedding ──────────────────────────────────────────────────────
@@ -308,15 +433,25 @@ def write_tokenizer(fout, tokenizer_dir: str):
 def main():
     parser = argparse.ArgumentParser(description="Convert SAM3 checkpoint to ggml format")
     parser.add_argument("--model",  required=True, help="Path to sam3.pt")
-    parser.add_argument("--output", required=True, help="Output .ggml path")
-    parser.add_argument("--ftype",  type=int, default=1, choices=[0, 1],
-                        help="0=f32, 1=f16 (default)")
+    parser.add_argument("--output", help="Output .ggml path")
+    parser.add_argument("--ftype",  type=int, default=1, choices=[FTYPE_F32, FTYPE_F16, FTYPE_BF16],
+                        help="0=f32, 1=f16 (default), 24=bf16")
     parser.add_argument("--visual-only", action="store_true",
                         help="Strip text encoder and detector-only components")
+    parser.add_argument("--sam31", action="store_true",
+                        help="Treat input as SAM3.1 Object Multiplex. Conversion is not implemented yet.")
+    parser.add_argument("--sam31-mask-decoder-only", action="store_true",
+                        help="For SAM3.1, write only tracker.model.sam_mask_decoder tensors.")
+    parser.add_argument("--inspect-only", action="store_true",
+                        help="Print checkpoint summary and exit without writing a ggml file")
+    parser.add_argument("--inspect-json",
+                        help="Write a machine-readable checkpoint inventory JSON")
     parser.add_argument("--tokenizer", default=None,
                         help="Directory containing vocab.json + merges.txt "
                              "(default: same directory as --model)")
     args = parser.parse_args()
+    if not args.inspect_only and not args.inspect_json and not args.output:
+        parser.error("--output is required unless --inspect-only or --inspect-json is used")
 
     import torch
 
@@ -327,7 +462,22 @@ def main():
     if "model" in ckpt and isinstance(ckpt["model"], dict):
         ckpt = ckpt["model"]
 
-    print(f"Checkpoint has {len(ckpt)} tensors")
+    print_checkpoint_summary(ckpt)
+    is_sam31 = detect_sam31_checkpoint(ckpt.keys())
+    if args.inspect_json:
+        with open(args.inspect_json, "w", encoding="utf-8") as fout:
+            json.dump(checkpoint_inventory(ckpt), fout, indent=2, sort_keys=True)
+            fout.write("\n")
+        print(f"Wrote checkpoint inventory JSON: {args.inspect_json}")
+    if args.inspect_only:
+        return
+    convert_as_sam31 = args.sam31 or is_sam31
+    if convert_as_sam31:
+        print(
+            "SAM3.1 Object Multiplex conversion enabled: writing v4 model_type=sam3.1 "
+            "with native tracker tensor names. Full C++ graph execution is still being added.",
+            file=sys.stderr,
+        )
 
     # ── First pass: rename keys, skip unwanted tensors ────────────────────
     renamed = {}
@@ -367,6 +517,20 @@ def main():
         for s in skipped[:10]:
             print(f"    {s}")
 
+    if args.sam31_mask_decoder_only:
+        if not convert_as_sam31:
+            parser.error("--sam31-mask-decoder-only requires --sam31 or a SAM3.1 checkpoint")
+        full_count = len(renamed)
+        renamed = {
+            name: data
+            for name, data in renamed.items()
+            if name.startswith("trk.model.sam_mask_decoder.")
+        }
+        print(
+            f"\n--sam31-mask-decoder-only: kept {len(renamed)} of {full_count} "
+            "SAM3.1 tensors"
+        )
+
     # ── Visual-only filtering ─────────────────────────────────────────────
     if args.visual_only:
         full_count = len(renamed)
@@ -390,15 +554,21 @@ def main():
     print(f"\nWriting {args.output} (ftype={args.ftype}) ...")
 
     with open(args.output, "wb") as fout:
-        write_header(fout, args.ftype, len(renamed), visual_only=args.visual_only)
+        write_header(
+            fout,
+            args.ftype,
+            len(renamed),
+            visual_only=args.visual_only or convert_as_sam31,
+            model_type=MODEL_TYPE_SAM31 if convert_as_sam31 else MODEL_TYPE_SAM3,
+        )
 
         for i, (name, data) in enumerate(renamed.items()):
             write_tensor(fout, name, data, args.ftype)
             if (i + 1) % 100 == 0 or i == len(renamed) - 1:
                 print(f"  [{i+1}/{len(renamed)}] {name}  {list(data.shape)}")
 
-        # Embed tokenizer for non-visual-only models
-        if not args.visual_only:
+        # Embed tokenizer for non-visual-only SAM3 models.
+        if not args.visual_only and not convert_as_sam31:
             tok_dir = args.tokenizer if args.tokenizer else os.path.dirname(os.path.abspath(args.model))
             write_tokenizer(fout, tok_dir)
 

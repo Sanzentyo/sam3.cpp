@@ -5,8 +5,8 @@
 #   "iopath",
 #   "numpy",
 #   "pillow",
-#   "torch",
-#   "torchvision",
+#   "torch==2.8.0",
+#   "torchvision==0.23.0",
 #   "tqdm",
 # ]
 # ///

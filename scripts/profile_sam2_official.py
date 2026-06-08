@@ -1,12 +1,13 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
+#   "decord",
 #   "hydra-core",
 #   "iopath",
 #   "numpy",
 #   "pillow",
-#   "torch",
-#   "torchvision",
+#   "torch==2.8.0",
+#   "torchvision==0.23.0",
 #   "tqdm",
 # ]
 # ///
@@ -66,16 +67,31 @@ def main() -> int:
     parser.add_argument("--frames", type=int, default=10)
     parser.add_argument("--point-x", type=float, default=315.0)
     parser.add_argument("--point-y", type=float, default=250.0)
+    parser.add_argument(
+        "--python-dtype",
+        choices=("bf16", "fp32"),
+        default="bf16",
+        help="Use bf16 autocast or strict fp32 for the official PyTorch run.",
+    )
+    parser.add_argument(
+        "--tf32-policy",
+        choices=("on", "off"),
+        default="on",
+        help="Enable or disable PyTorch TF32 matmul/cuDNN. Use off with --python-dtype fp32 for Strict FP32.",
+    )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
     sys.path.insert(0, str(args.sam2_repo))
     from sam2.build_sam import build_sam2_video_predictor
 
-    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-    if torch.cuda.get_device_properties(0).major >= 8:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    if args.python_dtype == "bf16":
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+    allow_tf32 = args.tf32_policy == "on"
+    torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+    torch.backends.cudnn.allow_tf32 = allow_tf32
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
 
     overrides = []
     if args.image_size > 0:
@@ -140,7 +156,11 @@ def main() -> int:
     result = run_once(measure=True)
     result.update(
         {
-            "backend": "PyTorch CUDA bf16",
+            "backend": f"PyTorch CUDA {args.python_dtype}",
+            "python_dtype": args.python_dtype,
+            "tf32_policy": args.tf32_policy,
+            "torch_allow_tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
+            "torch_allow_tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
             "frames": args.frames,
             "image_size": args.image_size if args.image_size > 0 else 1024,
             "cuda_alloc_mib": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),

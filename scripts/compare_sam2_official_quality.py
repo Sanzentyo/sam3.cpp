@@ -20,11 +20,12 @@ from PIL import Image
 SAM2_UV_DEPS = [
     "decord",
     "numpy",
-    "torch",
-    "torchvision",
+    "torch==2.8.0",
+    "torchvision==0.23.0",
     "tqdm",
     "hydra-core",
     "iopath",
+    "opencv-python-headless",
     "pillow",
 ]
 
@@ -86,6 +87,19 @@ def selected_candidate(rows: list[dict[str, Any]]) -> int | None:
     if len(selected) > 1:
         raise ValueError(f"multiple selected candidates: {selected}")
     return selected[0]
+
+
+def cpp_candidate_space_index(row: dict[str, Any]) -> int | None:
+    selected = row.get("selected_mask_index")
+    if selected is None:
+        return None
+    selected = int(selected)
+    if selected < 0:
+        return None
+    scores = row.get("decoder_iou_scores") or []
+    if len(scores) == 4 and selected >= 1:
+        return selected - 1
+    return selected
 
 
 def summarize_initial_candidates(
@@ -182,6 +196,18 @@ def validate_cpp_metadata(
     }
     result["metadata"] = metadata
     result["checks"] = checks
+    cxx_input_source = metadata.get("input_source", "unknown")
+    result["input_source"] = {
+        "cpp": cxx_input_source,
+        "python": args.python_video_source,
+        "same_kind": cxx_input_source == args.python_video_source
+        or (cxx_input_source == "frame_dir" and args.python_video_source == "frames"),
+    }
+    if args.python_video_source == "frames" and cxx_input_source != "frame_dir":
+        result["input_source"]["warning"] = (
+            "Python used extracted frame images while C++ metadata does not report frame_dir input; "
+            "pixel decode/resize differences may affect mask IoU."
+        )
     failed = [name for name, ok in checks.items() if not ok]
     if failed:
         result["status"] = "failed"
@@ -256,19 +282,30 @@ point_x = float(sys.argv[6])
 point_y = float(sys.argv[7])
 frames = int(sys.argv[8])
 image_size = int(sys.argv[9])
+python_dtype = sys.argv[10]
+save_python_logits = bool(int(sys.argv[11]))
+extra_overrides = json.loads(sys.argv[12])
+python_fill_hole_area = int(sys.argv[13])
+python_binarize_cond_mem = sys.argv[14]
+save_python_mem_mask = bool(int(sys.argv[15]))
+tf32_policy = sys.argv[16]
 
 sys.path.insert(0, str(sam2_repo))
 from sam2.build_sam import build_sam2_video_predictor
 
 out_dir.mkdir(parents=True, exist_ok=True)
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
-if torch.cuda.get_device_properties(0).major >= 8:
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+if python_dtype == "bf16":
+    torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+allow_tf32 = tf32_policy == "on"
+torch.backends.cuda.matmul.allow_tf32 = allow_tf32
+torch.backends.cudnn.allow_tf32 = allow_tf32
+if hasattr(torch, "set_float32_matmul_precision"):
+    torch.set_float32_matmul_precision("high" if allow_tf32 else "highest")
 
 overrides = []
 if image_size > 0:
     overrides.append(f"model.image_size={image_size}")
+overrides.extend(extra_overrides)
 
 predictor = build_sam2_video_predictor(
     cfg,
@@ -277,6 +314,60 @@ predictor = build_sam2_video_predictor(
     vos_optimized=False,
     hydra_overrides_extra=overrides,
 )
+if python_fill_hole_area >= 0:
+    predictor.fill_hole_area = python_fill_hole_area
+if python_binarize_cond_mem != "default":
+    predictor.binarize_mask_from_pts_for_mem_enc = python_binarize_cond_mem == "true"
+mem_mask_counter = 0
+original_run_memory_encoder = predictor._run_memory_encoder
+
+def save_mem_mask(frame_idx, mask_for_mem, is_mask_from_pts):
+    global mem_mask_counter
+    if not save_python_mem_mask:
+        return
+    mem_dir = out_dir / "python_mem_masks"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    arr = mask_for_mem.detach().float().cpu().contiguous().numpy()
+    stem = mem_dir / (
+        f"frame_{int(frame_idx):05d}_call_{mem_mask_counter:03d}_"
+        f"frompts{int(bool(is_mask_from_pts))}"
+    )
+    arr.tofile(stem.with_suffix(".bin"))
+    stem.with_suffix(".shape").write_text(
+        " ".join(str(dim) for dim in arr.shape) + "\n",
+        encoding="utf-8",
+    )
+    mem_mask_counter += 1
+
+def wrapped_run_memory_encoder(*m_args, **m_kwargs):
+    frame_idx = m_kwargs.get("frame_idx")
+    high_res_masks = m_kwargs.get("high_res_masks")
+    is_mask_from_pts = m_kwargs.get("is_mask_from_pts", False)
+    if high_res_masks is None and len(m_args) >= 4:
+        frame_idx = m_args[1]
+        high_res_masks = m_args[3]
+        is_mask_from_pts = m_args[5] if len(m_args) >= 6 else False
+    if save_python_mem_mask and high_res_masks is not None and frame_idx is not None:
+        with torch.no_grad():
+            mask_for_mem = high_res_masks.detach()
+            if predictor.non_overlap_masks_for_mem_enc and not predictor.training:
+                mask_for_mem = predictor._apply_non_overlapping_constraints(mask_for_mem)
+            if (
+                predictor.binarize_mask_from_pts_for_mem_enc
+                and is_mask_from_pts
+                and not predictor.training
+            ):
+                mask_for_mem = (mask_for_mem > 0).float()
+            else:
+                mask_for_mem = torch.sigmoid(mask_for_mem)
+            if predictor.sigmoid_scale_for_mem_enc != 1.0:
+                mask_for_mem = mask_for_mem * predictor.sigmoid_scale_for_mem_enc
+            if predictor.sigmoid_bias_for_mem_enc != 0.0:
+                mask_for_mem = mask_for_mem + predictor.sigmoid_bias_for_mem_enc
+            save_mem_mask(frame_idx, mask_for_mem, is_mask_from_pts)
+    return original_run_memory_encoder(*m_args, **m_kwargs)
+
+predictor._run_memory_encoder = wrapped_run_memory_encoder
 state = predictor.init_state(video_path=video_source)
 points = np.array([[point_x, point_y]], dtype=np.float32)
 labels = np.array([1], np.int32)
@@ -289,20 +380,31 @@ def bbox_from_bool_mask(mask):
         return None
     return [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
 
+def tensor_floats(tensor):
+    return [float(v) for v in tensor.flatten().tolist()]
+
+def tensor_mask_areas(tensor):
+    return [int((mask > 0.0).sum().item()) for mask in tensor]
+
 def wrapped_forward(*f_args, **f_kwargs):
     out = original_forward(*f_args, **f_kwargs)
     low_res_multimasks, high_res_multimasks, ious, *_ = out
-    if f_kwargs.get("point_inputs") is not None:
-        captures.append({
-            "multimask_output": bool(f_kwargs.get("multimask_output", False)),
-            "high_res_multimasks": high_res_multimasks.detach().float().cpu(),
-            "ious": ious.detach().float().cpu(),
-        })
+    ious_cpu = ious.detach().float().cpu()
+    low_res_cpu = low_res_multimasks.detach().float().cpu()
+    captures.append({
+        "multimask_output": bool(f_kwargs.get("multimask_output", False)),
+        "has_point_inputs": f_kwargs.get("point_inputs") is not None,
+        "low_res_candidate_areas": tensor_mask_areas(low_res_cpu[0]),
+        "high_res_multimasks": high_res_multimasks.detach().float().cpu(),
+        "ious": ious_cpu,
+        "selected_mask_index": int(torch.argmax(ious_cpu[0]).item()) if ious_cpu.numel() else -1,
+        "iou_scores": tensor_floats(ious_cpu[0]),
+    })
     return out
 
 predictor._forward_sam_heads = wrapped_forward
 
-def save_row(frame_idx, obj_ids, mask_logits, elapsed_ms=None):
+def save_row(frame_idx, obj_ids, mask_logits, elapsed_ms=None, capture=None):
     if frame_idx >= frames:
         return None
     obj_index = 0
@@ -313,7 +415,7 @@ def save_row(frame_idx, obj_ids, mask_logits, elapsed_ms=None):
     path = out_dir / f"frame_{frame_idx:05d}.png"
     Image.fromarray(mask).save(path)
     area = int((mask > 127).sum())
-    return {
+    row = {
         "offset": int(frame_idx),
         "expected_frame_index": int(frame_idx),
         "mask_path": str(path),
@@ -321,6 +423,25 @@ def save_row(frame_idx, obj_ids, mask_logits, elapsed_ms=None):
         "elapsed_ms": elapsed_ms,
         "source": "official-sam2",
     }
+    if save_python_logits:
+        logits_dir = out_dir / "python_logits"
+        logits_dir.mkdir(parents=True, exist_ok=True)
+        logits = mask_logits[obj_index].detach().float().cpu().squeeze().contiguous().numpy()
+        logits_path = logits_dir / f"frame_{frame_idx:05d}.bin"
+        logits_shape_path = logits_dir / f"frame_{frame_idx:05d}.shape"
+        logits.tofile(logits_path)
+        logits_shape_path.write_text(" ".join(str(dim) for dim in logits.shape) + "\n", encoding="utf-8")
+        row["logits_path"] = str(logits_path)
+        row["logits_shape"] = [int(dim) for dim in logits.shape]
+    if capture is not None:
+        row.update({
+            "official_multimask_output": bool(capture["multimask_output"]),
+            "official_has_point_inputs": bool(capture["has_point_inputs"]),
+            "official_selected_mask_index": int(capture["selected_mask_index"]),
+            "official_iou_scores": capture["iou_scores"],
+            "official_lowres_mask_areas": capture["low_res_candidate_areas"],
+        })
+    return row
 
 rows = {}
 with torch.inference_mode():
@@ -331,12 +452,14 @@ with torch.inference_mode():
         points=points,
         labels=labels,
     )
-    row = save_row(frame_idx, obj_ids, mask_logits)
+    initial_capture = captures[-1] if captures else None
+    capture_cursor = len(captures)
+    row = save_row(frame_idx, obj_ids, mask_logits, capture=initial_capture)
     if row is not None:
         rows[int(frame_idx)] = row
 
-    if captures:
-        capture = captures[-1]
+    if initial_capture is not None:
+        capture = initial_capture
         ious = capture["ious"][0]
         selected_index = int(torch.argmax(ious).item())
         frame_h, frame_w = mask_logits.shape[-2:]
@@ -373,17 +496,29 @@ with torch.inference_mode():
             encoding="utf-8",
         )
     torch.cuda.synchronize()
-    t0 = time.perf_counter()
+    prev = time.perf_counter()
+    track_total_ms = 0.0
+    track_frames = 0
     for out_frame_idx, out_obj_ids, out_mask_logits in predictor.propagate_in_video(state):
+        capture = None
+        if len(captures) > capture_cursor:
+            capture = captures[capture_cursor]
+            capture_cursor += 1
+        row = save_row(out_frame_idx, out_obj_ids, out_mask_logits, None, capture)
         torch.cuda.synchronize()
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        row = save_row(out_frame_idx, out_obj_ids, out_mask_logits, elapsed_ms)
-        if row is not None:
+        now = time.perf_counter()
+        interval_ms = (now - prev) * 1000.0
+        if 0 < out_frame_idx < frames:
+            track_total_ms += interval_ms
+            track_frames += 1
+            if row is not None:
+                row["elapsed_ms"] = track_total_ms
+                row["track_interval_ms"] = interval_ms
+        if row is not None and out_frame_idx != 0:
             rows[int(out_frame_idx)] = row
+        prev = now
         if out_frame_idx + 1 >= frames:
             break
-    torch.cuda.synchronize()
-    total_ms = (time.perf_counter() - t0) * 1000.0
 
 ordered = [rows[i] for i in sorted(rows) if i < frames]
 for row in ordered:
@@ -391,10 +526,16 @@ for row in ordered:
 print(json.dumps({
     "summary": {
         "frames": len(ordered),
-        "propagate_total_ms": total_ms,
-        "propagate_ms_per_frame": total_ms / max(len(ordered), 1),
+        "track_frames": track_frames,
+        "propagate_total_ms": track_total_ms,
+        "propagate_ms_per_frame": track_total_ms / max(track_frames, 1),
+        "timed_frame_range": "1..frames-1",
         "cuda_alloc_mib": torch.cuda.max_memory_allocated() / (1024.0 * 1024.0),
         "image_size": image_size if image_size > 0 else 1024,
+        "python_dtype": python_dtype,
+        "tf32_policy": tf32_policy,
+        "torch_allow_tf32_matmul": bool(torch.backends.cuda.matmul.allow_tf32),
+        "torch_allow_tf32_cudnn": bool(torch.backends.cudnn.allow_tf32),
     }
 }), flush=True)
 '''
@@ -415,6 +556,13 @@ print(json.dumps({
             str(args.point_y),
             str(args.frames),
             str(args.image_size),
+            args.python_dtype,
+            "1" if args.save_python_logits else "0",
+            json.dumps(args.hydra_override),
+            str(args.python_fill_hole_area),
+            args.python_binarize_cond_mem,
+            "1" if args.save_python_mem_mask else "0",
+            args.tf32_policy,
         ]
     )
     env = os.environ.copy()
@@ -460,6 +608,46 @@ def main() -> int:
         default=0,
         help="Official SAM2 image_size override. 0 keeps the config default.",
     )
+    parser.add_argument(
+        "--python-dtype",
+        choices=("bf16", "fp32"),
+        default="bf16",
+        help="Autocast dtype for official PyTorch SAM2. fp32 disables CUDA autocast.",
+    )
+    parser.add_argument(
+        "--tf32-policy",
+        choices=("on", "off"),
+        default="on",
+        help="Enable or disable PyTorch TF32 matmul/cuDNN. Use off for Strict FP32.",
+    )
+    parser.add_argument(
+        "--save-python-logits",
+        action="store_true",
+        help="Save official PyTorch selected mask logits next to python masks for parity diagnostics.",
+    )
+    parser.add_argument(
+        "--save-python-mem-mask",
+        action="store_true",
+        help="Save official PyTorch memory-encoder input masks for parity diagnostics.",
+    )
+    parser.add_argument(
+        "--hydra-override",
+        action="append",
+        default=[],
+        help="Extra Hydra override passed to official SAM2 builder. May be specified more than once.",
+    )
+    parser.add_argument(
+        "--python-fill-hole-area",
+        type=int,
+        default=-1,
+        help="Diagnostic override for predictor.fill_hole_area after official SAM2 construction. -1 keeps builder default.",
+    )
+    parser.add_argument(
+        "--python-binarize-cond-mem",
+        choices=("default", "true", "false"),
+        default="default",
+        help="Diagnostic override for official predictor.binarize_mask_from_pts_for_mem_enc after construction.",
+    )
     parser.add_argument("--point-x", type=float, default=315.0)
     parser.add_argument("--point-y", type=float, default=250.0)
     parser.add_argument("--out-dir", type=Path, default=Path("outputs/sam2-official-quality"))
@@ -494,6 +682,8 @@ def main() -> int:
         py_mask = Path(py["mask_path"]).resolve()
         cpp_bbox = cpp.get("bbox_xyxy")
         py_bbox = bbox_from_mask(py_mask)
+        cpp_selected = cpp_candidate_space_index(cpp)
+        py_selected = py.get("official_selected_mask_index")
         comparisons.append(
             {
                 "offset": offset,
@@ -503,14 +693,47 @@ def main() -> int:
                 "python_mask_area": py.get("mask_area"),
                 "cpp_bbox_xyxy": cpp_bbox,
                 "python_bbox_xyxy": py_bbox,
+                "cpp_selected_mask_index": cpp.get("selected_mask_index"),
+                "cpp_selected_candidate_index": cpp_selected,
+                "cpp_decoder_iou_scores": cpp.get("decoder_iou_scores"),
+                "cpp_lowres_mask_areas": cpp.get("decoder_lowres_mask_areas"),
+                "python_selected_candidate_index": py_selected,
+                "python_decoder_iou_scores": py.get("official_iou_scores"),
+                "python_lowres_mask_areas": py.get("official_lowres_mask_areas"),
+                "selected_index_match": (
+                    cpp_selected == py_selected if cpp_selected is not None and py_selected is not None else None
+                ),
             }
         )
 
+    selection_rows = [
+        row
+        for row in comparisons
+        if row["offset"] > 0 and row.get("selected_index_match") is not None
+    ]
     summary = {
         "frames_compared": len(comparisons),
         "min_mask_iou": min((row["mask_iou"] for row in comparisons), default=None),
         "mean_mask_iou": sum(row["mask_iou"] for row in comparisons) / max(len(comparisons), 1),
         "min_bbox_iou": min((row["bbox_iou"] for row in comparisons if row["bbox_iou"] is not None), default=None),
+        "propagation_candidate_selection": {
+            "frames_compared": len(selection_rows),
+            "matching_frames": sum(1 for row in selection_rows if row["selected_index_match"]),
+            "mismatches": [
+                {
+                    "offset": row["offset"],
+                    "cpp_selected_candidate_index": row["cpp_selected_candidate_index"],
+                    "python_selected_candidate_index": row["python_selected_candidate_index"],
+                    "cpp_decoder_iou_scores": row["cpp_decoder_iou_scores"],
+                    "python_decoder_iou_scores": row["python_decoder_iou_scores"],
+                    "cpp_lowres_mask_areas": row["cpp_lowres_mask_areas"],
+                    "python_lowres_mask_areas": row["python_lowres_mask_areas"],
+                    "mask_iou": row["mask_iou"],
+                }
+                for row in selection_rows
+                if not row["selected_index_match"]
+            ],
+        },
         "comparisons": comparisons,
         "python_summary": python_summary,
         "metadata_validation": metadata_validation,
@@ -531,6 +754,15 @@ def main() -> int:
                 "only when the decoded source-frame resolution and SAM model input "
                 "resolution match. Other resolutions are scaling studies."
             ),
+        },
+        "official_python_overrides": {
+            "hydra_override": args.hydra_override,
+            "python_fill_hole_area": args.python_fill_hole_area,
+            "python_binarize_cond_mem": args.python_binarize_cond_mem,
+            "python_dtype": args.python_dtype,
+            "tf32_policy": args.tf32_policy,
+            "save_python_logits": args.save_python_logits,
+            "save_python_mem_mask": args.save_python_mem_mask,
         },
     }
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

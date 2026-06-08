@@ -47,12 +47,14 @@ enum class sam3_model_type {
     sam3_visual = 1,  // SAM3 visual-only (ViT + tracker, no text)
     sam2 = 2,         // SAM2 (Hiera + tracker, no text/detector)
     edgetam = 3,      // EdgeTAM (RepViT + Perceiver, no text/detector)
+    sam3_1 = 4,       // SAM3.1 Object Multiplex (not implemented in C++ yet)
 };
 
 inline constexpr sam3_model_type SAM3_MODEL_SAM3 = sam3_model_type::sam3;
 inline constexpr sam3_model_type SAM3_MODEL_SAM3_VISUAL = sam3_model_type::sam3_visual;
 inline constexpr sam3_model_type SAM3_MODEL_SAM2 = sam3_model_type::sam2;
 inline constexpr sam3_model_type SAM3_MODEL_EDGETAM = sam3_model_type::edgetam;
+inline constexpr sam3_model_type SAM3_MODEL_SAM3_1 = sam3_model_type::sam3_1;
 
 /*****************************************************************************
 ** Public Data Types
@@ -94,6 +96,13 @@ struct sam3_detection {
     float iou_score = 0.0f;
     int instance_id = -1;
     sam3_mask mask;
+    float obj_score_logit = 0.0f;
+    int selected_mask_index = -1;
+    std::vector<float> decoder_iou_scores;
+    std::vector<int> decoder_lowres_mask_areas;
+    std::vector<float> raw_mask_logits;  // selected decoder mask logits before image resize
+    int raw_mask_width = 0;
+    int raw_mask_height = 0;
     std::vector<float> sam_token;  // raw SAM decoder output token (for obj_ptr)
 };
 
@@ -111,6 +120,7 @@ struct sam3_params {
     std::string model_path;
     int n_threads = 4;
     bool use_gpu = true;
+    bool require_gpu = false;
     int seed = 42;
     int encode_img_size = 0;  // 0 = model default; override input resolution
 };
@@ -210,6 +220,7 @@ struct sam3_video_params {
     int max_keep_alive = 30;
     int recondition_every = 16;
     int fill_hole_area = 16;
+    bool cleanup_full_masks = false;
     bool bbox_only = false;
 };
 
@@ -318,6 +329,13 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
                               const sam3_model& model,
                               const sam3_pvs_params& pvs_params);
 
+/* Add a new instance to the tracker from an existing detection on the current
+** encoded frame.  Returns assigned instance_id, or -1 on failure. */
+int sam3_tracker_add_detection(sam3_tracker& tracker,
+                               sam3_state& state,
+                               const sam3_model& model,
+                               const sam3_detection& det);
+
 /* Return the current frame index of the tracker. */
 int sam3_tracker_frame_index(const sam3_tracker& tracker);
 
@@ -333,6 +351,7 @@ struct sam3_visual_track_params {
     int max_keep_alive = 30;
     int recondition_every = 16;
     int fill_hole_area = 16;
+    bool cleanup_full_masks = false;
     bool bbox_only = false;
 };
 
@@ -514,6 +533,15 @@ bool sam3_test_dump_phase7_from_ref_inputs(const sam3_model& model,
                                            const std::string& case_ref_dir,
                                            const std::string& output_dir,
                                            int n_threads = 4);
+
+/*
+** Run the SAM3.1 Object Multiplex propagation mask-decoder slice from
+** pre-dumped decoder inputs produced by dump_sam31_mux_mask_decoder_case.py.
+*/
+bool sam3_test_dump_sam31_mux_mask_decoder_case(const sam3_model& model,
+                                                const std::string& case_ref_dir,
+                                                const std::string& output_dir,
+                                                int n_threads = 4);
 
 /*
 ** Run the geometry encoder from pre-computed backbone features and dump

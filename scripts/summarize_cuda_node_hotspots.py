@@ -53,14 +53,35 @@ def hotspot_rows(summary: dict[str, Any], label: str | None, limit: int) -> list
 def classify(row: dict[str, Any]) -> str:
     signature = row["signature"]
     op = row["op"]
-    if op == "FLASH_ATTN_EXT" and "f32[56,8,4096,1]" in signature:
+    if op == "FLASH_ATTN_EXT" and (
+        "f32[56,8,4096,1]" in signature or "f32[56,8,1024,1]" in signature
+    ):
         return "primary: head_dim=56 global FlashAttention"
-    if op == "FLASH_ATTN_EXT" and "f32[56,8,196,25]" in signature:
+    if op == "FLASH_ATTN_EXT" and (
+        "f32[56,8,196,25]" in signature or "f32[56,8,196,9]" in signature
+    ):
         return "primary: head_dim=56 window FlashAttention"
-    if op == "MUL_MAT" and "q4_0[1792,448" in signature:
-        return "secondary: stage-2 q4 MLP projection"
-    if op == "MUL_MAT" and "q4_0[448,1792" in signature:
-        return "secondary: stage-2 q4 MLP expansion"
+    if op == "FLASH_ATTN_EXT" and (
+        "f32[56,2,64,1024]" in signature
+        or "f32[56,4,16,1024]" in signature
+        or "f32[56,8,4,1024]" in signature
+        or "f32[56,16,49,25]" in signature
+    ):
+        return "primary: head_dim=56 q-pool FlashAttention"
+    if op == "FLASH_ATTN_EXT" and "f32[256,1,4096,1]" in signature:
+        return "primary: propagation head_dim=256 FlashAttention"
+    if op == "MUL_MAT" and ("q4_0[1792,448" in signature or "q8_0[1792,448" in signature):
+        return "secondary: stage-2 quantized MLP projection"
+    if op == "MUL_MAT" and ("dst=f32[448,4096" in signature or "dst=f32[448,1024" in signature):
+        return "secondary: stage-2 quantized MLP projection"
+    if op == "MUL_MAT" and ("q4_0[448,1792" in signature or "q8_0[448,1792" in signature):
+        return "secondary: stage-2 quantized MLP expansion"
+    if op == "MUL_MAT" and ("dst=f32[1792,4096" in signature or "dst=f32[1792,1024" in signature):
+        return "secondary: stage-2 quantized MLP expansion"
+    if op == "MUL_MAT" and ("q4_0[448,1344" in signature or "q8_0[448,1344" in signature):
+        return "secondary: window qkv quantized projection"
+    if op == "MUL_MAT" and ("dst=f32[1344,196,25" in signature or "dst=f32[1344,196,9" in signature):
+        return "secondary: window qkv quantized projection"
     if op in {"ADD", "UNARY", "NORM", "CONT", "PAD"}:
         return "tertiary: graph/layout or elementwise overhead"
     return "other"

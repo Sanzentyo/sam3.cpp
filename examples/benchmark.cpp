@@ -14,8 +14,10 @@
  * Options:
  *   --models-dir <path>   Directory with .ggml files  (default: models/)
  *   --video <path>        Video file                   (default: data/test_video.mp4)
+ *   --frame-dir <path>    Directory of extracted frames, used instead of --video
  *   --point-x <f>         Click point X                (default: 315.0)
  *   --point-y <f>         Click point Y                (default: 250.0)
+ *   --text-prompt <text>  SAM3 text prompt             (default: person)
  *   --n-frames <n>        Frames to track              (default: 10)
  *   --n-threads <n>       CPU threads                  (default: 4)
  *   --recondition-every <n> Memory refresh interval    (default: 16)
@@ -28,6 +30,7 @@
  *   --output-jsonl <path> Write first-run target bbox rows for quality checks
  *   --output-initial-candidates-jsonl <path> Write initial point-prompt candidates
  *   --output-mask-dir <path> Write first-run target masks as PNG files
+ *   --output-logits-dir <path> Write first-run selected low-res logits as .bin/.shape
  *   --no-isolation        Run in-process for profilers that do not follow fork
  */
 
@@ -37,6 +40,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <charconv>
 #include <cstddef>
@@ -48,6 +52,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <ostream>
 #include <print>
@@ -286,6 +291,56 @@ static std::string strip_extension(std::string_view filename) {
     return std::string{(pos != std::string_view::npos) ? filename.substr(0, pos) : filename};
 }
 
+static bool is_supported_frame_file(const std::filesystem::path& path) {
+    auto ext = path.extension().string();
+    std::ranges::transform(
+        ext, ext.begin(), [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp";
+}
+
+static std::expected<std::vector<sam3_image>, std::string> load_benchmark_frames(
+    const std::string& video_path, const std::string& frame_dir, int n_frames) {
+    std::vector<sam3_image> frames;
+    frames.reserve(static_cast<size_t>(n_frames));
+
+    if (!frame_dir.empty()) {
+        std::vector<std::filesystem::path> paths;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(frame_dir, ec)) {
+            if (!entry.is_regular_file(ec) || !is_supported_frame_file(entry.path())) {
+                continue;
+            }
+            paths.push_back(entry.path());
+        }
+        if (ec) {
+            return std::unexpected(std::format("cannot read frame directory: {}", frame_dir));
+        }
+        std::ranges::sort(paths);
+        if (std::cmp_less(paths.size(), n_frames)) {
+            return std::unexpected(std::format(
+                "frame directory has {} usable frames, need {}", paths.size(), n_frames));
+        }
+        for (int f = 0; f < n_frames; ++f) {
+            const auto& path = paths[static_cast<size_t>(f)];
+            auto image = sam3_load_image(path.string());
+            if (image.data.empty()) {
+                return std::unexpected(std::format("load frame failed: {}", path.string()));
+            }
+            frames.push_back(std::move(image));
+        }
+        return frames;
+    }
+
+    for (int f = 0; f < n_frames; ++f) {
+        auto image = sam3_decode_video_frame(video_path, f);
+        if (image.data.empty()) {
+            return std::unexpected("decode frame failed");
+        }
+        frames.push_back(std::move(image));
+    }
+    return frames;
+}
+
 static const char* requested_backend_label(bool use_gpu) {
     if (!use_gpu)
         return "CPU";
@@ -374,6 +429,7 @@ static void write_metadata_row(std::ostream* out,
                                const std::string& model_path,
                                std::string_view backend,
                                const std::string& video_path,
+                               const std::string& frame_dir,
                                const sam3_image& first_frame,
                                int n_frames,
                                float px,
@@ -381,35 +437,69 @@ static void write_metadata_row(std::ostream* out,
                                int requested_encode_img_size,
                                int effective_encode_img_size,
                                bool bbox_only,
-                               bool multimask) {
+                               bool multimask,
+                               std::string_view text_prompt) {
     if (!out)
         return;
     const std::string model_path_json = json_escape(model_path);
     const std::string backend_json = json_escape(backend);
     const std::string video_path_json = json_escape(video_path);
+    const std::string frame_dir_json = json_escape(frame_dir);
+    const std::string text_prompt_json = json_escape(std::string{text_prompt});
+    const std::string input_source = frame_dir.empty() ? "video" : "frame_dir";
     *out << std::format(
         "{{\"source\":\"sam3cpp-meta\","
         "\"model_path\":\"{}\","
         "\"backend\":\"{}\","
+        "\"input_source\":\"{}\","
         "\"video_path\":\"{}\","
+        "\"frame_dir\":\"{}\","
         "\"decoded_width\":{},\"decoded_height\":{},"
         "\"frames\":{},"
         "\"point_x\":{:.6f},\"point_y\":{:.6f},"
+        "\"text_prompt\":\"{}\","
         "\"encode_img_size_requested\":{},"
         "\"encode_img_size_effective\":{},"
         "\"bbox_only\":{},\"multimask\":{}}}\n",
         model_path_json,
         backend_json,
+        input_source,
         video_path_json,
+        frame_dir_json,
         first_frame.width,
         first_frame.height,
         n_frames,
         px,
         py,
+        text_prompt_json,
         requested_encode_img_size,
         effective_encode_img_size,
         bbox_only,
         multimask);
+}
+
+static std::string json_float_array(const std::vector<float>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        out += std::format("{:.6f}", values[i]);
+    }
+    out += "]";
+    return out;
+}
+
+static std::string json_int_array(const std::vector<int>& values) {
+    std::string out = "[";
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        out += std::format("{}", values[i]);
+    }
+    out += "]";
+    return out;
 }
 
 static void write_detection_row(std::ostream* out,
@@ -444,9 +534,14 @@ static void write_detection_row(std::ostream* out,
     }
     const std::string mask_path_json =
         mask_path.empty() ? "null" : std::format("\"{}\"", json_escape(mask_path));
+    const std::string decoder_iou_scores_json = json_float_array(det.decoder_iou_scores);
+    const std::string decoder_lowres_mask_areas_json =
+        json_int_array(det.decoder_lowres_mask_areas);
     *out << std::format(
         "{{\"offset\":{},\"expected_frame_index\":{},"
         "\"bbox_xyxy\":[{:.3f},{:.3f},{:.3f},{:.3f}],\"score\":{:.6f},"
+        "\"selected_mask_index\":{},\"decoder_iou_scores\":{},"
+        "\"decoder_lowres_mask_areas\":{},"
         "\"mask_area\":{},\"mask_fnv1a64\":\"{:016x}\","
         "\"mask_path\":{},"
         "\"source\":\"sam3cpp-edgetam\"}}\n",
@@ -457,6 +552,9 @@ static void write_detection_row(std::ostream* out,
         det.box.x1,
         det.box.y1,
         det.score,
+        det.selected_mask_index,
+        decoder_iou_scores_json,
+        decoder_lowres_mask_areas_json,
         mask_area,
         mask_hash,
         mask_path_json);
@@ -521,6 +619,38 @@ static std::string save_detection_mask(std::string_view output_mask_dir,
         return {};
     }
     return path.string();
+}
+
+static std::string save_detection_logits(std::string_view output_logits_dir,
+                                         int offset,
+                                         const sam3_result& result,
+                                         std::optional<size_t> candidate_index = std::nullopt) {
+    const auto* det = select_detection(result, candidate_index);
+    if (output_logits_dir.empty() || !det || det->raw_mask_logits.empty() ||
+        det->raw_mask_width <= 0 || det->raw_mask_height <= 0) {
+        return {};
+    }
+
+    std::filesystem::create_directories(std::filesystem::path{output_logits_dir});
+    const auto base =
+        std::filesystem::path{output_logits_dir} / std::format("frame_{:05d}", offset);
+
+    std::ofstream data(base.string() + ".bin", std::ios::binary);
+    if (!data) {
+        return {};
+    }
+    data.write(reinterpret_cast<const char*>(det->raw_mask_logits.data()),
+               static_cast<std::streamsize>(det->raw_mask_logits.size() * sizeof(float)));
+    if (!data) {
+        return {};
+    }
+
+    std::ofstream shape(base.string() + ".shape");
+    if (!shape) {
+        return {};
+    }
+    shape << det->raw_mask_height << " " << det->raw_mask_width << "\n";
+    return base.string() + ".bin";
 }
 
 // Sort key: family → size → precision
@@ -639,9 +769,11 @@ static std::vector<ModelEntry> discover_models(const std::string& dir, const std
 static BenchWire run_single_benchmark(const std::string& model_path,
                                       bool use_gpu,
                                       const std::string& video_path,
+                                      const std::string& frame_dir,
                                       int n_frames,
                                       float px,
                                       float py,
+                                      const std::string& text_prompt,
                                       int n_threads,
                                       int encode_img_size,
                                       bool bbox_only,
@@ -651,6 +783,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                                       const std::string& output_jsonl,
                                       const std::string& output_initial_candidates_jsonl,
                                       const std::string& output_mask_dir,
+                                      const std::string& output_logits_dir,
                                       bool quiet) {
     BenchWire wire = {};
 
@@ -683,15 +816,20 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         }
     }
 
-    // Decode frames
-    std::vector<sam3_image> frames(n_frames);
-    for (int f = 0; f < n_frames; f++) {
-        frames[f] = sam3_decode_video_frame(video_path, f);
-        if (frames[f].data.empty()) {
-            fail("decode frame failed");
-            return wire;
-        }
+    if (!output_logits_dir.empty()) {
+#ifdef _WIN32
+        _putenv_s("SAM3_CAPTURE_PROP_LOGITS", "1");
+#else
+        setenv("SAM3_CAPTURE_PROP_LOGITS", "1", 1);
+#endif
     }
+
+    auto frame_result = load_benchmark_frames(video_path, frame_dir, n_frames);
+    if (!frame_result) {
+        fail(frame_result.error());
+        return wire;
+    }
+    std::vector<sam3_image> frames = std::move(*frame_result);
 
     // Load model
     int64_t t0 = ggml_time_us();
@@ -699,6 +837,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     sam3_params params;
     params.model_path = model_path;
     params.use_gpu = use_gpu;
+    params.require_gpu = use_gpu;
     params.n_threads = n_threads;
     params.encode_img_size = encode_img_size;
 
@@ -708,6 +847,11 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         return wire;
     }
     set_wire_string(wire.backend, sam3_backend_name(*model));
+    const std::string_view actual_backend = sam3_backend_name(*model);
+    if (use_gpu && !actual_backend.starts_with("CUDA") && !actual_backend.starts_with("Metal")) {
+        fail(std::format("requested GPU backend unavailable; loaded {}", actual_backend));
+        return wire;
+    }
     if (out.is_open()) {
         const int effective_encode_img_size =
             (encode_img_size > 0) ? encode_img_size : sam3_model_image_size(*model);
@@ -715,6 +859,7 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                            model_path,
                            sam3_backend_name(*model),
                            video_path,
+                           frame_dir,
                            frames[0],
                            n_frames,
                            px,
@@ -722,7 +867,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                            encode_img_size,
                            effective_encode_img_size,
                            bbox_only,
-                           multimask);
+                           multimask,
+                           text_prompt);
     }
 
     auto state = sam3_create_state(*model, params);
@@ -732,6 +878,8 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     }
 
     bool visual_only = sam3_is_visual_only(*model);
+    const bool sam3_text_init =
+        !visual_only && sam3_get_model_type(*model) == SAM3_MODEL_SAM3 && !text_prompt.empty();
     sam3_tracker_ptr tracker;
 
     if (visual_only) {
@@ -742,9 +890,11 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         tracker = sam3_create_visual_tracker(*model, vtp);
     } else {
         sam3_video_params vp;
+        vp.text_prompt = sam3_text_init ? std::string{} : text_prompt;
         vp.hotstart_delay = 0;
         vp.max_keep_alive = 100;
         vp.recondition_every = recondition_every;
+        vp.bbox_only = bbox_only;
         tracker = sam3_create_tracker(*model, vp);
     }
     if (!tracker) {
@@ -762,27 +912,59 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         return wire;
     }
 
-    sam3_pvs_params pvs;
-    pvs.pos_points.push_back({px, py});
-    pvs.multimask = multimask;
-    pvs.candidate_index = initial_candidate_index;
-
-    if (out.is_open() || candidate_out.is_open()) {
-        sam3_result first = sam3_segment_pvs(*state, *model, pvs);
-        const auto selected_index = selected_detection_index(first, initial_candidate_index);
-        if (out.is_open()) {
-            const auto mask_path =
-                save_detection_mask(output_mask_dir, 0, first, initial_candidate_index);
-            write_detection_row(&out, 0, 0, first, mask_path, initial_candidate_index);
+    if (sam3_text_init) {
+        sam3_pcs_params pcs;
+        pcs.text_prompt = text_prompt;
+        sam3_result first = sam3_segment_pcs(*state, *model, pcs);
+        if (first.detections.empty()) {
+            pcs.score_threshold = -std::numeric_limits<float>::infinity();
+            first = sam3_segment_pcs(*state, *model, pcs);
+            if (first.detections.empty()) {
+                fail("text init returned no detections");
+                return wire;
+            }
+            const auto best =
+                std::ranges::max_element(first.detections, {}, [](const sam3_detection& detection) {
+                    return detection.score;
+                });
+            first.detections = {*best};
         }
-        write_initial_candidate_rows(
-            candidate_out.is_open() ? &candidate_out : nullptr, first, selected_index);
-    }
+        if (out.is_open()) {
+            const auto mask_path = save_detection_mask(output_mask_dir, 0, first);
+            save_detection_logits(output_logits_dir, 0, first);
+            write_detection_row(&out, 0, 0, first, mask_path);
+        }
+        for (const auto& det : first.detections) {
+            int inst_id = sam3_tracker_add_detection(*tracker, *state, *model, det);
+            if (inst_id < 0) {
+                fail("add text detection failed");
+                return wire;
+            }
+        }
+    } else {
+        sam3_pvs_params pvs;
+        pvs.pos_points.push_back({px, py});
+        pvs.multimask = multimask;
+        pvs.candidate_index = initial_candidate_index;
 
-    int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
-    if (inst_id < 0) {
-        fail("add_instance failed");
-        return wire;
+        if (out.is_open() || candidate_out.is_open()) {
+            sam3_result first = sam3_segment_pvs(*state, *model, pvs);
+            const auto selected_index = selected_detection_index(first, initial_candidate_index);
+            if (out.is_open()) {
+                const auto mask_path =
+                    save_detection_mask(output_mask_dir, 0, first, initial_candidate_index);
+                save_detection_logits(output_logits_dir, 0, first, initial_candidate_index);
+                write_detection_row(&out, 0, 0, first, mask_path, initial_candidate_index);
+            }
+            write_initial_candidate_rows(
+                candidate_out.is_open() ? &candidate_out : nullptr, first, selected_index);
+        }
+
+        int inst_id = sam3_tracker_add_instance(*tracker, *state, *model, pvs);
+        if (inst_id < 0) {
+            fail("add_instance failed");
+            return wire;
+        }
     }
 
     wire.t_frame0_ms = (ggml_time_us() - t0) / 1000.0;
@@ -795,12 +977,13 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     for (int f = 1; f < n_frames; f++) {
         t0 = ggml_time_us();
 
-        if (visual_only) {
+        if (visual_only || sam3_text_init) {
             last_result = sam3_propagate_frame(*tracker, *state, *model, frames[f]);
         } else {
             last_result = sam3_track_frame(*tracker, *state, *model, frames[f]);
         }
         const auto mask_path = save_detection_mask(output_mask_dir, f, last_result);
+        save_detection_logits(output_logits_dir, f, last_result);
         write_detection_row(out.is_open() ? &out : nullptr, f, f, last_result, mask_path);
 
         double dt = (ggml_time_us() - t0) / 1000.0;
@@ -845,9 +1028,11 @@ static BenchWire run_single_benchmark(const std::string& model_path,
 static void child_benchmark(const std::string& model_path,
                             bool use_gpu,
                             const std::string& video_path,
+                            const std::string& frame_dir,
                             int n_frames,
                             float px,
                             float py,
+                            const std::string& text_prompt,
                             int n_threads,
                             int encode_img_size,
                             bool bbox_only,
@@ -857,14 +1042,17 @@ static void child_benchmark(const std::string& model_path,
                             const std::string& output_jsonl,
                             const std::string& output_initial_candidates_jsonl,
                             const std::string& output_mask_dir,
+                            const std::string& output_logits_dir,
                             bool quiet,
                             int write_fd) {
     BenchWire wire = run_single_benchmark(model_path,
                                           use_gpu,
                                           video_path,
+                                          frame_dir,
                                           n_frames,
                                           px,
                                           py,
+                                          text_prompt,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
@@ -874,6 +1062,7 @@ static void child_benchmark(const std::string& model_path,
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
                                           output_mask_dir,
+                                          output_logits_dir,
                                           quiet);
     const auto bytes = std::as_bytes(std::span{&wire, 1});
     if (!write_full(write_fd, bytes)) {
@@ -888,9 +1077,11 @@ static BenchResult run_benchmark_isolated(
     const ModelEntry& entry,
     bool use_gpu,
     const std::string& video_path,
+    const std::string& frame_dir,
     int n_frames,
     float px,
     float py,
+    const std::string& text_prompt,
     int n_threads,
     int encode_img_size = 0,
     bool bbox_only = false,
@@ -900,6 +1091,7 @@ static BenchResult run_benchmark_isolated(
     const std::string& output_jsonl = "",
     const std::string& output_initial_candidates_jsonl = "",
     const std::string& output_mask_dir = "",
+    const std::string& output_logits_dir = "",
     bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
@@ -911,9 +1103,11 @@ static BenchResult run_benchmark_isolated(
     BenchWire wire = run_single_benchmark(entry.path,
                                           use_gpu,
                                           video_path,
+                                          frame_dir,
                                           n_frames,
                                           px,
                                           py,
+                                          text_prompt,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
@@ -923,6 +1117,7 @@ static BenchResult run_benchmark_isolated(
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
                                           output_mask_dir,
+                                          output_logits_dir,
                                           quiet);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
@@ -961,9 +1156,11 @@ static BenchResult run_benchmark_isolated(
         child_benchmark(entry.path,
                         use_gpu,
                         video_path,
+                        frame_dir,
                         n_frames,
                         px,
                         py,
+                        text_prompt,
                         n_threads,
                         encode_img_size,
                         bbox_only,
@@ -973,6 +1170,7 @@ static BenchResult run_benchmark_isolated(
                         output_jsonl,
                         output_initial_candidates_jsonl,
                         output_mask_dir,
+                        output_logits_dir,
                         quiet,
                         write_fd);
         _exit(1);
@@ -1015,9 +1213,11 @@ static BenchResult run_benchmark_direct(
     const ModelEntry& entry,
     bool use_gpu,
     const std::string& video_path,
+    const std::string& frame_dir,
     int n_frames,
     float px,
     float py,
+    const std::string& text_prompt,
     int n_threads,
     int encode_img_size = 0,
     bool bbox_only = false,
@@ -1027,6 +1227,7 @@ static BenchResult run_benchmark_direct(
     const std::string& output_jsonl = "",
     const std::string& output_initial_candidates_jsonl = "",
     const std::string& output_mask_dir = "",
+    const std::string& output_logits_dir = "",
     bool quiet = false) {
     BenchResult res;
     res.model_name = entry.name;
@@ -1036,9 +1237,11 @@ static BenchResult run_benchmark_direct(
     BenchWire wire = run_single_benchmark(entry.path,
                                           use_gpu,
                                           video_path,
+                                          frame_dir,
                                           n_frames,
                                           px,
                                           py,
+                                          text_prompt,
                                           n_threads,
                                           encode_img_size,
                                           bbox_only,
@@ -1048,6 +1251,7 @@ static BenchResult run_benchmark_direct(
                                           output_jsonl,
                                           output_initial_candidates_jsonl,
                                           output_mask_dir,
+                                          output_logits_dir,
                                           quiet);
     if (wire.ok) {
         res.t_load_ms = wire.t_load_ms;
@@ -1165,8 +1369,10 @@ static void print_table(const std::vector<BenchResult>& results,
 int main(int argc, char** argv) {
     std::string models_dir = "models/";
     std::string video_path = "data/test_video.mp4";
+    std::string frame_dir;
     float px = 315.0f;
     float py = 250.0f;
+    std::string text_prompt = "person";
     int n_frames = 10;
     int n_threads = 4;
     int encode_img_size = 0;
@@ -1182,6 +1388,7 @@ int main(int argc, char** argv) {
     std::string output_jsonl;
     std::string output_initial_candidates_jsonl;
     std::string output_mask_dir;
+    std::string output_logits_dir;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -1189,10 +1396,14 @@ int main(int argc, char** argv) {
             models_dir = argv[++i];
         } else if (arg == "--video" && i + 1 < argc) {
             video_path = argv[++i];
+        } else if (arg == "--frame-dir" && i + 1 < argc) {
+            frame_dir = argv[++i];
         } else if (arg == "--point-x" && i + 1 < argc) {
             px = (float) atof(argv[++i]);
         } else if (arg == "--point-y" && i + 1 < argc) {
             py = (float) atof(argv[++i]);
+        } else if (arg == "--text-prompt" && i + 1 < argc) {
+            text_prompt = argv[++i];
         } else if (arg == "--n-frames" && i + 1 < argc) {
             n_frames = atoi(argv[++i]);
         } else if (arg == "--n-threads" && i + 1 < argc) {
@@ -1227,14 +1438,18 @@ int main(int argc, char** argv) {
             output_initial_candidates_jsonl = argv[++i];
         } else if (arg == "--output-mask-dir" && i + 1 < argc) {
             output_mask_dir = argv[++i];
+        } else if (arg == "--output-logits-dir" && i + 1 < argc) {
+            output_logits_dir = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             std::print(
                 stderr,
                 "Usage: {} [options]\n"
                 "  --models-dir <path>   Models directory       (default: models/)\n"
                 "  --video <path>        Video file             (default: data/test_video.mp4)\n"
+                "  --frame-dir <path>    Directory of extracted frames, used instead of --video\n"
                 "  --point-x <f>         Click X                (default: 315.0)\n"
                 "  --point-y <f>         Click Y                (default: 250.0)\n"
+                "  --text-prompt <text>  SAM3 text prompt       (default: person)\n"
                 "  --n-frames <n>        Frames to track        (default: 10)\n"
                 "  --n-threads <n>       CPU threads            (default: 4)\n"
                 "  --recondition-every <n> Memory refresh interval (default: 16)\n"
@@ -1247,6 +1462,8 @@ int main(int argc, char** argv) {
                 "  --output-jsonl <path> Write first-run target bbox rows\n"
                 "  --output-initial-candidates-jsonl <path> Write initial point-prompt candidates\n"
                 "  --output-mask-dir <path> Write first-run target masks as PNG files\n"
+                "  --output-logits-dir <path> Write first-run selected low-res logits as "
+                ".bin/.shape\n"
                 "  --no-isolation        Run in-process for profiler capture\n"
                 "  --quiet               Suppress per-frame progress lines\n",
                 argv[0]);
@@ -1257,8 +1474,16 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (quiet && std::getenv("SAM3_LOG_RUNTIME_LEVEL") == nullptr) {
+#ifdef _WIN32
+        _putenv_s("SAM3_LOG_RUNTIME_LEVEL", "0");
+#else
+        setenv("SAM3_LOG_RUNTIME_LEVEL", "0", 0);
+#endif
+    }
+
     if ((!output_jsonl.empty() || !output_initial_candidates_jsonl.empty() ||
-         !output_mask_dir.empty()) &&
+         !output_mask_dir.empty() || !output_logits_dir.empty()) &&
         !(gpu_only || cpu_only)) {
         std::print(
             stderr,
@@ -1292,25 +1517,33 @@ int main(int argc, char** argv) {
         std::print(stderr, "  {}  ({})\n", e.name, format_size(e.file_size));
     }
 
-    // Validate video
-    auto vinfo = sam3_get_video_info(video_path);
-    if (vinfo.n_frames <= 0) {
-        std::print(stderr, "ERROR: cannot read video '{}'\n", video_path);
-        return 1;
-    }
-    if (n_frames > vinfo.n_frames) {
+    if (frame_dir.empty()) {
+        auto vinfo = sam3_get_video_info(video_path);
+        if (vinfo.n_frames <= 0) {
+            std::print(stderr, "ERROR: cannot read video '{}'\n", video_path);
+            return 1;
+        }
+        if (n_frames > vinfo.n_frames) {
+            std::print(stderr,
+                       "WARNING: video has {} frames, clamping to {}\n",
+                       vinfo.n_frames,
+                       vinfo.n_frames);
+            n_frames = vinfo.n_frames;
+        }
         std::print(stderr,
-                   "WARNING: video has {} frames, clamping to {}\n",
+                   "Video: {}x{}, {} frames, {:.1f} fps\n",
+                   vinfo.width,
+                   vinfo.height,
                    vinfo.n_frames,
-                   vinfo.n_frames);
-        n_frames = vinfo.n_frames;
+                   vinfo.fps);
+    } else {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(frame_dir, ec)) {
+            std::print(stderr, "ERROR: cannot read frame directory '{}'\n", frame_dir);
+            return 1;
+        }
+        std::print(stderr, "Frames: {} ({} requested)\n", frame_dir, n_frames);
     }
-    std::print(stderr,
-               "Video: {}x{}, {} frames, {:.1f} fps\n",
-               vinfo.width,
-               vinfo.height,
-               vinfo.n_frames,
-               vinfo.fps);
 
     // Build run list
     struct RunSpec {
@@ -1360,9 +1593,11 @@ int main(int argc, char** argv) {
                        ? run_benchmark_direct(*run.entry,
                                               run.use_gpu,
                                               video_path,
+                                              frame_dir,
                                               n_frames,
                                               px,
                                               py,
+                                              text_prompt,
                                               n_threads,
                                               encode_img_size,
                                               bbox_only,
@@ -1372,13 +1607,16 @@ int main(int argc, char** argv) {
                                               (i == 0) ? output_jsonl : "",
                                               (i == 0) ? output_initial_candidates_jsonl : "",
                                               (i == 0) ? output_mask_dir : "",
+                                              (i == 0) ? output_logits_dir : "",
                                               quiet)
                        : run_benchmark_isolated(*run.entry,
                                                 run.use_gpu,
                                                 video_path,
+                                                frame_dir,
                                                 n_frames,
                                                 px,
                                                 py,
+                                                text_prompt,
                                                 n_threads,
                                                 encode_img_size,
                                                 bbox_only,
@@ -1388,6 +1626,7 @@ int main(int argc, char** argv) {
                                                 (i == 0) ? output_jsonl : "",
                                                 (i == 0) ? output_initial_candidates_jsonl : "",
                                                 (i == 0) ? output_mask_dir : "",
+                                                (i == 0) ? output_logits_dir : "",
                                                 quiet);
         results.push_back(res);
 

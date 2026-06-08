@@ -72,7 +72,7 @@ def summarize_pair(cxx: dict[str, Any], py: dict[str, Any], encode_size: int) ->
         "python_memory_encoder_mean_ms": mean_ms(py["_run_memory_encoder"]),
         "priority": [
             "Reduce Hiera image encoder steady compute first.",
-            "Target head_dim=56 FlashAttention and q4 Hiera MLP matmul shapes.",
+            "Target head_dim=56 FlashAttention and quantized Hiera MLP matmul shapes.",
             "Treat propagation and memory encoding as secondary until Hiera is near PyTorch forward_image.",
         ],
         "inputs": {

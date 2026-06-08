@@ -1,7 +1,7 @@
-// sam3_quantize — Quantize SAM3 model weights from F32/F16 to Q4_0/Q4_1/Q8_0
+// sam3_quantize — Quantize SAM3 model weights from F32/F16 to Q4_0/Q4_1/Q8_0/MXFP4/NVFP4
 //
 // Usage: sam3_quantize <input.ggml> <output.ggml> <type>
-//   types: q4_0, q4_1, q8_0
+//   types: q4_0, q4_1, q8_0, mxfp4, nvfp4
 
 #include "ggml.h"
 
@@ -10,12 +10,15 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 static constexpr uint32_t SAM3_MAGIC = 0x73616D33;  // "sam3"
 static constexpr uint32_t SAM2_MAGIC = 0x73616D32;  // "sam2"
 static constexpr int SAM3_VERSION = 3;
 static constexpr int SAM2_VERSION = 1;
+
+static constexpr std::string_view SUPPORTED_TYPES = "q4_0, q4_1, q8_0, mxfp4, nvfp4";
 
 static bool sam3_quantize_model(const std::string& fname_inp,
                                 const std::string& fname_out,
@@ -355,7 +358,10 @@ static bool sam3_quantize_model(const std::string& fname_inp,
 int main(int argc, char** argv) {
     if (argc != 4) {
         fprintf(stderr, "usage: %s model.ggml model-quant.ggml type\n", argv[0]);
-        fprintf(stderr, "  supported types: q4_0, q4_1, q8_0\n");
+        fprintf(stderr,
+                "  supported types: %.*s\n",
+                (int) SUPPORTED_TYPES.size(),
+                SUPPORTED_TYPES.data());
         return 1;
     }
 
@@ -376,9 +382,16 @@ int main(int argc, char** argv) {
         qtype = GGML_TYPE_Q4_1;
     else if (strcmp(argv[3], "q8_0") == 0)
         qtype = GGML_TYPE_Q8_0;
+    else if (strcmp(argv[3], "mxfp4") == 0)
+        qtype = GGML_TYPE_MXFP4;
+    else if (strcmp(argv[3], "nvfp4") == 0)
+        qtype = GGML_TYPE_NVFP4;
     else {
         fprintf(stderr, "%s: unknown quantization type '%s'\n", argv[0], argv[3]);
-        fprintf(stderr, "  supported types: q4_0, q4_1, q8_0\n");
+        fprintf(stderr,
+                "  supported types: %.*s\n",
+                (int) SUPPORTED_TYPES.size(),
+                SUPPORTED_TYPES.data());
         return 1;
     }
 

@@ -126,115 +126,6 @@ Args parse_args(int argc, char** argv) {
     return out;
 }
 
-[[nodiscard]] bool env_flag_enabled(std::string_view name) {
-    const std::string key{name};
-    const char* value = std::getenv(key.c_str());
-    return value != nullptr && value[0] != '\0' && value[0] != '0';
-}
-
-struct BlockSelector {
-    bool all = false;
-    std::vector<std::pair<int, int>> ranges;
-
-    [[nodiscard]] bool contains(int block) const {
-        if (all) {
-            return true;
-        }
-        for (const auto& [first, last] : ranges) {
-            if (first <= block && block <= last) {
-                return true;
-            }
-        }
-        return false;
-    }
-};
-
-[[nodiscard]] std::string_view trim_ascii_space(std::string_view value) {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t' ||
-                              value.front() == '\n' || value.front() == '\r')) {
-        value.remove_prefix(1);
-    }
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\n' ||
-                              value.back() == '\r')) {
-        value.remove_suffix(1);
-    }
-    return value;
-}
-
-[[nodiscard]] std::optional<int> parse_optional_int(std::string_view value) {
-    value = trim_ascii_space(value);
-    if (value.empty()) {
-        return std::nullopt;
-    }
-    int parsed = 0;
-    const auto* first = value.data();
-    const auto* last = value.data() + value.size();
-    const auto result = std::from_chars(first, last, parsed);
-    if (result.ec != std::errc{} || result.ptr != last) {
-        return std::nullopt;
-    }
-    return parsed;
-}
-
-[[nodiscard]] std::optional<BlockSelector> parse_block_selector(std::string_view value) {
-    value = trim_ascii_space(value);
-    BlockSelector selector;
-    if (value.empty()) {
-        return selector;
-    }
-    if (value == "all") {
-        selector.all = true;
-        return selector;
-    }
-
-    while (!value.empty()) {
-        const size_t comma = value.find(',');
-        const std::string_view token = trim_ascii_space(value.substr(0, comma));
-        if (!token.empty()) {
-            const size_t dash = token.find('-');
-            const auto first =
-                parse_optional_int(dash == std::string_view::npos ? token : token.substr(0, dash));
-            const auto last =
-                dash == std::string_view::npos ? first : parse_optional_int(token.substr(dash + 1));
-            if (!first.has_value() || !last.has_value() || *first < 0 || *last < *first) {
-                return std::nullopt;
-            }
-            selector.ranges.emplace_back(*first, *last);
-        }
-        if (comma == std::string_view::npos) {
-            break;
-        }
-        value.remove_prefix(comma + 1);
-    }
-    return selector;
-}
-
-[[nodiscard]] std::optional<BlockSelector> getenv_block_selector(std::string_view name) {
-    const std::string key{name};
-    const char* value = std::getenv(key.c_str());
-    if (value == nullptr) {
-        return std::nullopt;
-    }
-    auto selector = parse_block_selector(value);
-    if (!selector.has_value()) {
-        std::cerr << std::format(
-            "Ignoring invalid block selector {}='{}'. Use e.g. '1-7,12' or 'all'.\n", name, value);
-    }
-    return selector;
-}
-
-[[nodiscard]] bool mlp_flat_chain_enabled(int block) {
-    if (const auto disabled = getenv_block_selector("SAM3_DISABLE_VIT_MLP_FLAT_CHAIN_BLOCKS");
-        disabled.has_value() && disabled->contains(block)) {
-        return false;
-    }
-    if (const auto enabled = getenv_block_selector("SAM3_ENABLE_VIT_MLP_FLAT_CHAIN_BLOCKS");
-        enabled.has_value()) {
-        return enabled->contains(block);
-    }
-    return env_flag_enabled("SAM3_ENABLE_VIT_MLP_FLAT_CHAIN");
-}
-
 [[nodiscard]] std::string block_source_name(int block, std::string_view suffix) {
     return std::format("sam3_vit_block_{:02d}_{}", block, suffix);
 }
@@ -457,7 +348,7 @@ int main(int argc, char** argv) {
             captures.push_back(make_block_capture(args.out_dir,
                                                   block,
                                                   sam3_test_vit_block_is_global(*model, block),
-                                                  mlp_flat_chain_enabled(block),
+                                                  sam3_test_vit_block_uses_flat_mlp(*model, block),
                                                   source_names));
         }
 

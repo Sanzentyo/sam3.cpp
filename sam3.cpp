@@ -3441,15 +3441,34 @@ static bool sam3_bf16_vit_qkv_chain_enabled(int block_idx) {
     return env.has_value() && !env->empty() && env->front() != '0';
 }
 
-static bool sam3_bf16_vit_mlp_chain_enabled(int block_idx) {
+static bool sam3_bf16_vit_mlp_chain_default_enabled(const sam3_hparams& hp,
+                                                    ggml_type fc1_weight_type) {
+    return hp.model_type == SAM3_MODEL_SAM3 && fc1_weight_type == GGML_TYPE_BF16;
+}
+
+static bool sam3_bf16_vit_mlp_chain_enabled(const sam3_hparams& hp,
+                                            ggml_type fc1_weight_type,
+                                            int block_idx) {
     if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_BF16_VIT_MLP_CHAIN_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
         if (const auto selector = sam3_getenv_block_selector("SAM3_BF16_VIT_MLP_CHAIN_BLOCKS");
             selector.has_value() && selector->contains(block_idx)) {
             return true;
         }
     }
+    const auto disable_env = sam3_getenv("SAM3_DISABLE_BF16_VIT_MLP_CHAIN");
+    if (disable_env.has_value() && !disable_env->empty() && disable_env->front() != '0') {
+        return false;
+    }
     const auto env = sam3_getenv("SAM3_BF16_VIT_MLP_CHAIN");
-    return env.has_value() && !env->empty() && env->front() != '0';
+    if (env.has_value()) {
+        return !env->empty() && env->front() != '0';
+    }
+    return sam3_bf16_vit_mlp_chain_default_enabled(hp, fc1_weight_type);
 }
 
 static bool sam3_vit_mlp_approx_gelu_enabled(int block_idx) {
@@ -3468,7 +3487,14 @@ static bool sam3_vit_mlp_approx_gelu_enabled(int block_idx) {
     return env.has_value() && !env->empty() && env->front() != '0';
 }
 
-static bool sam3_vit_mlp_flat_chain_enabled(int block_idx) {
+static bool sam3_vit_mlp_flat_chain_default_enabled(const sam3_hparams& hp,
+                                                    ggml_type fc1_weight_type) {
+    return hp.model_type == SAM3_MODEL_SAM3 && fc1_weight_type == GGML_TYPE_BF16;
+}
+
+static bool sam3_vit_mlp_flat_chain_enabled(const sam3_hparams& hp,
+                                            ggml_type fc1_weight_type,
+                                            int block_idx) {
     if (block_idx >= 0) {
         if (const auto disabled =
                 sam3_getenv_block_selector("SAM3_DISABLE_VIT_MLP_FLAT_CHAIN_BLOCKS");
@@ -3481,8 +3507,15 @@ static bool sam3_vit_mlp_flat_chain_enabled(int block_idx) {
             return selector->contains(block_idx);
         }
     }
+    const auto disable_env = sam3_getenv("SAM3_DISABLE_VIT_MLP_FLAT_CHAIN");
+    if (disable_env.has_value() && !disable_env->empty() && disable_env->front() != '0') {
+        return false;
+    }
     const auto env = sam3_getenv("SAM3_ENABLE_VIT_MLP_FLAT_CHAIN");
-    return env.has_value() && !env->empty() && env->front() != '0';
+    if (env.has_value()) {
+        return !env->empty() && env->front() != '0';
+    }
+    return sam3_vit_mlp_flat_chain_default_enabled(hp, fc1_weight_type);
 }
 
 static bool sam3_vit_direct_qkv_views_enabled(const sam3_hparams& hp, ggml_type qkv_weight_type) {
@@ -7558,7 +7591,10 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
     } else if (sam3_bf16_vit_linear_inputs_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
         x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
     }
-    if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+    const bool use_flat_mlp = sam3_vit_mlp_flat_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx);
+    const bool use_bf16_mlp_chain =
+        sam3_bf16_vit_mlp_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx);
+    if (use_flat_mlp) {
         const int64_t w = x->ne[1];
         const int64_t h = x->ne[2];
         const int64_t b = x->ne[3];
@@ -7569,9 +7605,8 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
             blk.mlp_fc1_w,
             x,
             blk.mlp_fc1_b,
-            sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                        sam3_bf16_vit_mlp_chain_enabled(block_idx),
-                                        sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
+            sam3_vit_linear_output_type(
+                blk.mlp_fc1_w, use_bf16_mlp_chain, sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
             fc1_name);
         sam3_set_name(x, fc1_name);
         x = sam3_vit_mlp_gelu(ctx, x, block_idx);
@@ -7600,9 +7635,8 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
             blk.mlp_fc1_w,
             x,
             blk.mlp_fc1_b,
-            sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                        sam3_bf16_vit_mlp_chain_enabled(block_idx),
-                                        sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
+            sam3_vit_linear_output_type(
+                blk.mlp_fc1_w, use_bf16_mlp_chain, sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
             fc1_name);
         sam3_set_name(x, fc1_name);
         x = sam3_vit_mlp_gelu(ctx, x, block_idx);
@@ -11775,6 +11809,14 @@ bool sam3_test_vit_block_is_global(const sam3_model& model, int block_idx) {
     return model.hparams.is_global_attn(block_idx);
 }
 
+bool sam3_test_vit_block_uses_flat_mlp(const sam3_model& model, int block_idx) {
+    if (block_idx < 0 || block_idx >= model.hparams.vit_depth) {
+        return false;
+    }
+    const auto& block = model.vit.blocks[static_cast<size_t>(block_idx)];
+    return sam3_vit_mlp_flat_chain_enabled(model.hparams, block.mlp_fc1_w->type, block_idx);
+}
+
 static std::array<int64_t, 4> sam3_normalize_ne4(std::array<int64_t, 4> input_ne);
 static size_t sam3_ne4_element_count(const std::array<int64_t, 4>& ne);
 static struct ggml_tensor* sam3_new_f32_tensor_4d_from_ne(struct ggml_context* ctx,
@@ -12503,9 +12545,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
                 blk.mlp_fc1_w,
                 input,
                 blk.mlp_fc1_b,
-                sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                            sam3_bf16_vit_mlp_chain_enabled(block_idx),
-                                            sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
+                sam3_vit_linear_output_type(
+                    blk.mlp_fc1_w,
+                    sam3_bf16_vit_mlp_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx),
+                    sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
 
         case SAM3_VIT_BLOCK_STAGE_MLP_GELU:
             return sam3_vit_mlp_gelu(ctx, input, block_idx);
@@ -12522,9 +12565,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
                 blk.mlp_fc1_w,
                 input,
                 blk.mlp_fc1_b,
-                sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                            sam3_bf16_vit_mlp_chain_enabled(block_idx),
-                                            sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
+                sam3_vit_linear_output_type(
+                    blk.mlp_fc1_w,
+                    sam3_bf16_vit_mlp_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx),
+                    sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
             return sam3_vit_mlp_gelu(ctx, x, block_idx);
         }
 
@@ -12554,7 +12598,11 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
             const int64_t h = input->ne[2];
             const int64_t b = input->ne[3];
             struct ggml_tensor* x = input;
-            if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+            const bool use_flat_mlp =
+                sam3_vit_mlp_flat_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx);
+            const bool use_bf16_mlp_chain =
+                sam3_bf16_vit_mlp_chain_enabled(hp, blk.mlp_fc1_w->type, block_idx);
+            if (use_flat_mlp) {
                 x = ggml_reshape_2d(ctx, x, x->ne[0], w * h * b);
                 x = sam3_vit_linear_bias(
                     ctx,
@@ -12562,7 +12610,7 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
                     x,
                     blk.mlp_fc1_b,
                     sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                                sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                                use_bf16_mlp_chain,
                                                 sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
             } else {
                 x = sam3_vit_linear_bias_flat_batch(
@@ -12571,7 +12619,7 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
                     x,
                     blk.mlp_fc1_b,
                     sam3_vit_linear_output_type(blk.mlp_fc1_w,
-                                                sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                                use_bf16_mlp_chain,
                                                 sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
             }
             x = sam3_vit_mlp_gelu(ctx, x, block_idx);
@@ -12580,7 +12628,7 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
             } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
                 x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
             }
-            if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+            if (use_flat_mlp) {
                 x = sam3_vit_linear_bias(
                     ctx,
                     blk.mlp_fc2_w,

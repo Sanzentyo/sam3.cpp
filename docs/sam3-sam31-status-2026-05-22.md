@@ -12859,3 +12859,67 @@ Conclusion: the next MLP/QKV optimization cannot be another input-conversion or
 direct-output toggle. The remaining useful work has to change the actual
 GEMM/dataflow shape, or fuse a larger exact-preserving ViT block path so the
 formal `tail_image_encode.graph_compute` and `required_e2e` rows move.
+
+### SAM3 BF16 cuDNN MLP Flat-Chain Default
+
+The accepted SAM3 BF16 CUDA default now promotes the previously gated ViT MLP
+flat-chain plus BF16 `fc1 -> GELU_ERF` cuDNN path. The default is intentionally
+scoped to SAM3 BF16 ViT `mlp.lin1` tensors; SAM3.1 and F32/F16 rows are not
+default-enabled by this change. The new opt-out controls are:
+
+- `SAM3_DISABLE_BF16_VIT_MLP_CHAIN=1`
+- `SAM3_DISABLE_VIT_MLP_FLAT_CHAIN=1`
+- `GGML_CUDA_DISABLE_CUDNN_MLP_FC1_GELU_BF16=1`
+
+The C++ artifact parity gate compares the old default path, reconstructed with
+those opt-outs, against the new default path. It is bit-exact for the checked
+SAM3 BF16 tracking surface: `diff_rows=0`, `tolerance_diff_rows=0`,
+`mask_hash_equal_rows=3`, `max_bbox_delta_px=0`, `max_score_abs_delta=0`, and
+`max_mask_pixel_xor=0`.
+
+Evidence:
+`outputs/e2e-required-parity-sam3-bf16-new-default-cudnn-mlp-flat-20260629a/compare.json`.
+
+The same-input repeat-20 isolated ViT+tracker-neck pre-gate shows a stable
+speedup versus the old default:
+
+| Row | Mean | Median | SD | CI95 | Delta vs old default | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| old default | `150.746 ms` | `148.345 ms` | `9.373 ms` | `4.108 ms` | `0.000 ms` | `1.000x` |
+| env-gated candidate | `142.497 ms` | `139.066 ms` | `9.419 ms` | `4.128 ms` | `-8.250 ms` | `1.058x` |
+| new default | `142.830 ms` | `138.699 ms` | `9.191 ms` | `4.028 ms` | `-7.917 ms` | `1.055x` |
+
+The paired new-default delta is `-7.917 ms` with paired CI95 `2.167 ms`, so the
+isolated encoder signal is larger than the measured noise band. Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-current-default-r20-20260629b/vit_bench.json`,
+`outputs/e2e-required-vit-bench-sam3-bf16-cudnn-mlp-flat-bf16-current-r20-20260629b/vit_bench.json`,
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-new-default-cudnn-mlp-flat-r20-20260629a/vit_bench.json`.
+
+The formal same-contract SAM3 BF16 required-E2E bundle, with official Python
+BF16/TF32 as the comparison row and no C++ env overrides, reports:
+
+| Process | Old default | New default | Delta | Speedup |
+| --- | ---: | ---: | ---: | ---: |
+| `required_e2e_ms` | `592.471 ms` | `577.615 ms` | `-14.857 ms` | `1.026x` |
+| `model_e2e_ms` | `584.355 ms` | `569.481 ms` | `-14.874 ms` | `1.026x` |
+| `tail_encode_required_total_ms` | `285.431 ms` | `267.361 ms` | `-18.071 ms` | `1.068x` |
+| `tail_encode_graph_compute_ms` | `283.600 ms` | `264.676 ms` | `-18.924 ms` | `1.071x` |
+| `track_ms` | `85.486 ms` | `80.418 ms` | `-5.069 ms` | `1.063x` |
+
+The official-Python quality gate still passes with the same known numerical
+agreement band: `min_bbox_iou=0.979372`, `min_mask_pixel_iou=0.984548`, and
+`max_mask_pixel_xor=497`. For this run, C++ required E2E is `577.615 ms` versus
+official Python session E2E `663.898 ms`, or `1.149x` Python/C++; C++ model E2E
+is also faster at `569.481 ms` versus Python `585.414 ms`, or `1.028x`.
+
+Evidence:
+`outputs/e2e-required-measure-sam3-bf16-new-default-cudnn-mlp-flat-20260629a/audit/optimization_targets.json`,
+`outputs/e2e-required-measure-sam3-bf16-new-default-cudnn-mlp-flat-20260629a/python-parity/python-vs-cpp.json`,
+and
+`outputs/e2e-required-measure-sam3-bf16-tracker-pe-shared-cache-20260629a/audit/optimization_targets.json`.
+
+The stage-capture tool now queries the library's test-only flat-MLP policy
+instead of duplicating environment parsing. This keeps isolated stage sweeps in
+sync with the default graph names (`mlp_fc1_flat` / `mlp_gelu_flat`) and prevents
+the measurement tool from requesting stale tensor names after default promotion.

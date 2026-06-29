@@ -760,6 +760,7 @@ bool sam3_encode_vit_from_image_selective(sam3_state& state,
 /* Test-only: query ViT block structure without exposing the model internals. */
 int sam3_test_vit_depth(const sam3_model& model);
 bool sam3_test_vit_block_is_global(const sam3_model& model, int block_idx);
+bool sam3_test_vit_block_uses_flat_mlp(const sam3_model& model, int block_idx);
 
 /*
 ** Test-only: run the exact ViT prefix up to the tensor entering block 0

@@ -12636,3 +12636,30 @@ Conclusion: PDL can remain as a safe upstream CUDA launch-path capability, but i
 does not move the current SAM3/SAM3.1 Python-closing objective. The next accepted
 optimization still needs to reduce the actual ViT MLP/QKV/attention compute
 budget rather than kernel-launch scheduling overhead.
+
+### SAM3 BF16 Full-ViT RoPE Fusion Refresh
+
+I rechecked the earlier block0 K-side `CONT+RoPE` suspicion on the full SAM3
+BF16 VIT graph instead of the isolated stage cut. The refresh used one warmup
+and one measured iteration with `GGML_CUDA_PROFILE_ROPE_PAIR_FUSION=1` and
+`GGML_CUDA_PROFILE_FUSION_MEMORY=1`.
+
+The production Q/K RoPE path is already covered: the log contains `128`
+`GGML_CUDA_CONT_ROPE_PAIR_FUSION success` lines, which is exactly
+`32 blocks * 2 Q/K paths * 2 runs`. The remaining `22` `CONT_ROPE_PAIR_FUSION
+reject` lines are ordinary non-RoPE `CONT` nodes or pattern misses outside the
+Q/K RoPE hot path. The two memory-range rejects are the neck output reshape
+around `sam3_vit_batch_output`, not ViT block Q/K RoPE. Smoke timing for this
+profile run was `139.881 ms`; it is only diagnostic because the repeat count was
+one.
+
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-rope-profile-current-20260629b/vit_bench.json`
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-rope-profile-current-20260629b/vit_bench.stderr`.
+
+Conclusion: do not loosen the CUDA fusion memory-range check to force a K-side
+RoPE case. The earlier isolated-stage K-side reject is a diagnostic artifact, not
+a missing production full-ViT fusion. The next root candidate remains MLP/QKV
+GEMM/dataflow or a larger attention/layout kernel change that lowers the real
+image-encoder graph budget.

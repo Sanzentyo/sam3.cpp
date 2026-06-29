@@ -12663,3 +12663,35 @@ RoPE case. The earlier isolated-stage K-side reject is a diagnostic artifact, no
 a missing production full-ViT fusion. The next root candidate remains MLP/QKV
 GEMM/dataflow or a larger attention/layout kernel change that lowers the real
 image-encoder graph budget.
+
+### SAM3 BF16 Current cuBLASLt Timing Refresh
+
+I also refreshed the cuBLASLt bias-GEMM timing on the same full-ViT diagnostic
+path after the PDL and RoPE checks. The run used one warmup and one measured
+iteration with `GGML_CUDA_PROFILE_CUBLASLT_BIAS_TIMING=1`, so it is a diagnostic
+kernel breakdown, not a normal wall-time speed row.
+
+The hot ViT GEMMs are already using BF16 weights and BF16 activations with F32
+outputs, and the timing rows show no remaining input or output conversion inside
+the cuBLASLt bias path:
+
+| Group | Calls | Mean matmul | Median matmul | Convert sum | Dst convert sum |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `vit_mlp_fc2` | `64` | `0.961 ms` | `0.954 ms` | `0.000 ms` | `0.000 ms` |
+| `vit_mlp_fc1` | `64` | `0.949 ms` | `0.945 ms` | `0.000 ms` | `0.000 ms` |
+| `vit_qkv` | `64` | `0.627 ms` | `0.616 ms` | `0.000 ms` | `0.000 ms` |
+| `vit_attn_proj` | `64` | `0.230 ms` | `0.229 ms` | `0.000 ms` | `0.000 ms` |
+
+The only large host setup value was the first QKV plan/cache miss
+(`40.391 ms`); steady setup medians were about `0.0002 ms`, so plan creation is
+not the warmed execution bottleneck.
+
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-cublaslt-timing-current-20260629a/vit_bench.json`
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-cublaslt-timing-current-20260629a/vit_bench.stderr`.
+
+Conclusion: the next MLP/QKV optimization cannot be another input-conversion or
+direct-output toggle. The remaining useful work has to change the actual
+GEMM/dataflow shape, or fuse a larger exact-preserving ViT block path so the
+formal `tail_image_encode.graph_compute` and `required_e2e` rows move.

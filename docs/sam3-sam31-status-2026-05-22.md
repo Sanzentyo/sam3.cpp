@@ -12502,3 +12502,51 @@ The artifact parity gate is exact against the clean C++ output:
 `max_bbox_delta_px=0`, `max_score_abs_delta=0`, and `max_mask_pixel_xor=0`.
 Evidence:
 `outputs/e2e-required-cpp-parity-sam3-bf16-skip-redundant-cast-20260629a/compare.json`.
+
+### SAM3 BF16 Scoped Residual And Deconv Recheck
+
+The cuBLASLt bias residual epilogue was made locally measurable without changing
+default behavior. `GGML_CUDA_ENABLE_CUBLASLT_BIAS_RESIDUAL_FUSION=1` keeps the
+old global opt-in. New scoped probes allow:
+`GGML_CUDA_ENABLE_CUBLASLT_BIAS_RESIDUAL_FUSION_BLOCKS=31`, ranges such as
+`24-31`, or substring matching through
+`GGML_CUDA_ENABLE_CUBLASLT_BIAS_RESIDUAL_FUSION_MATCH`. The same probe now also
+checks ViT `attn.proj` residual adds, not only `mlp.lin2`.
+
+The mechanism works: with `BLOCKS=31`, block 31 emits two residual-fusion
+successes, one for `attn.proj` and one for `mlp.lin2`. Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-residual-block31-attn-profile-20260629a/vit_bench.stderr`.
+
+It is not an accepted speed optimization. Repeated isolated ViT+tracker-neck
+pre-gates under the current BF16 cuDNN MLP flat-chain state show no useful
+speed signal:
+
+| Candidate | Mean | Median | Delta vs fresh baseline | Decision |
+| --- | ---: | ---: | ---: | --- |
+| fresh baseline | `142.800 ms` | `138.790 ms` | `0.000 ms` | keep |
+| residual `BLOCKS=31` with `attn.proj` + `mlp.lin2` | `142.816 ms` | `139.441 ms` | `+0.016 ms` | reject/no signal |
+| old global residual, `mlp.lin2` only | `143.402 ms` | `139.241 ms` | `+1.027 ms` vs skip-cast baseline | reject/slower |
+| residual `BLOCKS=24-31`, `mlp.lin2` only | `143.081 ms` | `139.530 ms` | `+0.706 ms` vs skip-cast baseline | reject/no signal |
+
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-residual-selector-baseline-r20-20260629a/vit_bench.json`,
+`outputs/e2e-required-vit-bench-sam3-bf16-residual-attn-block31-r20-20260629a/vit_bench.json`,
+`outputs/e2e-required-vit-bench-sam3-bf16-cudnn-mlp-flat-bf16-residual-global-r20-20260629a/vit_bench.json`,
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-residual-block24-31-r20-20260629a/vit_bench.json`.
+
+I also rechecked the existing BF16 neck deconvolution path after the redundant
+ViT cast cleanup. `SAM3_CONV_TRANSPOSE_KEEP_BF16=1` remains neutral on isolated
+speed and still has prior quality risk, so it stays rejected:
+
+| Candidate | Mean | Median | Delta vs fresh baseline | Decision |
+| --- | ---: | ---: | ---: | --- |
+| keep BF16 deconv weights | `142.779 ms` | `138.084 ms` | `-0.022 ms` | reject/no signal |
+
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-keep-bf16-deconv-r20-20260629a/vit_bench.json`.
+
+Conclusion: residual epilogue scoping and BF16 deconv do not close the remaining
+Python tail-backbone gap. The next root candidate should be a true MLP/QKV
+compute-path improvement or a faster attention/layout kernel, not another
+residual-add or deconv-weight materialization toggle.

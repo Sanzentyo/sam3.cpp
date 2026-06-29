@@ -246,6 +246,9 @@ SAM31_MASK_INIT_AUDIT_OUT := env_var_or_default("SAM31_MASK_INIT_AUDIT_OUT", "ou
 SAM31_MASK_INIT_STATE_PY_OUT := env_var_or_default("SAM31_MASK_INIT_STATE_PY_OUT", "outputs/sam31-mask-init-state-python")
 SAM31_MASK_INIT_STATE_CPP_OUT := env_var_or_default("SAM31_MASK_INIT_STATE_CPP_OUT", "outputs/sam31-mask-init-state-cpp")
 SAM31_MASK_INIT_STATE_COMPARE_OUT := env_var_or_default("SAM31_MASK_INIT_STATE_COMPARE_OUT", "outputs/sam31-mask-init-state-compare")
+SAM31_SEQUENCE_MIN_MASK_IOU := env_var_or_default("SAM31_SEQUENCE_MIN_MASK_IOU", "0.95")
+SAM31_SEQUENCE_MAX_MASK_XOR_PIXELS := env_var_or_default("SAM31_SEQUENCE_MAX_MASK_XOR_PIXELS", "1000")
+SAM31_ACCEPT_SEQUENCE_QUALITY_PARITY := env_var_or_default("SAM31_ACCEPT_SEQUENCE_QUALITY_PARITY", "0")
 SAM3_SAM31_GOAL_AUDIT_OUT := env_var_or_default("SAM3_SAM31_GOAL_AUDIT_OUT", "outputs/sam3-sam31-goal-audit")
 SAM3_PERF_SUMMARY := env_var_or_default("SAM3_PERF_SUMMARY", "outputs/model-matrix-sam3-f16-winpart-vec4-r3/summary.json")
 SAM3_PERF_SUMMARY_EXTRA_ARGS := env_var_or_default("SAM3_PERF_SUMMARY_EXTRA_ARGS", "")
@@ -1341,6 +1344,9 @@ sam3-sam31-goal-audit out=SAM3_SAM31_GOAL_AUDIT_OUT: cuda-health sam31-contract 
         --sam31-tracking-mask-init-smoke-log {{ SAM31_TRACKING_MASK_INIT_OUT }}/summary.log \
         --sam31-mask-sequence-python {{ SAM31_MASK_SEQUENCE_PY_OUT }}/summary.json \
         --sam31-mask-init-audit {{ SAM31_MASK_INIT_AUDIT_OUT }}/summary.json \
+        --sam31-sequence-min-mask-iou {{ SAM31_SEQUENCE_MIN_MASK_IOU }} \
+        --sam31-sequence-max-mask-xor-pixels {{ SAM31_SEQUENCE_MAX_MASK_XOR_PIXELS }} \
+        {{ if SAM31_ACCEPT_SEQUENCE_QUALITY_PARITY == "1" { "--sam31-accept-sequence-quality-parity" } else { "" } }} \
         --sam3-e2e-audit {{ SAM3_E2E_AUDIT }} \
         --sam3-perf-summary {{ SAM3_PERF_SUMMARY }} \
         {{ SAM3_PERF_SUMMARY_EXTRA_ARGS }} \

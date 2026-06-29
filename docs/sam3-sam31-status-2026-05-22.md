@@ -11910,6 +11910,54 @@ Evidence:
 `outputs/sam31-mask-sequence-python/mask_diff_rgb.png`, and
 `outputs/sam3-sam31-goal-audit-phase3-sam31-sequence-current-20260630q/summary.json`.
 
+## SAM3.1 sequence quality contract gate
+
+The goal-audit script now keeps SAM3.1 sequence exact-mask-hash parity as the
+strict default, but exposes an explicit quality-parity contract:
+
+```bash
+SAM31_ACCEPT_SEQUENCE_QUALITY_PARITY=1 just sam3-sam31-goal-audit
+```
+
+The contract threshold is visible in the audit JSON and can be overridden with
+`SAM31_SEQUENCE_MIN_MASK_IOU` and `SAM31_SEQUENCE_MAX_MASK_XOR_PIXELS`. The
+default threshold is `mask IoU >= 0.95` and `XOR pixels <= 1000`.
+
+Using the current BF16/TF32-on evidence, the two audit modes split as expected:
+
+| Mode | Goal complete | Missing criteria | SAM3.1 sequence contract | Exact hash |
+| --- | --- | ---: | --- | --- |
+| strict default | `false` | `1` | `quality_pass` | `false` |
+| quality contract enabled | `true` | `0` | `quality_pass_accepted` | `false` |
+
+The accepted-quality audit still records the exact mask mismatch instead of
+hiding it:
+
+| Metric | Value |
+| --- | ---: |
+| mask IoU | `0.9816276537833424` |
+| XOR pixels | `270` |
+| threshold min IoU | `0.95` |
+| threshold max XOR pixels | `1000` |
+
+The same accepted audit also keeps the current required-E2E speed criteria met:
+
+| Criterion | Value |
+| --- | ---: |
+| SAM3 required/session Python over C++ | `1.152583x` |
+| SAM3 model E2E Python over C++ | `1.104293x` |
+| SAM3.1 mask-init Python full-cache over C++ full-frame | `1.251678x` |
+| SAM3.1 mask-init C++ full-frame step | `341.313498 ms` |
+| SAM3.1 mask-init encode share | `88.809354%` |
+
+This is a quality-parity acceptance gate for the current two-frame mask-init
+sequence, not a claim that point/box prompts or longer videos are already
+covered by the same sequence gate. Evidence:
+`outputs/sam3-sam31-goal-audit-strict-current-20260629a/summary.json`,
+`outputs/sam3-sam31-goal-audit-quality-contract-current-20260629a/summary.json`,
+`outputs/sam31-mask-init-audit-winpart-current-phase3-20260630o/summary.json`,
+and `outputs/e2e-required-audit-sam3-bf16-current-python-parity-20260630n/optimization_targets.json`.
+
 ## SAM3.1 required-E2E split
 
 The SAM3.1 mask-init smoke now writes the process boundaries needed for a

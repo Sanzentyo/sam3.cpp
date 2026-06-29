@@ -325,8 +325,16 @@ def summarize_sam31_mask_init_audit(mask_init_audit: Any) -> tuple[str, Any]:
     return "missing", evidence
 
 
-def summarize_sam31_sequence_quality(mask_sequence_python: Any) -> dict[str, Any]:
-    thresholds = {"min_mask_iou": 0.95, "max_mask_xor_pixels": 1000}
+def summarize_sam31_sequence_quality(
+    mask_sequence_python: Any,
+    *,
+    min_mask_iou: float,
+    max_mask_xor_pixels: int,
+) -> dict[str, Any]:
+    thresholds = {
+        "min_mask_iou": min_mask_iou,
+        "max_mask_xor_pixels": max_mask_xor_pixels,
+    }
     if not isinstance(mask_sequence_python, dict):
         return {"status": "missing", "thresholds": thresholds}
     comparison = mask_sequence_python.get("comparison")
@@ -449,6 +457,26 @@ def main() -> int:
         type=Path,
         default=Path("outputs/sam31-mask-init-audit/summary.json"),
     )
+    parser.add_argument(
+        "--sam31-sequence-min-mask-iou",
+        type=float,
+        default=0.95,
+        help="Minimum SAM3.1 C++ vs official Python sequence mask IoU for quality parity.",
+    )
+    parser.add_argument(
+        "--sam31-sequence-max-mask-xor-pixels",
+        type=int,
+        default=1000,
+        help="Maximum SAM3.1 C++ vs official Python sequence XOR pixels for quality parity.",
+    )
+    parser.add_argument(
+        "--sam31-accept-sequence-quality-parity",
+        action="store_true",
+        help=(
+            "Allow a SAM3.1 sequence quality_pass to satisfy the tracking implementation "
+            "criterion even when the exact mask hash differs."
+        ),
+    )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
@@ -482,7 +510,55 @@ def main() -> int:
         ),
         "tail": sam31_tracking_mask_init_smoke_log,
     }
-    sam31_sequence_quality = summarize_sam31_sequence_quality(sam31_mask_sequence_python)
+    sam31_sequence_quality = summarize_sam31_sequence_quality(
+        sam31_mask_sequence_python,
+        min_mask_iou=args.sam31_sequence_min_mask_iou,
+        max_mask_xor_pixels=args.sam31_sequence_max_mask_xor_pixels,
+    )
+    sam31_sequence_status = sam31_sequence_quality.get("status")
+    sam31_sequence_exact = sam31_sequence_status == "exact"
+    sam31_sequence_quality_accepted = (
+        args.sam31_accept_sequence_quality_parity
+        and sam31_sequence_status == "quality_pass"
+    )
+    sam31_sequence_contract_met = (
+        sam31_sequence_exact or sam31_sequence_quality_accepted
+    )
+    sam31_sequence_contract = {
+        "strict_exact_hash_required_by_default": True,
+        "quality_parity_contract_enabled": args.sam31_accept_sequence_quality_parity,
+        "contract_status": (
+            "exact_hash"
+            if sam31_sequence_exact
+            else (
+                "quality_pass_accepted"
+                if sam31_sequence_quality_accepted
+                else sam31_sequence_status
+            )
+        ),
+        "quality_parity_contract_met": sam31_sequence_quality_accepted,
+        "exact_mask_hash_equal": sam31_sequence_quality.get("exact_mask_hash_equal"),
+        "thresholds": sam31_sequence_quality.get("thresholds"),
+    }
+    sam31_tracking_summary_suffix = (
+        "exact sequence hash parity satisfies the criterion."
+        if sam31_sequence_exact
+        else (
+            "the explicitly enabled quality-parity contract satisfies the criterion."
+            if sam31_sequence_quality_accepted
+            else "exact sequence hash parity is required before this criterion is fully met."
+        )
+    )
+    sam31_tracking_next_action = (
+        "Extend the same-contract SAM3.1 sequence gate to point/box prompts and longer tracking runs, then repeat paired performance measurements."
+        if sam31_sequence_contract_met
+        else (
+            "Fix the SAM3.1 detection-mask prompt-state and propagation contract until the "
+            "synthetic mask-init sequence matches official Python, or explicitly accept a "
+            "documented quality-parity contract, then add point/box prompt parity and "
+            "same-contract performance measurements."
+        )
+    )
     manifest_checks = (
         sam31_coverage.get("sam31_implementation_manifest_checks", {})
         if isinstance(sam31_coverage, dict)
@@ -526,7 +602,7 @@ def main() -> int:
         with_next_action(
             criterion(
                 "SAM3.1 C++ tracking implementation exists",
-                "met" if sam31_sequence_quality.get("status") == "exact" else "partial",
+                "met" if sam31_sequence_contract_met else "partial",
                 {
                     "summary": (
                         "SAM3.1 C++ has checkpoint contract, multiplex helper parity, v4 file-format support, "
@@ -550,8 +626,10 @@ def main() -> int:
                         f"mask quality status is {sam31_sequence_quality.get('status')} "
                         f"(IoU={sam31_sequence_quality.get('mask_iou')}, "
                         f"xor={sam31_sequence_quality.get('xor_pixels')}); exact sequence "
-                        "hash parity is required before this criterion is fully met."
+                        f"hash parity is {sam31_sequence_quality.get('exact_mask_hash_equal')}; "
+                        f"{sam31_tracking_summary_suffix}"
                     ),
+                    "sequence_acceptance_contract": sam31_sequence_contract,
                     "official_mask_sequence_quality": sam31_sequence_quality,
                     "official_mux_mask_decoder_case": sam31_mux_mask_decoder_case,
                     "official_mux_mask_decoder_compare": sam31_mux_mask_decoder_compare,
@@ -569,11 +647,7 @@ def main() -> int:
                     "official_mask_sequence_comparison": sam31_mask_sequence_python,
                 },
             ),
-            (
-                "Fix the SAM3.1 detection-mask prompt-state and propagation contract until the "
-                "synthetic mask-init sequence matches official Python, then add point/box prompt "
-                "parity and same-contract performance measurements."
-            ),
+            sam31_tracking_next_action,
         ),
         with_next_action(
             criterion(

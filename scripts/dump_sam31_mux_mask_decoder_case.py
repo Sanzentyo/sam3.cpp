@@ -28,12 +28,12 @@ import torch
 
 
 def write_raw_tensor(base: Path, name: str, values: np.ndarray) -> None:
-    values = np.ascontiguousarray(values.astype(np.float32, copy=False))
+    values = values.astype(np.float32, copy=False)
     (base / f"{name}.shape").write_text(
         ",".join(str(dim) for dim in values.shape) + "\n",
         encoding="utf-8",
     )
-    values.tofile(base / f"{name}.bin")
+    values.ravel(order="F").tofile(base / f"{name}.bin")
 
 
 def main() -> int:

@@ -5,7 +5,7 @@
 #   "numpy>=1.24",
 # ]
 # ///
-"""Compare C++ SAM3.1 multiplex mask-decoder slice dumps against Python reference."""
+"""Compare ggml-order raw f32 tensor dumps in two directories."""
 
 from __future__ import annotations
 
@@ -16,15 +16,11 @@ from pathlib import Path
 import numpy as np
 
 
-TENSORS = ("masks", "iou_pred", "mask_tokens_out", "object_score_logits")
-
-
 def read_shape(path: Path) -> tuple[int, ...]:
     text = path.read_text(encoding="utf-8").strip()
     if not text:
         raise ValueError(f"empty shape file: {path}")
-    parts = text.replace(",", " ").split()
-    return tuple(int(part) for part in parts)
+    return tuple(int(part) for part in text.replace(",", " ").split())
 
 
 def read_tensor(prefix: Path) -> np.ndarray:
@@ -72,10 +68,16 @@ def compare_tensor(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--expected", required=True, help="expected_cpp_layout directory")
-    parser.add_argument("--actual", required=True, help="C++ dump directory")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--expected", required=True, help="expected tensor directory")
+    parser.add_argument("--actual", required=True, help="actual tensor directory")
     parser.add_argument("--out", required=True, help="summary JSON path")
+    parser.add_argument(
+        "--tensor",
+        action="append",
+        required=True,
+        help="tensor name to compare; repeat for multiple tensors",
+    )
     parser.add_argument("--max-abs-tolerance", type=float, default=1.0e-2)
     parser.add_argument("--mean-abs-tolerance", type=float, default=1.0e-3)
     args = parser.parse_args()
@@ -91,12 +93,10 @@ def main() -> None:
         },
     }
 
-    for name in TENSORS:
-        expected = read_tensor(expected_dir / name)
-        actual = read_tensor(actual_dir / name)
+    for name in args.tensor:
         item = compare_tensor(
-            expected,
-            actual,
+            read_tensor(expected_dir / name),
+            read_tensor(actual_dir / name),
             max_abs_tolerance=args.max_abs_tolerance,
             mean_abs_tolerance=args.mean_abs_tolerance,
         )

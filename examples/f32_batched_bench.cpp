@@ -26,6 +26,7 @@ namespace {
 struct Args {
     int64_t k = 112;
     int64_t rows = 336;
+    int64_t out_rows = 1024;
     int64_t cols = 64;
     int64_t batches = 1024;
     int warmup = 3;
@@ -38,11 +39,24 @@ struct Args {
     bool check = false;
     bool custom_cuda = false;
     bool cublaslt_bias = false;
+    bool f16_cublaslt = false;
+    bool f16_mlp_chain = false;
     bool cublaslt_fast_tf32 = false;
     bool bf16_cublaslt = false;
+    bool bf16_mlp_chain = false;
+    bool bf16_gelu_cast = false;
+    bool bf16_wmma = false;
     bool bf16_direct_dst = false;
+    bool bf16_c_f32 = false;
     bool bf16_fast_compute = false;
+    bool f16_fast_compute = false;
+    bool f16_compute_16f = false;
+    bool bf16_mlp_direct_fc1 = false;
     bool gelu_epilogue = false;
+    int algo_index = 0;
+    int fc1_algo_index = -1;
+    int fc2_algo_index = -1;
+    int workspace_mb = 32;
     bool gelu_quant_ds4 = false;
     bool show_help = false;
 };
@@ -88,8 +102,13 @@ static void usage(const char* argv0) {
         "Usage: {} [--cpu|--cuda] [--k <n>] [--rows <n>] [--cols <n>] [--batches <n>] "
         "[--warmup <n>] [--iters <n>] [--threads <n>] [--bias|--no-bias] [--check] "
         "[--check-samples <n>] [--tolerance <f>] "
-        "[--custom-cuda|--cublaslt-bias|--cublaslt-bias-tf32|--bf16-cublaslt|"
-        "--gelu-quant-ds4] [--bf16-direct-dst] [--bf16-fast-compute] [--gelu-epilogue]\n",
+        "[--custom-cuda|--cublaslt-bias|--cublaslt-bias-tf32|--f16-cublaslt|"
+        "--f16-mlp-chain|--bf16-cublaslt|--bf16-mlp-chain|--bf16-gelu-cast|"
+        "--bf16-wmma|--gelu-quant-ds4] [--out-rows <n>] "
+        "[--bf16-direct-dst] [--bf16-c-f32] [--bf16-fast-compute] "
+        "[--f16-fast-compute] [--f16-compute-16f] [--gelu-epilogue] "
+        "[--bf16-mlp-direct-fc1] [--algo-index <n>] [--fc1-algo-index <n>] "
+        "[--fc2-algo-index <n>] [--workspace-mb <n>]\n",
         argv0);
 }
 
@@ -110,6 +129,17 @@ static bool parse_int(const char* s, int& out) {
         return false;
     }
     out = static_cast<int>(v);
+    return true;
+}
+
+static bool parse_non_negative_int(const char* s, int& out) {
+    const std::string_view sv{s};
+    int v = 0;
+    const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), v);
+    if (ec != std::errc{} || ptr != sv.data() + sv.size() || v < 0) {
+        return false;
+    }
+    out = v;
     return true;
 }
 
@@ -149,15 +179,58 @@ static bool parse_args(int argc, char** argv, Args& args) {
             args.cublaslt_bias = true;
             args.cublaslt_fast_tf32 = true;
             args.cuda = true;
+        } else if (arg == "--f16-cublaslt") {
+            args.f16_cublaslt = true;
+            args.cuda = true;
+        } else if (arg == "--f16-mlp-chain") {
+            args.f16_mlp_chain = true;
+            args.cuda = true;
         } else if (arg == "--bf16-cublaslt") {
             args.bf16_cublaslt = true;
             args.cuda = true;
+        } else if (arg == "--bf16-mlp-chain") {
+            args.bf16_mlp_chain = true;
+            args.cuda = true;
+        } else if (arg == "--bf16-gelu-cast") {
+            args.bf16_gelu_cast = true;
+            args.cuda = true;
+        } else if (arg == "--bf16-wmma") {
+            args.bf16_wmma = true;
+            args.cuda = true;
         } else if (arg == "--bf16-direct-dst") {
             args.bf16_direct_dst = true;
+        } else if (arg == "--bf16-c-f32") {
+            args.bf16_c_f32 = true;
         } else if (arg == "--bf16-fast-compute") {
             args.bf16_fast_compute = true;
+        } else if (arg == "--f16-fast-compute") {
+            args.f16_fast_compute = true;
+        } else if (arg == "--f16-compute-16f") {
+            args.f16_compute_16f = true;
+        } else if (arg == "--bf16-mlp-direct-fc1") {
+            args.bf16_mlp_direct_fc1 = true;
         } else if (arg == "--gelu-epilogue") {
             args.gelu_epilogue = true;
+        } else if (arg == "--algo-index") {
+            const char* v = need_value("--algo-index");
+            if (v == nullptr || !parse_non_negative_int(v, args.algo_index)) {
+                return false;
+            }
+        } else if (arg == "--fc1-algo-index") {
+            const char* v = need_value("--fc1-algo-index");
+            if (v == nullptr || !parse_non_negative_int(v, args.fc1_algo_index)) {
+                return false;
+            }
+        } else if (arg == "--fc2-algo-index") {
+            const char* v = need_value("--fc2-algo-index");
+            if (v == nullptr || !parse_non_negative_int(v, args.fc2_algo_index)) {
+                return false;
+            }
+        } else if (arg == "--workspace-mb") {
+            const char* v = need_value("--workspace-mb");
+            if (v == nullptr || !parse_non_negative_int(v, args.workspace_mb)) {
+                return false;
+            }
         } else if (arg == "--gelu-quant-ds4") {
             args.gelu_quant_ds4 = true;
             args.cuda = true;
@@ -175,6 +248,11 @@ static bool parse_args(int argc, char** argv, Args& args) {
         } else if (arg == "--rows") {
             const char* v = need_value("--rows");
             if (v == nullptr || !parse_int64(v, args.rows)) {
+                return false;
+            }
+        } else if (arg == "--out-rows") {
+            const char* v = need_value("--out-rows");
+            if (v == nullptr || !parse_int64(v, args.out_rows)) {
                 return false;
             }
         } else if (arg == "--cols") {
@@ -379,10 +457,14 @@ int main(int argc, char** argv) {
 
 #ifdef GGML_USE_CUDA
     const int custom_modes = (args.custom_cuda ? 1 : 0) + (args.cublaslt_bias ? 1 : 0) +
-                             (args.bf16_cublaslt ? 1 : 0) + (args.gelu_quant_ds4 ? 1 : 0);
+                             (args.f16_cublaslt ? 1 : 0) + (args.f16_mlp_chain ? 1 : 0) +
+                             (args.bf16_cublaslt ? 1 : 0) + (args.bf16_mlp_chain ? 1 : 0) +
+                             (args.bf16_gelu_cast ? 1 : 0) + (args.bf16_wmma ? 1 : 0) +
+                             (args.gelu_quant_ds4 ? 1 : 0);
     if (custom_modes > 1) {
-        std::cerr << "--custom-cuda, --cublaslt-bias, --bf16-cublaslt, and --gelu-quant-ds4 are "
-                     "mutually exclusive\n";
+        std::cerr << "--custom-cuda, --cublaslt-bias, --f16-cublaslt, --f16-mlp-chain, "
+                     "--bf16-cublaslt, --bf16-mlp-chain, --bf16-gelu-cast, --bf16-wmma, "
+                     "and --gelu-quant-ds4 are mutually exclusive\n";
         return 2;
     }
 
@@ -505,14 +587,136 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (args.f16_cublaslt) {
+        std::vector<float> got(output_elems);
+        Sam3F32BatchedCustomResult custom{};
+        const Sam3F16CublasLtCompute compute =
+            args.f16_compute_16f ? Sam3F16CublasLtCompute::compute_16f
+                                 : (args.f16_fast_compute ? Sam3F16CublasLtCompute::fast_16f
+                                                          : Sam3F16CublasLtCompute::fp32);
+        const Sam3F16CublasLtOptions options{
+            .compute = compute,
+            .algo_index = args.algo_index,
+            .workspace_bytes = static_cast<size_t>(args.workspace_mb) * 1024 * 1024,
+        };
+        const int status = sam3_f16_batched_cublaslt_bench(weights_f32.data(),
+                                                           input_f32.data(),
+                                                           args.bias ? bias_f32.data() : nullptr,
+                                                           got.data(),
+                                                           args.k,
+                                                           args.rows,
+                                                           args.cols,
+                                                           args.batches,
+                                                           args.warmup,
+                                                           args.iters,
+                                                           options,
+                                                           &custom);
+        if (status != 0) {
+            std::cerr << std::format("F16 cuBLASLt bench failed: {}\n", status);
+            return status;
+        }
+        std::cout << std::format(
+            "backend=CUDA-CUBLASLT-F16 k={} rows={} cols={} batches={} bias={} "
+            "fast_16f={} compute_16f={} algo_index={} workspace_mb={} warmup={} "
+            "iters={} mean_ms={:.6f} median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} "
+            "max_ms={:.6f}\n",
+            args.k,
+            args.rows,
+            args.cols,
+            args.batches,
+            args.bias ? 1 : 0,
+            args.f16_fast_compute ? 1 : 0,
+            args.f16_compute_16f ? 1 : 0,
+            args.algo_index,
+            args.workspace_mb,
+            args.warmup,
+            args.iters,
+            custom.mean_ms,
+            custom.median_ms,
+            custom.p95_ms,
+            custom.min_ms,
+            custom.max_ms);
+        return 0;
+    }
+
+    if (args.f16_mlp_chain) {
+        const size_t fc2_weight_elems = static_cast<size_t>(args.rows * args.out_rows);
+        const size_t fc2_bias_elems = static_cast<size_t>(args.out_rows);
+        const size_t chain_output_elems =
+            static_cast<size_t>(args.out_rows * args.cols * args.batches);
+        auto fc2_weights_f32 = make_input(fc2_weight_elems, 15);
+        auto fc2_bias_f32 = make_input(fc2_bias_elems, 16);
+        std::vector<float> got(chain_output_elems);
+        Sam3F16MlpChainResult custom{};
+        const Sam3F16CublasLtCompute compute =
+            args.f16_compute_16f ? Sam3F16CublasLtCompute::compute_16f
+                                 : (args.f16_fast_compute ? Sam3F16CublasLtCompute::fast_16f
+                                                          : Sam3F16CublasLtCompute::fp32);
+        const Sam3F16MlpChainOptions options{
+            .compute = compute,
+            .fc1_algo_index = args.fc1_algo_index >= 0 ? args.fc1_algo_index : args.algo_index,
+            .fc2_algo_index = args.fc2_algo_index >= 0 ? args.fc2_algo_index : args.algo_index,
+            .workspace_bytes = static_cast<size_t>(args.workspace_mb) * 1024 * 1024,
+        };
+        const int status =
+            sam3_f16_mlp_chain_cublaslt_bench(weights_f32.data(),
+                                              fc2_weights_f32.data(),
+                                              input_f32.data(),
+                                              args.bias ? bias_f32.data() : nullptr,
+                                              args.bias ? fc2_bias_f32.data() : nullptr,
+                                              got.data(),
+                                              args.k,
+                                              args.rows,
+                                              args.out_rows,
+                                              args.cols,
+                                              args.batches,
+                                              args.warmup,
+                                              args.iters,
+                                              options,
+                                              &custom);
+        if (status != 0) {
+            std::cerr << std::format("F16 MLP chain bench failed: {}\n", status);
+            return status;
+        }
+        std::cout << std::format(
+            "backend=CUDA-CUBLASLT-F16-MLP-CHAIN input_dim={} hidden_dim={} output_dim={} "
+            "cols={} batches={} bias={} fast_16f={} compute_16f={} fc1_algo_index={} "
+            "fc2_algo_index={} workspace_mb={} warmup={} iters={} mean_ms={:.6f} "
+            "median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f} "
+            "output_checksum={:.9g}\n",
+            args.k,
+            args.rows,
+            args.out_rows,
+            args.cols,
+            args.batches,
+            args.bias ? 1 : 0,
+            args.f16_fast_compute ? 1 : 0,
+            args.f16_compute_16f ? 1 : 0,
+            options.fc1_algo_index,
+            options.fc2_algo_index,
+            args.workspace_mb,
+            args.warmup,
+            args.iters,
+            custom.chain.mean_ms,
+            custom.chain.median_ms,
+            custom.chain.p95_ms,
+            custom.chain.min_ms,
+            custom.chain.max_ms,
+            custom.output_checksum);
+        return 0;
+    }
+
     if (args.bf16_cublaslt) {
         std::vector<float> got(output_elems);
         Sam3F32BatchedCustomResult custom{};
         const Sam3Bf16CublasLtOptions options{
             .direct_bf16_dst = args.bf16_direct_dst,
+            .c_f32_for_direct_dst = args.bf16_c_f32,
             .gelu_epilogue = args.gelu_epilogue,
             .compute = args.bf16_fast_compute ? Sam3Bf16CublasLtCompute::fast_16bf
                                               : Sam3Bf16CublasLtCompute::fp32,
+            .algo_index = args.algo_index,
+            .workspace_bytes = static_cast<size_t>(args.workspace_mb) * 1024 * 1024,
         };
         const int status = sam3_bf16_batched_cublaslt_bench(weights_f32.data(),
                                                             input_f32.data(),
@@ -532,16 +736,157 @@ int main(int argc, char** argv) {
         }
         std::cout << std::format(
             "backend=CUDA-CUBLASLT-BF16 k={} rows={} cols={} batches={} bias={} "
-            "direct_bf16_dst={} fast_16bf={} gelu_epilogue={} warmup={} iters={} "
-            "mean_ms={:.6f} median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f}\n",
+            "direct_bf16_dst={} c_f32_for_direct_dst={} fast_16bf={} gelu_epilogue={} "
+            "algo_index={} workspace_mb={} warmup={} iters={} mean_ms={:.6f} "
+            "median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f}\n",
             args.k,
             args.rows,
             args.cols,
             args.batches,
             args.bias ? 1 : 0,
             args.bf16_direct_dst ? 1 : 0,
+            args.bf16_c_f32 ? 1 : 0,
             args.bf16_fast_compute ? 1 : 0,
             args.gelu_epilogue ? 1 : 0,
+            args.algo_index,
+            args.workspace_mb,
+            args.warmup,
+            args.iters,
+            custom.mean_ms,
+            custom.median_ms,
+            custom.p95_ms,
+            custom.min_ms,
+            custom.max_ms);
+        return 0;
+    }
+
+    if (args.bf16_mlp_chain) {
+        const size_t fc2_weight_elems = static_cast<size_t>(args.rows * args.out_rows);
+        const size_t fc2_bias_elems = static_cast<size_t>(args.out_rows);
+        const size_t chain_output_elems =
+            static_cast<size_t>(args.out_rows * args.cols * args.batches);
+        auto fc2_weights_f32 = make_input(fc2_weight_elems, 15);
+        auto fc2_bias_f32 = make_input(fc2_bias_elems, 16);
+        std::vector<float> got(chain_output_elems);
+        Sam3Bf16MlpChainResult custom{};
+        const int status = sam3_bf16_mlp_chain_cublaslt_bench(
+            weights_f32.data(),
+            fc2_weights_f32.data(),
+            input_f32.data(),
+            args.bias ? bias_f32.data() : nullptr,
+            args.bias ? fc2_bias_f32.data() : nullptr,
+            got.data(),
+            args.k,
+            args.rows,
+            args.out_rows,
+            args.cols,
+            args.batches,
+            args.warmup,
+            args.iters,
+            args.bf16_fast_compute ? Sam3Bf16CublasLtCompute::fast_16bf
+                                   : Sam3Bf16CublasLtCompute::fp32,
+            static_cast<size_t>(args.workspace_mb) * 1024 * 1024,
+            args.bf16_mlp_direct_fc1,
+            &custom);
+        if (status != 0) {
+            std::cerr << std::format("BF16 MLP chain bench failed: {}\n", status);
+            return status;
+        }
+        std::cout << std::format(
+            "backend=CUDA-CUBLASLT-BF16-MLP-CHAIN input_dim={} hidden_dim={} output_dim={} "
+            "cols={} batches={} bias={} fast_16bf={} direct_fc1_bf16_no_bias={} "
+            "workspace_mb={} warmup={} iters={} mean_ms={:.6f} median_ms={:.6f} "
+            "p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f} output_checksum={:.9g}\n",
+            args.k,
+            args.rows,
+            args.out_rows,
+            args.cols,
+            args.batches,
+            args.bias ? 1 : 0,
+            args.bf16_fast_compute ? 1 : 0,
+            args.bf16_mlp_direct_fc1 ? 1 : 0,
+            args.workspace_mb,
+            args.warmup,
+            args.iters,
+            custom.chain.mean_ms,
+            custom.chain.median_ms,
+            custom.chain.p95_ms,
+            custom.chain.min_ms,
+            custom.chain.max_ms,
+            custom.output_checksum);
+        return 0;
+    }
+
+    if (args.bf16_gelu_cast) {
+        const size_t gelu_elems = static_cast<size_t>(args.rows * args.cols * args.batches);
+        auto gelu_input_f32 = make_input(gelu_elems, 17);
+        std::vector<float> got(gelu_elems);
+        Sam3Bf16GeluCastResult custom{};
+        const int status = sam3_bf16_gelu_cast_bench(gelu_input_f32.data(),
+                                                     got.data(),
+                                                     args.rows,
+                                                     args.cols,
+                                                     args.batches,
+                                                     args.warmup,
+                                                     args.iters,
+                                                     &custom);
+        if (status != 0) {
+            std::cerr << std::format("BF16 GELU cast bench failed: {}\n", status);
+            return status;
+        }
+        std::cout << std::format(
+            "backend=CUDA-BF16-GELU-CAST rows={} cols={} batches={} warmup={} iters={} "
+            "mean_ms={:.6f} median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f} "
+            "output_checksum={:.9g}\n",
+            args.rows,
+            args.cols,
+            args.batches,
+            args.warmup,
+            args.iters,
+            custom.gelu_cast.mean_ms,
+            custom.gelu_cast.median_ms,
+            custom.gelu_cast.p95_ms,
+            custom.gelu_cast.min_ms,
+            custom.gelu_cast.max_ms,
+            custom.output_checksum);
+        return 0;
+    }
+
+    if (args.bf16_wmma) {
+        if (args.check && args.gelu_epilogue) {
+            std::cerr << "--check is only valid for --bf16-wmma without --gelu-epilogue\n";
+            return 2;
+        }
+        std::vector<float> got(output_elems);
+        Sam3F32BatchedCustomResult custom{};
+        const int status = sam3_bf16_wmma_bench(weights_f32.data(),
+                                                input_f32.data(),
+                                                args.bias ? bias_f32.data() : nullptr,
+                                                got.data(),
+                                                args.k,
+                                                args.rows,
+                                                args.cols,
+                                                args.batches,
+                                                args.warmup,
+                                                args.iters,
+                                                args.gelu_epilogue,
+                                                &custom);
+        if (status != 0) {
+            std::cerr << std::format("BF16 WMMA bench failed: {}\n", status);
+            return status;
+        }
+        if (args.check && !check_reference(args, weights_f32, input_f32, bias_f32, got)) {
+            return 1;
+        }
+        std::cout << std::format(
+            "backend={} k={} rows={} cols={} batches={} bias={} warmup={} iters={} "
+            "mean_ms={:.6f} median_ms={:.6f} p95_ms={:.6f} min_ms={:.6f} max_ms={:.6f}\n",
+            args.gelu_epilogue ? "CUDA-WMMA-BF16-BIAS-GELU-BF16" : "CUDA-WMMA-BF16",
+            args.k,
+            args.rows,
+            args.cols,
+            args.batches,
+            args.bias ? 1 : 0,
             args.warmup,
             args.iters,
             custom.mean_ms,
@@ -552,7 +897,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 #else
-    if (args.custom_cuda || args.cublaslt_bias || args.bf16_cublaslt || args.gelu_quant_ds4) {
+    if (args.custom_cuda || args.cublaslt_bias || args.f16_cublaslt || args.bf16_cublaslt ||
+        args.bf16_mlp_chain || args.bf16_gelu_cast || args.bf16_wmma || args.gelu_quant_ds4) {
         std::cerr << "custom CUDA backend is not compiled in\n";
         return 1;
     }

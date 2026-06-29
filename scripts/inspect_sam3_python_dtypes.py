@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import inspect
 import json
 import sys
@@ -92,6 +93,7 @@ def main() -> int:
     parser.add_argument("--frame-dir", type=Path, required=True)
     parser.add_argument("--version", default="sam3", choices=["sam3", "sam3.1"])
     parser.add_argument("--prompt", default="person")
+    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--tf32", choices=["on", "off"], default="on")
     parser.add_argument("--module", action="append", default=[])
     parser.add_argument("--out", type=Path)
@@ -107,7 +109,19 @@ def main() -> int:
 
     from sam3.model_builder import build_sam3_predictor
 
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    if args.dtype == "bf16":
+        autocast_dtype: torch.dtype | None = torch.bfloat16
+    elif args.dtype == "fp16":
+        autocast_dtype = torch.float16
+    else:
+        autocast_dtype = None
+
+    def precision_context() -> contextlib.AbstractContextManager[object]:
+        if autocast_dtype is None:
+            return contextlib.nullcontext()
+        return torch.autocast(device_type="cuda", dtype=autocast_dtype)
+
+    with precision_context():
         predictor = build_sam3_predictor(
             version=args.version,
             compile=False,
@@ -122,13 +136,17 @@ def main() -> int:
     dtypes: dict[str, dict[str, Any]] = {}
 
     def make_hook(name: str):
-        def hook(_module: Any, inputs: tuple[Any, ...], output: Any) -> None:
+        def hook(module: Any, inputs: tuple[Any, ...], output: Any) -> None:
             if name in dtypes:
                 return
             dtypes[name] = {
                 "input": tensor_desc(inputs[0] if inputs else None),
                 "output": tensor_desc(output),
             }
+            if torch.is_tensor(getattr(module, "weight", None)):
+                dtypes[name]["weight"] = tensor_desc(module.weight)
+            if torch.is_tensor(getattr(module, "bias", None)):
+                dtypes[name]["bias"] = tensor_desc(module.bias)
 
         return hook
 
@@ -138,7 +156,7 @@ def main() -> int:
     for name in modules:
         named_modules[name].register_forward_hook(make_hook(name))
 
-    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+    with precision_context():
         response = predictor.handle_request(
             {"type": "start_session", "resource_path": str(args.frame_dir)}
         )
@@ -162,7 +180,7 @@ def main() -> int:
         "frame_dir": str(args.frame_dir),
         "prompt": args.prompt,
         "tf32": args.tf32,
-        "autocast_dtype": "torch.bfloat16",
+        "autocast_dtype": str(autocast_dtype) if autocast_dtype is not None else "none",
         "modules": dtypes,
     }
     text = json.dumps(result, indent=2) + "\n"

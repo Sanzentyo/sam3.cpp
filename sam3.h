@@ -110,6 +110,69 @@ struct sam3_result {
     std::vector<sam3_detection> detections;
 };
 
+struct sam3_tracker_add_timing {
+    double mask_prepare_ms = 0.0;
+    double memory_encode_ms = 0.0;
+    double obj_ptr_ms = 0.0;
+    double store_ms = 0.0;
+};
+
+struct sam3_encode_timing {
+    double total_ms = 0.0;
+    double preprocess_ms = 0.0;
+    double graph_build_ms = 0.0;
+    double graph_alloc_ms = 0.0;
+    double input_upload_ms = 0.0;
+    double graph_compute_ms = 0.0;
+    double state_update_ms = 0.0;
+    double pe_build_ms = 0.0;
+    bool used_cuda_preprocess = false;
+    bool include_detector_neck = false;
+};
+
+struct sam3_propagate_timing {
+    double total_ms = 0.0;
+    double prepare_caches_ms = 0.0;
+    double memory_slot_read_ms = 0.0;
+    double obj_ptr_read_ms = 0.0;
+    double prompt_build_ms = 0.0;
+    double memory_prepare_ms = 0.0;
+    double ptr_prepare_ms = 0.0;
+    double rope_cache_ms = 0.0;
+    double rope_k_build_ms = 0.0;
+    double graph_build_ms = 0.0;
+    double graph_alloc_ms = 0.0;
+    double input_upload_ms = 0.0;
+    double input_prompt_upload_ms = 0.0;
+    double input_rope_upload_ms = 0.0;
+    double input_memory_upload_ms = 0.0;
+    double input_feature_upload_ms = 0.0;
+    double input_constant_upload_ms = 0.0;
+    double input_sparse_upload_ms = 0.0;
+    double graph_compute_ms = 0.0;
+    double output_read_ms = 0.0;
+    double graph_cache_build_ms = 0.0;
+    double graph_cache_input_upload_ms = 0.0;
+    double graph_cache_compute_ms = 0.0;
+    double graph_cache_output_read_ms = 0.0;
+    double bbox_from_logits_ms = 0.0;
+    double fullmask_active_resize_bbox_ms = 0.0;
+    double fullmask_pending_resize_bbox_ms = 0.0;
+    double memory_update_ms = 0.0;
+    double tracker_update_ms = 0.0;
+    double result_build_ms = 0.0;
+    int single_calls = 0;
+    int active_masklets = 0;
+    int pending_masklets = 0;
+    bool used_sam31_graph_cache = false;
+    bool aliased_feature_inputs = false;
+    bool aliased_constant_inputs = false;
+    int aliased_feature_input_count = 0;
+    int aliased_constant_input_count = 0;
+    int uploaded_feature_input_count = 0;
+    int uploaded_constant_input_count = 0;
+};
+
 /*****************************************************************************
 ** Parameters
 **
@@ -137,6 +200,8 @@ enum class sam3_vit_block_stage {
     norm1 = 0,
     window_part,
     qkv_proj,
+    qkv_layout,
+    qkv_rope,
     attn_core,
     attn_proj,
     window_unpart,
@@ -145,6 +210,8 @@ enum class sam3_vit_block_stage {
     mlp_gelu,
     mlp_fc2,
     mlp,
+    block,
+    mlp_fc1_gelu,
 };
 
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_NORM1 = sam3_vit_block_stage::norm1;
@@ -152,6 +219,10 @@ inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_WINDOW_PART =
     sam3_vit_block_stage::window_part;
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_QKV_PROJ =
     sam3_vit_block_stage::qkv_proj;
+inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_QKV_LAYOUT =
+    sam3_vit_block_stage::qkv_layout;
+inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_QKV_ROPE =
+    sam3_vit_block_stage::qkv_rope;
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_ATTN_CORE =
     sam3_vit_block_stage::attn_core;
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_ATTN_PROJ =
@@ -164,6 +235,9 @@ inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_MLP_GELU =
     sam3_vit_block_stage::mlp_gelu;
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_MLP_FC2 = sam3_vit_block_stage::mlp_fc2;
 inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_MLP = sam3_vit_block_stage::mlp;
+inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_BLOCK = sam3_vit_block_stage::block;
+inline constexpr sam3_vit_block_stage SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU =
+    sam3_vit_block_stage::mlp_fc1_gelu;
 
 enum class sam3_vit_prefix_stage {
     patch_embed = 0,
@@ -285,6 +359,20 @@ void sam3_free_state(sam3_state& state);
 bool sam3_encode_image(sam3_state& state, const sam3_model& model, const sam3_image& image);
 
 /*
+** Encode only the tracker neck for propagation. This is useful when the caller
+** already knows detector features are not needed for the frame.
+*/
+bool sam3_encode_image_for_tracking(sam3_state& state,
+                                    const sam3_model& model,
+                                    const sam3_image& image);
+
+/* Return timings for the last sam3_encode_image* call on this thread. */
+sam3_encode_timing sam3_last_encode_timing();
+
+/* Return timings for the last sam3_propagate_* call on this thread. */
+sam3_propagate_timing sam3_last_propagate_timing();
+
+/*
 ** ── Image Segmentation ──────────────────────────────────────────────────
 */
 
@@ -336,6 +424,9 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
                                const sam3_model& model,
                                const sam3_detection& det);
 
+/* Return timings for the last sam3_tracker_add_detection call on this thread. */
+sam3_tracker_add_timing sam3_tracker_last_add_timing();
+
 /* Return the current frame index of the tracker. */
 int sam3_tracker_frame_index(const sam3_tracker& tracker);
 
@@ -371,6 +462,15 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
                                  sam3_state& state,
                                  const sam3_model& model,
                                  const sam3_image& frame);
+
+/*
+** Propagate all tracked instances on an already-encoded tracker state.
+** The caller must have called sam3_encode_image_for_tracking() or an equivalent
+** tracker-neck encode for the current frame.
+*/
+sam3_result sam3_propagate_encoded_frame(sam3_tracker& tracker,
+                                         sam3_state& state,
+                                         const sam3_model& model);
 
 /*
 ** ── Utility ─────────────────────────────────────────────────────────────
@@ -544,6 +644,43 @@ bool sam3_test_dump_sam31_mux_mask_decoder_case(const sam3_model& model,
                                                 int n_threads = 4);
 
 /*
+** Run the SAM3.1 Object Multiplex memory-backbone feature slice from
+** pre-dumped inputs produced by dump_sam31_memory_backbone_case.py.
+*/
+bool sam3_test_dump_sam31_memory_backbone_case(const sam3_model& model,
+                                               const std::string& case_ref_dir,
+                                               const std::string& output_dir,
+                                               int n_threads = 4);
+
+/*
+** Run the SAM3.1 propagation feature-adapter slice from pre-dumped ViT tokens
+** produced by dump_sam31_propagation_features_case.py.
+*/
+bool sam3_test_dump_sam31_propagation_features_case(const sam3_model& model,
+                                                    const std::string& case_ref_dir,
+                                                    const std::string& output_dir,
+                                                    int n_threads = 4);
+
+/*
+** Run the SAM3.1 Object Multiplex memory-attention encoder slice from
+** pre-dumped inputs produced by dump_sam31_memory_attention_case.py.
+*/
+bool sam3_test_dump_sam31_memory_attention_case(const sam3_model& model,
+                                                const std::string& case_ref_dir,
+                                                const std::string& output_dir,
+                                                int n_threads = 4);
+
+/*
+** Run the SAM3.1 Object Multiplex memory-attention encoder output directly into
+** the propagation mask decoder from pre-dumped inputs produced by
+** dump_sam31_memory_attention_decoder_case.py.
+*/
+bool sam3_test_dump_sam31_memory_attention_decoder_case(const sam3_model& model,
+                                                        const std::string& case_ref_dir,
+                                                        const std::string& output_dir,
+                                                        int n_threads = 4);
+
+/*
 ** Run the geometry encoder from pre-computed backbone features and dump
 ** intermediate tensors.  Tests exemplar box coordinate encoding against
 ** Python reference.
@@ -610,6 +747,21 @@ bool sam3_encode_vit_from_preprocessed_selective(sam3_state& state,
                                                  const std::vector<std::string>& output_tensors);
 
 /*
+** Test-only: run the exact ViT encoder from a loaded image and keep only the
+** requested intermediate tensors alive for dumping/comparison. This uses the
+** model-native image size so stage timings keep the same input contract as the
+** required E2E path.
+*/
+bool sam3_encode_vit_from_image_selective(sam3_state& state,
+                                          const sam3_model& model,
+                                          const sam3_image& image,
+                                          const std::vector<std::string>& output_tensors);
+
+/* Test-only: query ViT block structure without exposing the model internals. */
+int sam3_test_vit_depth(const sam3_model& model);
+bool sam3_test_vit_block_is_global(const sam3_model& model, int block_idx);
+
+/*
 ** Test-only: run the exact ViT prefix up to the tensor entering block 0
 ** (patch embed + pos embed + ln_pre).
 */
@@ -659,6 +811,43 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
                                    std::vector<float>& output_data,
                                    int64_t output_ne[4],
                                    int n_threads = 4);
+
+bool sam3_test_bench_vit_block_stage(const sam3_model& model,
+                                     int block_idx,
+                                     sam3_vit_block_stage stage,
+                                     std::span<const float> input_data,
+                                     std::array<int64_t, 4> input_ne,
+                                     int warmup_runs,
+                                     int repeats,
+                                     std::vector<double>& timings_ms,
+                                     std::vector<float>& output_data,
+                                     int64_t output_ne[4],
+                                     int n_threads = 4);
+
+/*
+** Test-only: benchmark SAM3 ViT, optionally including the tracker neck, with a
+** synthetic batch made by repeating one decoded image. This is for validating
+** whether a future multi-frame video-cache path can amortize ViT/neck work.
+*/
+struct sam3_batch_lane_check {
+    double max_abs_diff = 0.0;
+    double mean_abs_diff = 0.0;
+    int compared_lanes = 0;
+};
+
+bool sam3_test_bench_sam3_vit_batch(const sam3_model& model,
+                                    const sam3_image& image,
+                                    int batch_size,
+                                    bool include_tracker_neck,
+                                    int vit_blocks,
+                                    int block_stage_index,
+                                    std::optional<sam3_vit_block_stage> block_stage,
+                                    int warmup_runs,
+                                    int repeats,
+                                    std::vector<double>& timings_ms,
+                                    int64_t output_ne[4],
+                                    std::optional<sam3_batch_lane_check>& lane_check,
+                                    int n_threads = 4);
 
 /*
 ** ── Profiling ───────────────────────────────────────────────────────────

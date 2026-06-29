@@ -49,6 +49,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,6 +61,7 @@
 #include <numbers>
 #include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -97,8 +99,7 @@ static constexpr float SAM3_PI = std::numbers::pi_v<float>;
 #define SAM3_LOG_LEVEL 1
 #endif
 
-template <typename... Args>
-static void sam3_log(int level, const char* fmt, Args... args) {
+static int sam3_log_runtime_level() {
     static const int runtime_level = [] {
         const char* env = std::getenv("SAM3_LOG_RUNTIME_LEVEL");
         if (!env || *env == '\0') {
@@ -106,6 +107,16 @@ static void sam3_log(int level, const char* fmt, Args... args) {
         }
         return std::atoi(env);
     }();
+    return runtime_level;
+}
+
+[[nodiscard]] static bool sam3_should_log(int level) {
+    return level <= sam3_log_runtime_level();
+}
+
+template <typename... Args>
+static void sam3_log(int level, const char* fmt, Args... args) {
+    const int runtime_level = sam3_log_runtime_level();
     if (level <= runtime_level) {
         fprintf(stderr, fmt, args...);
     }
@@ -886,6 +897,8 @@ struct sam3_mem_attn_layer {
     struct ggml_tensor* sa_k_b = nullptr;
     struct ggml_tensor* sa_v_w = nullptr;
     struct ggml_tensor* sa_v_b = nullptr;
+    struct ggml_tensor* sa_qkv_w = nullptr;
+    struct ggml_tensor* sa_qkv_b = nullptr;
     struct ggml_tensor* sa_out_w = nullptr;
     struct ggml_tensor* sa_out_b = nullptr;
     struct ggml_tensor* norm1_w = nullptr;
@@ -893,8 +906,12 @@ struct sam3_mem_attn_layer {
     // cross-attention (RoPE, kv_dim=64)
     struct ggml_tensor* ca_q_w = nullptr;
     struct ggml_tensor* ca_q_b = nullptr;
+    struct ggml_tensor* image_ca_q_w = nullptr;
+    struct ggml_tensor* image_ca_q_b = nullptr;
     struct ggml_tensor* ca_k_w = nullptr;  // [256, 64]
     struct ggml_tensor* ca_k_b = nullptr;
+    struct ggml_tensor* image_ca_k_w = nullptr;
+    struct ggml_tensor* image_ca_k_b = nullptr;
     struct ggml_tensor* ca_v_w = nullptr;  // [256, 64]
     struct ggml_tensor* ca_v_b = nullptr;
     struct ggml_tensor* ca_out_w = nullptr;
@@ -1082,6 +1099,127 @@ struct edgetam_perceiver {
 ** Top-Level Opaque Types (defined here, forward-declared in sam3.h)
 *****************************************************************************/
 
+struct sam3_bilinear_axis_map {
+    int src = 0;
+    int dst = 0;
+    std::vector<int> lo;
+    std::vector<int> hi;
+    std::vector<float> w;
+
+    void reset() noexcept {
+        src = 0;
+        dst = 0;
+        lo.clear();
+        hi.clear();
+        w.clear();
+    }
+};
+
+struct sam31_interactive_obj_ptr_graph_cache {
+    int D = 0;
+    int H = 0;
+    int image_size = 0;
+    ggml_backend_t backend = nullptr;
+    GgmlContextHandle ctx;
+    GgmlBackendBufferHandle buffer;
+    ggml_cgraph* graph = nullptr;
+    ggml_tensor* image_raw = nullptr;
+    ggml_tensor* feat_s0 = nullptr;
+    ggml_tensor* feat_s1 = nullptr;
+    ggml_tensor* sparse = nullptr;
+    ggml_tensor* image_pe = nullptr;
+    ggml_tensor* mask_prompt = nullptr;
+    ggml_tensor* sam_token = nullptr;
+    ggml_tensor* obj_score = nullptr;
+    bool mask_prompt_weights_valid = false;
+    std::array<float, 16> mask_prompt_downsample_w = {};
+    float mask_prompt_downsample_b = 0.0f;
+    sam3_bilinear_axis_map mask_to_image_x;
+    sam3_bilinear_axis_map mask_to_image_y;
+    sam3_bilinear_axis_map conv_to_prompt_x;
+    sam3_bilinear_axis_map conv_to_prompt_y;
+    std::vector<float> mask_prompt_image;
+    std::vector<float> mask_prompt_conv;
+    std::vector<float> mask_prompt_cpu;
+
+    [[nodiscard]] bool matches(int expected_D,
+                               int expected_H,
+                               int expected_image_size,
+                               ggml_backend_t expected_backend) const noexcept {
+        return graph != nullptr && D == expected_D && H == expected_H &&
+               image_size == expected_image_size && backend == expected_backend;
+    }
+
+    void reset() noexcept {
+        D = 0;
+        H = 0;
+        image_size = 0;
+        backend = nullptr;
+        graph = nullptr;
+        image_raw = nullptr;
+        feat_s0 = nullptr;
+        feat_s1 = nullptr;
+        sparse = nullptr;
+        image_pe = nullptr;
+        mask_prompt = nullptr;
+        sam_token = nullptr;
+        obj_score = nullptr;
+        mask_prompt_weights_valid = false;
+        mask_prompt_downsample_w = {};
+        mask_prompt_downsample_b = 0.0f;
+        mask_to_image_x.reset();
+        mask_to_image_y.reset();
+        conv_to_prompt_x.reset();
+        conv_to_prompt_y.reset();
+        mask_prompt_image.clear();
+        mask_prompt_conv.clear();
+        mask_prompt_cpu.clear();
+        buffer.reset();
+        ctx.reset();
+    }
+};
+
+struct sam3_mask_input_obj_ptr_graph_cache {
+    int D = 0;
+    int H = 0;
+    ggml_backend_t backend = nullptr;
+    GgmlContextHandle ctx;
+    GgmlBackendBufferHandle buffer;
+    ggml_cgraph* graph = nullptr;
+    ggml_tensor* image_feats = nullptr;
+    ggml_tensor* feat_s0 = nullptr;
+    ggml_tensor* feat_s1 = nullptr;
+    ggml_tensor* sparse = nullptr;
+    ggml_tensor* image_pe = nullptr;
+    ggml_tensor* mask_prompt = nullptr;
+    ggml_tensor* sam_token = nullptr;
+    ggml_tensor* obj_score = nullptr;
+
+    [[nodiscard]] bool matches(int expected_D,
+                               int expected_H,
+                               ggml_backend_t expected_backend) const noexcept {
+        return graph != nullptr && D == expected_D && H == expected_H &&
+               backend == expected_backend;
+    }
+
+    void reset() noexcept {
+        D = 0;
+        H = 0;
+        backend = nullptr;
+        graph = nullptr;
+        image_feats = nullptr;
+        feat_s0 = nullptr;
+        feat_s1 = nullptr;
+        sparse = nullptr;
+        image_pe = nullptr;
+        mask_prompt = nullptr;
+        sam_token = nullptr;
+        obj_score = nullptr;
+        buffer.reset();
+        ctx.reset();
+    }
+};
+
 struct sam3_model {
     sam3_hparams hparams;
     ggml_type weight_type = GGML_TYPE_F16;
@@ -1095,6 +1233,7 @@ struct sam3_model {
     sam3_detr_decoder ddec;
     sam3_geom_encoder geom_enc;
     sam3_seg_head seg_head;
+    sam3_neck sam31_interactive_neck;
 
     // ── SAM2-specific (loaded only when model_type == SAM2) ──────────────
     sam2_hiera hiera;
@@ -1112,10 +1251,14 @@ struct sam3_model {
 
     // ── SAM3.1 Object Multiplex tracker tensors ─────────────────────────
     sam31_multiplex_mask_dec sam31_sam_dec;
+    sam3_sam_prompt_enc sam31_interactive_sam_pe;
+    sam3_sam_mask_dec sam31_interactive_sam_dec;
 
     // object pointer projection
     struct ggml_tensor* obj_ptr_proj_w[3] = {};
     struct ggml_tensor* obj_ptr_proj_b[3] = {};
+    struct ggml_tensor* interactive_obj_ptr_proj_w[3] = {};
+    struct ggml_tensor* interactive_obj_ptr_proj_b[3] = {};
     struct ggml_tensor* no_obj_ptr = nullptr;
     struct ggml_tensor* obj_ptr_tpos_w = nullptr;
     struct ggml_tensor* obj_ptr_tpos_b = nullptr;
@@ -1124,6 +1267,12 @@ struct sam3_model {
     struct ggml_tensor* no_mem_embed = nullptr;          // [1, 1, 256]
     struct ggml_tensor* no_mem_pos_enc = nullptr;        // [1, 1, 256]
     struct ggml_tensor* no_obj_embed_spatial = nullptr;  // [1, 64]
+    struct ggml_tensor* sam31_output_valid_embed = nullptr;
+    struct ggml_tensor* sam31_output_invalid_embed = nullptr;
+    struct ggml_tensor* sam31_interactivity_no_mem_embed = nullptr;
+    struct ggml_tensor* sam31_interactive_mask_downsample_w = nullptr;
+    struct ggml_tensor* sam31_interactive_mask_downsample_b = nullptr;
+    struct ggml_tensor* sam31_propagation_pe_gaussian = nullptr;
     struct ggml_tensor* mem_attn_norm_w = nullptr;
     struct ggml_tensor* mem_attn_norm_b = nullptr;
 
@@ -1134,17 +1283,50 @@ struct sam3_model {
     struct ggml_context* ctx = nullptr;
     ggml_backend_t backend = nullptr;
     ggml_backend_buffer_t buffer = nullptr;
+    GgmlContextHandle sam31_fused_mem_attn_sa_qkv_ctx;
+    GgmlBackendBufferHandle sam31_fused_mem_attn_sa_qkv_buffer;
 
     // CPU-side cache for the small object-pointer MLP. The projection weights are
     // fixed per model and are used repeatedly during video propagation.
     mutable bool obj_ptr_cpu_cache_valid = false;
     mutable std::vector<float> obj_ptr_proj_w_cpu[3];
     mutable std::vector<float> obj_ptr_proj_b_cpu[3];
+    mutable bool interactive_obj_ptr_cpu_cache_valid = false;
+    mutable std::vector<float> interactive_obj_ptr_proj_w_cpu[3];
+    mutable std::vector<float> interactive_obj_ptr_proj_b_cpu[3];
     mutable std::vector<float> no_obj_ptr_cpu;
     mutable bool prompt_pos_cpu_cache_valid = false;
     mutable std::vector<float> mem_tpos_cpu;
     mutable std::vector<float> obj_ptr_tpos_w_cpu;
     mutable std::vector<float> obj_ptr_tpos_b_cpu;
+    mutable sam31_interactive_obj_ptr_graph_cache sam31_interactive_obj_ptr_cache;
+    mutable std::mutex sam31_interactive_warmup_mutex;
+    mutable bool sam31_interactive_warmup_done = false;
+    mutable GgmlContextHandle sam3_neck_pe_ctx;
+    mutable GgmlBackendBufferHandle sam3_neck_pe_buffer;
+    mutable std::array<int, 4> sam3_neck_pe_size = {};
+    mutable int sam3_neck_pe_dim = 0;
+    mutable bool prompt_pe_cache_valid = false;
+    mutable int prompt_pe_cache_d = 0;
+    mutable int prompt_pe_cache_h = 0;
+    mutable std::vector<float> prompt_pe_gauss_cache;
+    mutable std::array<std::array<float, 256>, 4> prompt_point_emb_cache = {};
+    mutable std::array<float, 256> prompt_not_a_point_cache = {};
+    mutable std::array<float, 256> prompt_no_mask_emb_cache = {};
+    mutable std::vector<float> prompt_dense_pe_cache;
+    mutable std::vector<float> prompt_dense_nomask_cache;
+    mutable GgmlContextHandle prompt_pe_ctx;
+    mutable GgmlBackendBufferHandle prompt_pe_buffer;
+    mutable struct ggml_tensor* prompt_dense_pe_tensor = nullptr;
+    mutable struct ggml_tensor* prompt_dense_nomask_tensor = nullptr;
+    mutable struct ggml_tensor* prompt_not_a_point_tensor = nullptr;
+    mutable bool sam31_prop_pe_cache_valid = false;
+    mutable int sam31_prop_pe_cache_d = 0;
+    mutable int sam31_prop_pe_cache_h = 0;
+    mutable std::vector<float> sam31_prop_dense_pe_cache;
+    mutable GgmlContextHandle sam31_prop_pe_ctx;
+    mutable GgmlBackendBufferHandle sam31_prop_pe_buffer;
+    mutable struct ggml_tensor* sam31_prop_dense_pe_tensor = nullptr;
 
     // tensor lookup
     std::map<std::string, struct ggml_tensor*> tensors;
@@ -1238,6 +1420,325 @@ static void sam31_bind_multiplex_mask_decoder(sam3_model& model) {
     }
 }
 
+static void sam31_bind_interactive_prompt_encoder(sam3_model& model) {
+    auto& pe = model.sam31_interactive_sam_pe;
+    const std::string p = "trk.model.interactive_sam_prompt_encoder";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    pe.pe_gaussian = get(p + ".pe_layer.positional_encoding_gaussian_matrix");
+    for (int i = 0; i < 4; ++i) {
+        pe.point_embed[i] = get(p + ".point_embeddings." + std::to_string(i) + ".weight");
+    }
+    pe.not_a_point_embed = get(p + ".not_a_point_embed.weight");
+    pe.no_mask_embed = get(p + ".no_mask_embed.weight");
+    pe.mask_ds_conv_w[0] = get(p + ".mask_downscaling.0.weight");
+    pe.mask_ds_conv_b[0] = get(p + ".mask_downscaling.0.bias");
+    pe.mask_ds_norm_w[0] = get(p + ".mask_downscaling.1.weight");
+    pe.mask_ds_norm_b[0] = get(p + ".mask_downscaling.1.bias");
+    pe.mask_ds_conv_w[1] = get(p + ".mask_downscaling.3.weight");
+    pe.mask_ds_conv_b[1] = get(p + ".mask_downscaling.3.bias");
+    pe.mask_ds_norm_w[1] = get(p + ".mask_downscaling.4.weight");
+    pe.mask_ds_norm_b[1] = get(p + ".mask_downscaling.4.bias");
+    pe.mask_ds_conv_w[2] = get(p + ".mask_downscaling.6.weight");
+    pe.mask_ds_conv_b[2] = get(p + ".mask_downscaling.6.bias");
+}
+
+static void sam31_bind_propagation_dense_pe(sam3_model& model) {
+    const std::string name = "trk.model.image_pe_layer.positional_encoding_gaussian_matrix";
+    if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+        model.sam31_propagation_pe_gaussian = it->second;
+    }
+}
+
+static void sam31_bind_interactive_mask_decoder(sam3_model& model) {
+    auto& dec = model.sam31_interactive_sam_dec;
+    const std::string p = "trk.model.interactive_sam_mask_decoder";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    auto bind_attn = [&](sam3_sam_attn& a, const std::string& pfx) {
+        a.q_w = get(pfx + ".q_proj.weight");
+        a.q_b = get(pfx + ".q_proj.bias");
+        a.k_w = get(pfx + ".k_proj.weight");
+        a.k_b = get(pfx + ".k_proj.bias");
+        a.v_w = get(pfx + ".v_proj.weight");
+        a.v_b = get(pfx + ".v_proj.bias");
+        a.out_w = get(pfx + ".out_proj.weight");
+        a.out_b = get(pfx + ".out_proj.bias");
+    };
+
+    dec.iou_token = get(p + ".iou_token.weight");
+    dec.mask_tokens = get(p + ".mask_tokens.weight");
+    dec.obj_score_token = get(p + ".obj_score_token.weight");
+
+    dec.twoway_blocks.resize(2);
+    for (int i = 0; i < 2; ++i) {
+        auto& blk = dec.twoway_blocks[static_cast<size_t>(i)];
+        const auto bp = p + ".transformer.layers." + std::to_string(i);
+        bind_attn(blk.self_attn, bp + ".sa");
+        bind_attn(blk.ca_tok2img, bp + ".cross_attn_token_to_image");
+        bind_attn(blk.ca_img2tok, bp + ".cross_attn_image_to_token");
+        blk.norm1_w = get(bp + ".norm1.weight");
+        blk.norm1_b = get(bp + ".norm1.bias");
+        blk.norm2_w = get(bp + ".norm2.weight");
+        blk.norm2_b = get(bp + ".norm2.bias");
+        blk.norm3_w = get(bp + ".norm3.weight");
+        blk.norm3_b = get(bp + ".norm3.bias");
+        blk.norm4_w = get(bp + ".norm4.weight");
+        blk.norm4_b = get(bp + ".norm4.bias");
+        blk.mlp_fc1_w = get(bp + ".mlp.lin1.weight");
+        blk.mlp_fc1_b = get(bp + ".mlp.lin1.bias");
+        blk.mlp_fc2_w = get(bp + ".mlp.lin2.weight");
+        blk.mlp_fc2_b = get(bp + ".mlp.lin2.bias");
+    }
+
+    bind_attn(dec.final_attn, p + ".transformer.final_attn_token_to_image");
+    dec.final_norm_w = get(p + ".transformer.norm_final_attn.weight");
+    dec.final_norm_b = get(p + ".transformer.norm_final_attn.bias");
+
+    dec.up1_w = get(p + ".output_upscaling.0.weight");
+    dec.up1_b = get(p + ".output_upscaling.0.bias");
+    dec.up1_norm_w = get(p + ".output_upscaling.1.weight");
+    dec.up1_norm_b = get(p + ".output_upscaling.1.bias");
+    dec.up2_w = get(p + ".output_upscaling.3.weight");
+    dec.up2_b = get(p + ".output_upscaling.3.bias");
+    dec.conv_s0_w = get(p + ".conv_s0.weight");
+    dec.conv_s0_b = get(p + ".conv_s0.bias");
+    dec.conv_s1_w = get(p + ".conv_s1.weight");
+    dec.conv_s1_b = get(p + ".conv_s1.bias");
+
+    for (int m = 0; m < 4; ++m) {
+        for (int j = 0; j < 3; ++j) {
+            const auto bp = p + ".output_hypernetworks_mlps." + std::to_string(m) + ".layers." +
+                            std::to_string(j);
+            dec.hyper_w[static_cast<size_t>(m)][static_cast<size_t>(j)] = get(bp + ".weight");
+            dec.hyper_b[static_cast<size_t>(m)][static_cast<size_t>(j)] = get(bp + ".bias");
+        }
+    }
+
+    for (int j = 0; j < 3; ++j) {
+        const auto iou_bp = p + ".iou_prediction_head.layers." + std::to_string(j);
+        dec.iou_head_w[static_cast<size_t>(j)] = get(iou_bp + ".weight");
+        dec.iou_head_b[static_cast<size_t>(j)] = get(iou_bp + ".bias");
+
+        const auto obj_bp = p + ".pred_obj_score_head.layers." + std::to_string(j);
+        dec.obj_head_w[static_cast<size_t>(j)] = get(obj_bp + ".weight");
+        dec.obj_head_b[static_cast<size_t>(j)] = get(obj_bp + ".bias");
+    }
+}
+
+static void sam31_bind_multiplex_memory_backbone(sam3_model& model) {
+    auto& mem = model.mem_enc;
+    const std::string p = "trk.model.maskmem_backbone";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    constexpr std::array conv_indices = {0, 3, 6, 9};
+    constexpr std::array norm_indices = {1, 4, 7, 10};
+    for (size_t stage = 0; stage < conv_indices.size(); ++stage) {
+        const auto conv = std::to_string(conv_indices[stage]);
+        const auto norm = std::to_string(norm_indices[stage]);
+        mem.ds_conv_w[stage] = get(p + ".mask_downsampler.encoder." + conv + ".weight");
+        mem.ds_conv_b[stage] = get(p + ".mask_downsampler.encoder." + conv + ".bias");
+        mem.ds_norm_w[stage] = get(p + ".mask_downsampler.encoder." + norm + ".weight");
+        mem.ds_norm_b[stage] = get(p + ".mask_downsampler.encoder." + norm + ".bias");
+    }
+    mem.ds_conv_w[4] = get(p + ".mask_downsampler.encoder.12.weight");
+    mem.ds_conv_b[4] = get(p + ".mask_downsampler.encoder.12.bias");
+
+    mem.pix_proj_w = get(p + ".pix_feat_proj.weight");
+    mem.pix_proj_b = get(p + ".pix_feat_proj.bias");
+
+    for (int i = 0; i < 2; ++i) {
+        const auto layer = p + ".fuser.layers." + std::to_string(i);
+        mem.fuser_dw_w[i] = get(layer + ".dwconv.weight");
+        mem.fuser_dw_b[i] = get(layer + ".dwconv.bias");
+        mem.fuser_norm_w[i] = get(layer + ".norm.weight");
+        mem.fuser_norm_b[i] = get(layer + ".norm.bias");
+        mem.fuser_fc1_w[i] = get(layer + ".pwconv1.weight");
+        mem.fuser_fc1_b[i] = get(layer + ".pwconv1.bias");
+        mem.fuser_fc2_w[i] = get(layer + ".pwconv2.weight");
+        mem.fuser_fc2_b[i] = get(layer + ".pwconv2.bias");
+        mem.fuser_gamma[i] = get(layer + ".gamma");
+    }
+
+    // SAM3.1 SimpleMaskEncoder uses nn.Identity() for out_proj because out_dim == in_dim.
+    mem.out_proj_w = nullptr;
+    mem.out_proj_b = nullptr;
+    mem.tpos[0] = get("trk.model.maskmem_tpos_enc");
+    model.no_obj_embed_spatial = get("trk.model.no_obj_embed_spatial");
+    model.sam31_output_valid_embed = get("trk.model.output_valid_embed");
+    model.sam31_output_invalid_embed = get("trk.model.output_invalid_embed");
+    model.sam31_interactivity_no_mem_embed = get("trk.model.interactivity_no_mem_embed");
+    model.sam31_interactive_mask_downsample_w = get("trk.model.interactive_mask_downsample.weight");
+    model.sam31_interactive_mask_downsample_b = get("trk.model.interactive_mask_downsample.bias");
+}
+
+static void sam31_bind_multiplex_memory_attention(sam3_model& model) {
+    auto& mem_attn = model.mem_attn;
+    constexpr int num_layers = 4;
+    const std::string p = "trk.model.transformer.encoder";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    mem_attn.layers.resize(num_layers);
+    for (int i = 0; i < num_layers; ++i) {
+        auto& ly = mem_attn.layers[static_cast<size_t>(i)];
+        const auto lp = p + ".layers." + std::to_string(i);
+        ly.sa_q_w = get(lp + ".self_attn_q_proj.weight");
+        ly.sa_q_b = get(lp + ".self_attn_q_proj.bias");
+        ly.sa_k_w = get(lp + ".self_attn_k_proj.weight");
+        ly.sa_k_b = get(lp + ".self_attn_k_proj.bias");
+        ly.sa_v_w = get(lp + ".self_attn_v_proj.weight");
+        ly.sa_v_b = get(lp + ".self_attn_v_proj.bias");
+        ly.sa_out_w = get(lp + ".self_attn_out_proj.weight");
+        ly.sa_out_b = get(lp + ".self_attn_out_proj.bias");
+
+        ly.ca_q_w = get(lp + ".cross_attn_q_proj.weight");
+        ly.ca_q_b = get(lp + ".cross_attn_q_proj.bias");
+        ly.image_ca_q_w = get(lp + ".image_cross_attn_q_proj.weight");
+        ly.image_ca_q_b = get(lp + ".image_cross_attn_q_proj.bias");
+        ly.ca_k_w = get(lp + ".cross_attn_k_proj.weight");
+        ly.ca_k_b = get(lp + ".cross_attn_k_proj.bias");
+        ly.image_ca_k_w = get(lp + ".image_cross_attn_k_proj.weight");
+        ly.image_ca_k_b = get(lp + ".image_cross_attn_k_proj.bias");
+        ly.ca_v_w = get(lp + ".cross_attn_v_proj.weight");
+        ly.ca_v_b = get(lp + ".cross_attn_v_proj.bias");
+        ly.ca_out_w = get(lp + ".cross_attn_out_proj.weight");
+        ly.ca_out_b = get(lp + ".cross_attn_out_proj.bias");
+
+        ly.ffn_fc1_w = get(lp + ".linear1.weight");
+        ly.ffn_fc1_b = get(lp + ".linear1.bias");
+        ly.ffn_fc2_w = get(lp + ".linear2.weight");
+        ly.ffn_fc2_b = get(lp + ".linear2.bias");
+        ly.norm1_w = get(lp + ".norm1.weight");
+        ly.norm1_b = get(lp + ".norm1.bias");
+        ly.norm2_w = get(lp + ".norm2.weight");
+        ly.norm2_b = get(lp + ".norm2.bias");
+        ly.norm3_w = get(lp + ".norm3.weight");
+        ly.norm3_b = get(lp + ".norm3.bias");
+    }
+    model.mem_attn_norm_w = get(p + ".norm.weight");
+    model.mem_attn_norm_b = get(p + ".norm.bias");
+}
+
+static void sam31_bind_object_pointer_projection(sam3_model& model) {
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    for (int j = 0; j < 3; ++j) {
+        const auto layer = std::to_string(j);
+        const auto normal = "trk.model.obj_ptr_proj.layers." + layer;
+        model.obj_ptr_proj_w[j] = get(normal + ".weight");
+        model.obj_ptr_proj_b[j] = get(normal + ".bias");
+
+        const auto interactive = "trk.model.interactive_obj_ptr_proj.layers." + layer;
+        model.interactive_obj_ptr_proj_w[j] = get(interactive + ".weight");
+        model.interactive_obj_ptr_proj_b[j] = get(interactive + ".bias");
+    }
+
+    model.obj_ptr_tpos_w = get("trk.model.obj_ptr_tpos_proj.weight");
+    model.obj_ptr_tpos_b = get("trk.model.obj_ptr_tpos_proj.bias");
+}
+
+static void sam31_bind_propagation_feature_adapter(sam3_model& model) {
+    auto& neck = model.neck_trk;
+    const std::string p = "det.backbone.vision_backbone.propagation_convs.";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    neck.scales[0].deconv1_w = get(p + "0.dconv_2x2_0.weight");
+    neck.scales[0].deconv1_b = get(p + "0.dconv_2x2_0.bias");
+    neck.scales[0].deconv2_w = get(p + "0.dconv_2x2_1.weight");
+    neck.scales[0].deconv2_b = get(p + "0.dconv_2x2_1.bias");
+    neck.scales[0].conv1x1_w = get(p + "0.conv_1x1.weight");
+    neck.scales[0].conv1x1_b = get(p + "0.conv_1x1.bias");
+    neck.scales[0].conv3x3_w = get(p + "0.conv_3x3.weight");
+    neck.scales[0].conv3x3_b = get(p + "0.conv_3x3.bias");
+
+    neck.scales[1].deconv1_w = get(p + "1.dconv_2x2.weight");
+    neck.scales[1].deconv1_b = get(p + "1.dconv_2x2.bias");
+    neck.scales[1].conv1x1_w = get(p + "1.conv_1x1.weight");
+    neck.scales[1].conv1x1_b = get(p + "1.conv_1x1.bias");
+    neck.scales[1].conv3x3_w = get(p + "1.conv_3x3.weight");
+    neck.scales[1].conv3x3_b = get(p + "1.conv_3x3.bias");
+
+    neck.scales[2].conv1x1_w = get(p + "2.conv_1x1.weight");
+    neck.scales[2].conv1x1_b = get(p + "2.conv_1x1.bias");
+    neck.scales[2].conv3x3_w = get(p + "2.conv_3x3.weight");
+    neck.scales[2].conv3x3_b = get(p + "2.conv_3x3.bias");
+}
+
+static void sam31_bind_interactive_feature_adapter(sam3_model& model) {
+    auto& neck = model.sam31_interactive_neck;
+    const std::string p = "det.backbone.vision_backbone.interactive_convs.";
+
+    auto get = [&](const std::string& name) -> ggml_tensor* {
+        if (const auto it = model.tensors.find(name); it != model.tensors.end()) {
+            return it->second;
+        }
+        std::println(stderr, "{}: missing SAM3.1 tensor handle '{}'", __func__, name);
+        return nullptr;
+    };
+
+    neck.scales[0].deconv1_w = get(p + "0.dconv_2x2_0.weight");
+    neck.scales[0].deconv1_b = get(p + "0.dconv_2x2_0.bias");
+    neck.scales[0].deconv2_w = get(p + "0.dconv_2x2_1.weight");
+    neck.scales[0].deconv2_b = get(p + "0.dconv_2x2_1.bias");
+    neck.scales[0].conv1x1_w = get(p + "0.conv_1x1.weight");
+    neck.scales[0].conv1x1_b = get(p + "0.conv_1x1.bias");
+    neck.scales[0].conv3x3_w = get(p + "0.conv_3x3.weight");
+    neck.scales[0].conv3x3_b = get(p + "0.conv_3x3.bias");
+
+    neck.scales[1].deconv1_w = get(p + "1.dconv_2x2.weight");
+    neck.scales[1].deconv1_b = get(p + "1.dconv_2x2.bias");
+    neck.scales[1].conv1x1_w = get(p + "1.conv_1x1.weight");
+    neck.scales[1].conv1x1_b = get(p + "1.conv_1x1.bias");
+    neck.scales[1].conv3x3_w = get(p + "1.conv_3x3.weight");
+    neck.scales[1].conv3x3_b = get(p + "1.conv_3x3.bias");
+
+    neck.scales[2].conv1x1_w = get(p + "2.conv_1x1.weight");
+    neck.scales[2].conv1x1_b = get(p + "2.conv_1x1.bias");
+    neck.scales[2].conv3x3_w = get(p + "2.conv_3x3.weight");
+    neck.scales[2].conv3x3_b = get(p + "2.conv_3x3.bias");
+}
+
 struct sam3_state {
     // cached backbone outputs
     struct ggml_tensor* vit_output = nullptr;  // [1, embed, H, W]
@@ -1310,9 +1811,12 @@ struct sam3_state {
     std::vector<int32_t> pcs_text_cache_token_ids;
     std::vector<float> pcs_text_cache_features;
 
+    sam3_mask_input_obj_ptr_graph_cache mask_input_obj_ptr_cache;
+
 #ifdef SAM3_USE_CUDA_PREPROCESS
     void* cuda_preprocess_src = nullptr;
     size_t cuda_preprocess_src_bytes = 0;
+    sam3_cuda_bicubic_preprocess_cache cuda_bicubic_preprocess_cache;
 #endif
 };
 
@@ -1336,8 +1840,85 @@ struct sam3_masklet {
 struct sam3_memory_slot {
     struct ggml_tensor* spatial_feats = nullptr;  // [64, 72, 72]
     struct ggml_tensor* spatial_pe = nullptr;     // [64, 72, 72]
+    std::vector<float> spatial_feats_cpu;
+    std::vector<float> spatial_pe_cpu;
+    std::vector<float> image_feats_cpu;
+    std::vector<float> image_pe_cpu;
+    GgmlContextHandle sam3_mem_kv_ctx;
+    GgmlBackendBufferHandle sam3_mem_kv_buf;
+    std::array<struct ggml_tensor*, 4> sam3_mem_ca_k_spatial = {};
+    std::array<struct ggml_tensor*, 4> sam3_mem_ca_v_spatial = {};
+    std::vector<std::array<struct ggml_tensor*, 4>> sam3_mem_ca_k_spatial_by_tpos;
+    int sam3_mem_kv_spatial_tokens = 0;
+    GgmlContextHandle sam31_mem_kv_ctx;
+    GgmlBackendBufferHandle sam31_mem_kv_buf;
+    std::array<struct ggml_tensor*, 4> sam31_mem_ca_k_spatial = {};
+    std::array<struct ggml_tensor*, 4> sam31_mem_ca_v_spatial = {};
+    int sam31_mem_kv_spatial_tokens = 0;
     int frame_index = -1;
     bool is_cond_frame = false;
+};
+
+struct sam31_propagation_graph_key {
+    int D = 0;
+    int H = 0;
+    int memory_tokens = 0;
+    int spatial_memory_tokens = 0;
+    int ptr_tokens = 0;
+    ggml_type weight_type = GGML_TYPE_F32;
+    bool bf16_mem_attn_activation = false;
+    bool bf16_mem_attn_input_boundary = false;
+    bool f16_mem_attn_activation = false;
+    bool f16_mem_attn_attention_activation = false;
+    bool f16_mem_attn_ffn_activation = false;
+    std::vector<const ggml_tensor*> precomputed_spatial_k;
+    std::vector<const ggml_tensor*> precomputed_spatial_v;
+    const ggml_tensor* cached_src_pos_tensor = nullptr;
+    const ggml_tensor* sam31_prop_dense_pe_tensor = nullptr;
+    const ggml_tensor* cached_rope_head_q_tensor = nullptr;
+
+    [[nodiscard]] friend bool operator==(const sam31_propagation_graph_key&,
+                                         const sam31_propagation_graph_key&) = default;
+};
+
+struct sam31_propagation_graph_cache {
+    std::optional<sam31_propagation_graph_key> key;
+    GgmlContextHandle ctx;
+    GgmlGallocrHandle galloc;
+    ggml_cgraph* graph = nullptr;
+    ggml_tensor* image_raw = nullptr;
+    ggml_tensor* memory_image = nullptr;
+    ggml_tensor* memory = nullptr;
+    ggml_tensor* memory_image_pos = nullptr;
+    ggml_tensor* k_rope = nullptr;
+    ggml_tensor* precomputed_spatial_k_pos_delta = nullptr;
+    ggml_tensor* feat_s0 = nullptr;
+    ggml_tensor* feat_s1 = nullptr;
+    ggml_tensor* extra = nullptr;
+    ggml_tensor* masks = nullptr;
+    ggml_tensor* iou_pred = nullptr;
+    ggml_tensor* obj_score = nullptr;
+    ggml_tensor* mask_tokens = nullptr;
+
+    void reset() noexcept {
+        key.reset();
+        graph = nullptr;
+        image_raw = nullptr;
+        memory_image = nullptr;
+        memory = nullptr;
+        memory_image_pos = nullptr;
+        k_rope = nullptr;
+        precomputed_spatial_k_pos_delta = nullptr;
+        feat_s0 = nullptr;
+        feat_s1 = nullptr;
+        extra = nullptr;
+        masks = nullptr;
+        iou_pred = nullptr;
+        obj_score = nullptr;
+        mask_tokens = nullptr;
+        galloc.reset();
+        ctx.reset();
+    }
 };
 
 struct sam3_tracker {
@@ -1361,9 +1942,10 @@ struct sam3_tracker {
     // Cached PE / RoPE data — pure functions of fixed hyperparameters, computed once.
     bool pe_caches_valid = false;
     int cached_pe_feat_size = 0;
-    std::vector<float> cached_sinpe_256;        // sam3_sinusoidal_pe_2d(72, 72, 256)
-    std::vector<float> cached_sinpe_64;         // sam3_sinusoidal_pe_2d(72, 72, 64)
-    std::vector<float> cached_axial_cis_reord;  // reordered axial CIS for RoPE Q
+    std::vector<float> cached_sinpe_256;             // sam3_sinusoidal_pe_2d(72, 72, 256)
+    std::vector<float> cached_sinpe_64;              // sam3_sinusoidal_pe_2d(72, 72, 64)
+    std::vector<float> cached_axial_cis_reord;       // reordered axial CIS for RoPE Q
+    std::vector<float> cached_axial_cis_head_reord;  // SAM3.1 per-head RoPE Q/K
 
     // EdgeTAM-specific: RoPE for 16x16 grid (cross-attn K on perceiver 2D latents)
     std::vector<float> cached_axial_cis_k16_reord;  // [2, 128, 256] for 16x16 grid
@@ -1374,7 +1956,233 @@ struct sam3_tracker {
     int cached_pe_backend_feat_size = 0;
     struct ggml_tensor* cached_src_pos_tensor = nullptr;
     struct ggml_tensor* cached_rope_q_tensor = nullptr;
+    struct ggml_tensor* cached_rope_head_q_tensor = nullptr;
+    struct ggml_tensor* cached_rope_k_tensor = nullptr;
+    int cached_rope_k_tokens_per_slot = 0;
+    int cached_rope_k_slots = 0;
+
+    sam31_propagation_graph_cache sam31_prop_graph_cache;
 };
+
+static bool sam31_precompute_memory_slot_kv(
+    const sam3_model& model, sam3_memory_slot& slot, int channels, int height, int width);
+
+static bool sam31_precompute_memory_slot_kv_backend(const sam3_model& model,
+                                                    sam3_memory_slot& slot,
+                                                    ggml_tensor* memory_image_src,
+                                                    ggml_tensor* memory_src,
+                                                    ggml_tensor* memory_image_pos_src,
+                                                    int channels,
+                                                    int height,
+                                                    int width,
+                                                    float obj_score);
+
+static bool sam3_precompute_memory_slot_kv(
+    const sam3_model& model, sam3_memory_slot& slot, int channels, int height, int width);
+
+static bool sam3_static_mem_ca_kv_cache_enabled() {
+    return std::getenv("SAM3_DISABLE_MEM_CA_KV_CACHE") == nullptr;
+}
+
+static bool sam3_multi_slot_mem_ca_kv_cache_enabled() {
+    const char* env = std::getenv("SAM3_ENABLE_MULTI_SLOT_MEM_CA_KV_CACHE");
+    return env != nullptr && env[0] != '0';
+}
+
+static bool sam31_experimental_static_mem_ca_kv_cache_enabled() {
+    return std::getenv("SAM31_DISABLE_MEM_CA_KV_CACHE") == nullptr;
+}
+
+static bool sam31_backend_memory_slot_enabled() {
+    const char* disable_env = std::getenv("SAM31_DISABLE_BACKEND_MEMORY_SLOT");
+    if (disable_env != nullptr && disable_env[0] != '\0' && disable_env[0] != '0') {
+        return false;
+    }
+    const char* enable_env = std::getenv("SAM31_ENABLE_BACKEND_MEMORY_SLOT");
+    return enable_env == nullptr || enable_env[0] != '0';
+}
+
+static bool sam3_store_spatial_memory_slot(sam3_tracker& tracker,
+                                           const sam3_model& model,
+                                           int inst_id,
+                                           std::vector<float> features,
+                                           std::vector<float> pos_enc,
+                                           int channels,
+                                           int height,
+                                           int width,
+                                           int frame_idx,
+                                           bool is_cond,
+                                           std::vector<float> image_features = {},
+                                           std::vector<float> image_pos_enc = {}) {
+    const auto& hp = model.hparams;
+    const size_t expected_count = sam3_count_mul(channels, height, width);
+    const bool allow_empty_spatial_pe = hp.is_sam3_1();
+    if (features.size() != expected_count ||
+        (pos_enc.empty() ? !allow_empty_spatial_pe : pos_enc.size() != expected_count)) {
+        std::println(stderr,
+                     "{}: invalid memory slot sizes features={} pos={} expected={}",
+                     __func__,
+                     features.size(),
+                     pos_enc.size(),
+                     expected_count);
+        return false;
+    }
+    if ((!image_features.empty() && image_features.size() != expected_count) ||
+        (!image_pos_enc.empty() && image_pos_enc.size() != expected_count)) {
+        std::println(
+            stderr,
+            "{}: invalid image-memory slot sizes image_features={} image_pos={} expected={}",
+            __func__,
+            image_features.size(),
+            image_pos_enc.size(),
+            expected_count);
+        return false;
+    }
+
+    if (!tracker.ctx) {
+        ggml_init_params tp = {
+            .mem_size = ggml_tensor_overhead() * 4096,
+            .mem_buffer = nullptr,
+            .no_alloc = true,
+        };
+        tracker.ctx = ggml_init(tp);
+        if (!tracker.ctx) {
+            std::println(stderr, "{}: failed to initialize tracker context", __func__);
+            return false;
+        }
+    }
+
+    auto* st = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, channels, width, height, 1);
+    auto sb = make_backend_buffer(model.backend, expected_count * sizeof(float));
+    struct ggml_tallocr ta = ggml_tallocr_new(sb.get());
+    ggml_tallocr_alloc(&ta, st);
+    ggml_backend_tensor_set(st, features.data(), 0, features.size() * sizeof(float));
+    tracker.owned_buffers.push_back(std::move(sb));
+
+    sam3_memory_slot slot{
+        .spatial_feats = st,
+        .spatial_pe = nullptr,
+        .spatial_feats_cpu = std::move(features),
+        .spatial_pe_cpu = std::move(pos_enc),
+        .image_feats_cpu = std::move(image_features),
+        .image_pe_cpu = std::move(image_pos_enc),
+        .frame_index = frame_idx,
+        .is_cond_frame = is_cond,
+    };
+    if (hp.is_sam3_1()) {
+        (void) sam31_precompute_memory_slot_kv(model, slot, channels, height, width);
+    } else if (hp.model_type == SAM3_MODEL_SAM3) {
+        (void) sam3_precompute_memory_slot_kv(model, slot, channels, height, width);
+    }
+
+    auto& bank = tracker.mem_banks[inst_id];
+    bank.push_back(std::move(slot));
+    while (std::cmp_greater(bank.size(), hp.num_maskmem)) {
+        bool removed = false;
+        for (auto it = bank.begin(); it != bank.end(); ++it) {
+            if (!it->is_cond_frame) {
+                bank.erase(it);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed && bank.size() > 1) {
+            bank.erase(bank.begin() + 1);
+        } else if (!removed) {
+            bank.erase(bank.begin());
+        }
+    }
+
+    return true;
+}
+
+static bool sam31_store_spatial_memory_slot_backend(sam3_tracker& tracker,
+                                                    const sam3_model& model,
+                                                    int inst_id,
+                                                    ggml_tensor* memory_features_src,
+                                                    ggml_tensor* image_features_src,
+                                                    ggml_tensor* image_pos_src,
+                                                    int channels,
+                                                    int height,
+                                                    int width,
+                                                    int frame_idx,
+                                                    bool is_cond,
+                                                    float obj_score) {
+    const auto& hp = model.hparams;
+    const size_t expected_count = sam3_count_mul(channels, height, width);
+    if (!hp.is_sam3_1() || channels != hp.neck_dim || height <= 0 || width <= 0 ||
+        memory_features_src == nullptr || image_features_src == nullptr ||
+        image_pos_src == nullptr || memory_features_src->type != GGML_TYPE_F32 ||
+        image_features_src->type != GGML_TYPE_F32 || memory_features_src->ne[0] != channels ||
+        memory_features_src->ne[1] != width || memory_features_src->ne[2] != height ||
+        memory_features_src->ne[3] != 1 || image_features_src->ne[0] != channels ||
+        image_features_src->ne[1] != width || image_features_src->ne[2] != height ||
+        image_features_src->ne[3] != 1) {
+        return false;
+    }
+
+    if (!tracker.ctx) {
+        ggml_init_params tp = {
+            .mem_size = ggml_tensor_overhead() * 4096,
+            .mem_buffer = nullptr,
+            .no_alloc = true,
+        };
+        tracker.ctx = ggml_init(tp);
+        if (!tracker.ctx) {
+            std::println(stderr, "{}: failed to initialize tracker context", __func__);
+            return false;
+        }
+    }
+
+    auto* st = ggml_new_tensor_4d(tracker.ctx, GGML_TYPE_F32, channels, width, height, 1);
+    ggml_set_name(st, "sam31_slot_spatial_feats_backend");
+    auto sb = make_backend_buffer(model.backend, expected_count * sizeof(float));
+    struct ggml_tallocr ta = ggml_tallocr_new(sb.get());
+    ggml_tallocr_alloc(&ta, st);
+    ggml_backend_tensor_copy_async(model.backend, model.backend, memory_features_src, st);
+
+    sam3_memory_slot slot{
+        .spatial_feats = st,
+        .spatial_pe = nullptr,
+        .spatial_feats_cpu = {},
+        .spatial_pe_cpu = {},
+        .image_feats_cpu = {},
+        .image_pe_cpu = {},
+        .frame_index = frame_idx,
+        .is_cond_frame = is_cond,
+    };
+    if (!sam31_precompute_memory_slot_kv_backend(model,
+                                                 slot,
+                                                 image_features_src,
+                                                 st,
+                                                 image_pos_src,
+                                                 channels,
+                                                 height,
+                                                 width,
+                                                 obj_score)) {
+        return false;
+    }
+
+    tracker.owned_buffers.push_back(std::move(sb));
+    auto& bank = tracker.mem_banks[inst_id];
+    bank.push_back(std::move(slot));
+    while (std::cmp_greater(bank.size(), hp.num_maskmem)) {
+        bool removed = false;
+        for (auto it = bank.begin(); it != bank.end(); ++it) {
+            if (!it->is_cond_frame) {
+                bank.erase(it);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed && bank.size() > 1) {
+            bank.erase(bank.begin() + 1);
+        } else if (!removed) {
+            bank.erase(bank.begin());
+        }
+    }
+    return true;
+}
 
 // Resolve effective img_size / feat_size from state (which may override hp defaults).
 static int sam3_eff_img_size(const sam3_state& s, const sam3_hparams& hp) {
@@ -1409,6 +2217,12 @@ static struct ggml_tensor* sam3_layer_norm_2d(struct ggml_context* ctx,
 
 static bool sam3_copy_tensor_to_f32(struct ggml_tensor* t, std::vector<float>& output);
 static std::optional<std::string_view> sam3_getenv(std::string_view name);
+static bool sam3_dump_tensor_to_path(struct ggml_tensor* t,
+                                     const std::string& tensor_name,
+                                     const std::string& output_path);
+static ggml_tensor* sam3_alias_tensor(struct ggml_context* ctx,
+                                      const ggml_tensor* src,
+                                      std::string_view name);
 
 /*****************************************************************************
 ** Internal Helper Implementations
@@ -1537,10 +2351,14 @@ static void sam3_profile_print_graph_matmuls(struct ggml_cgraph* graph, const ch
         const auto* src1 = node->src[1];
         fprintf(stderr,
                 "SAM3_PROFILE_GRAPH_MATMUL label=%s "
+                "node=%s src0=%s src1=%s "
                 "src0_type=%s src0_ne=%lld,%lld,%lld,%lld "
                 "src1_type=%s src1_ne=%lld,%lld,%lld,%lld "
                 "dst_type=%s dst_ne=%lld,%lld,%lld,%lld\n",
                 label,
+                ggml_get_name(node),
+                ggml_get_name(src0),
+                ggml_get_name(src1),
                 ggml_type_name(src0->type),
                 static_cast<long long>(src0->ne[0]),
                 static_cast<long long>(src0->ne[1]),
@@ -1557,6 +2375,24 @@ static void sam3_profile_print_graph_matmuls(struct ggml_cgraph* graph, const ch
                 static_cast<long long>(node->ne[2]),
                 static_cast<long long>(node->ne[3]));
     }
+}
+
+static ggml_tensor* sam3_alias_tensor(struct ggml_context* ctx,
+                                      const ggml_tensor* src,
+                                      std::string_view name) {
+    if (ctx == nullptr || src == nullptr || src->data == nullptr || src->buffer == nullptr) {
+        return nullptr;
+    }
+
+    auto* alias = ggml_new_tensor(ctx, src->type, GGML_MAX_DIMS, src->ne);
+    for (int i = 0; i < GGML_MAX_DIMS; ++i) {
+        alias->nb[i] = src->nb[i];
+    }
+    alias->buffer = src->buffer;
+    alias->data = src->data;
+    const std::string owned_name{name};
+    ggml_set_name(alias, owned_name.c_str());
+    return alias;
 }
 
 struct sam3_hiera_profile_cut {
@@ -1862,6 +2698,97 @@ static std::chrono::high_resolution_clock::time_point sam3_profile_cpu_now() {
 #define SAM3_PROFILE_CPU_END(name) \
     sam3_profile_cpu_span(#name, name##_profile_t0, __FILE__, __LINE__)
 
+static thread_local sam3_encode_timing g_sam3_last_encode_timing;
+static thread_local sam3_propagate_timing g_sam3_last_propagate_timing;
+static thread_local sam3_propagate_timing* g_sam3_active_propagate_timing = nullptr;
+
+sam3_encode_timing sam3_last_encode_timing() {
+    return g_sam3_last_encode_timing;
+}
+
+sam3_propagate_timing sam3_last_propagate_timing() {
+    return g_sam3_last_propagate_timing;
+}
+
+class sam3_encode_timing_scope {
+public:
+    explicit sam3_encode_timing_scope(sam3_encode_timing& timing)
+        : timing_(timing), start_us_(ggml_time_us()) {
+        timing_ = {};
+    }
+
+    sam3_encode_timing_scope(const sam3_encode_timing_scope&) = delete;
+    sam3_encode_timing_scope& operator=(const sam3_encode_timing_scope&) = delete;
+
+    ~sam3_encode_timing_scope() { timing_.total_ms = elapsed_ms(start_us_); }
+
+    [[nodiscard]] static double elapsed_ms(int64_t start_us) {
+        return (ggml_time_us() - start_us) / 1000.0;
+    }
+
+private:
+    sam3_encode_timing& timing_;
+    int64_t start_us_ = 0;
+};
+
+class sam3_propagate_timing_scope {
+public:
+    explicit sam3_propagate_timing_scope(sam3_propagate_timing& timing)
+        : timing_(timing), previous_(g_sam3_active_propagate_timing), start_us_(ggml_time_us()) {
+        timing_ = {};
+        g_sam3_active_propagate_timing = &timing_;
+    }
+
+    sam3_propagate_timing_scope(const sam3_propagate_timing_scope&) = delete;
+    sam3_propagate_timing_scope& operator=(const sam3_propagate_timing_scope&) = delete;
+
+    ~sam3_propagate_timing_scope() {
+        timing_.total_ms = sam3_encode_timing_scope::elapsed_ms(start_us_);
+        g_sam3_active_propagate_timing = previous_;
+    }
+
+private:
+    sam3_propagate_timing& timing_;
+    sam3_propagate_timing* previous_ = nullptr;
+    int64_t start_us_ = 0;
+};
+
+static void sam3_add_propagate_timing(double sam3_propagate_timing::* field, int64_t start_us) {
+    if (g_sam3_active_propagate_timing == nullptr) {
+        return;
+    }
+    g_sam3_active_propagate_timing->*field += sam3_encode_timing_scope::elapsed_ms(start_us);
+}
+
+static void sam3_set_propagate_alias_timing(bool feature_inputs,
+                                            bool constant_inputs,
+                                            int aliased_feature_count = 0,
+                                            int aliased_constant_count = 0,
+                                            int uploaded_feature_count = 0,
+                                            int uploaded_constant_count = 0) {
+    if (g_sam3_active_propagate_timing == nullptr) {
+        return;
+    }
+    g_sam3_active_propagate_timing->aliased_feature_inputs = feature_inputs;
+    g_sam3_active_propagate_timing->aliased_constant_inputs = constant_inputs;
+    g_sam3_active_propagate_timing->aliased_feature_input_count = aliased_feature_count;
+    g_sam3_active_propagate_timing->aliased_constant_input_count = aliased_constant_count;
+    g_sam3_active_propagate_timing->uploaded_feature_input_count = uploaded_feature_count;
+    g_sam3_active_propagate_timing->uploaded_constant_input_count = uploaded_constant_count;
+}
+
+static void sam3_mark_propagate_graph_cache_used() {
+    if (g_sam3_active_propagate_timing != nullptr) {
+        g_sam3_active_propagate_timing->used_sam31_graph_cache = true;
+    }
+}
+
+static void sam3_increment_propagate_single_calls() {
+    if (g_sam3_active_propagate_timing != nullptr) {
+        ++g_sam3_active_propagate_timing->single_calls;
+    }
+}
+
 #define ggml_backend_tensor_set(tensor, data, offset, size) \
     sam3_profile_tensor_set((tensor), (data), (offset), (size), __FILE__, __LINE__)
 #define sam3_backend_tensor_set_prefer_async(backend, tensor, data, offset, size) \
@@ -1889,6 +2816,250 @@ static std::optional<std::string_view> sam3_getenv(std::string_view name) {
         return std::string_view{value};
     }
     return std::nullopt;
+}
+
+static bool sam3_dump_debug_f32(std::string_view dir,
+                                std::string_view name,
+                                std::span<const float> data,
+                                std::span<const int64_t> shape) {
+    const std::string dir_owned{dir};
+    mkdir(dir_owned.c_str(), 0755);
+    const std::string prefix = std::format("{}/{}", dir, name);
+    {
+        std::ofstream out(prefix + ".bin", std::ios::binary);
+        if (!out) {
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size_bytes()));
+    }
+    {
+        std::ofstream out(prefix + ".shape");
+        if (!out) {
+            return false;
+        }
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) {
+                out << ",";
+            }
+            out << shape[i];
+        }
+        out << "\n";
+    }
+    return true;
+}
+
+static bool sam3_dump_debug_i32(std::string_view dir,
+                                std::string_view name,
+                                std::span<const int32_t> data,
+                                std::span<const int64_t> shape) {
+    const std::string dir_owned{dir};
+    mkdir(dir_owned.c_str(), 0755);
+    const std::string prefix = std::format("{}/{}", dir, name);
+    {
+        std::ofstream out(prefix + ".bin", std::ios::binary);
+        if (!out) {
+            return false;
+        }
+        out.write(reinterpret_cast<const char*>(data.data()),
+                  static_cast<std::streamsize>(data.size_bytes()));
+    }
+    {
+        std::ofstream out(prefix + ".shape");
+        if (!out) {
+            return false;
+        }
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) {
+                out << ",";
+            }
+            out << shape[i];
+        }
+        out << "\n";
+    }
+    return true;
+}
+
+static bool sam3_load_debug_f32(std::string_view prefix,
+                                std::span<float> data,
+                                std::span<const int64_t> expected_shape) {
+    const std::string prefix_owned{prefix};
+    std::ifstream shape_in(prefix_owned + ".shape");
+    if (!shape_in) {
+        std::fprintf(stderr, "%s: missing %s.shape\n", __func__, prefix_owned.c_str());
+        return false;
+    }
+
+    std::string line;
+    std::getline(shape_in, line);
+    std::vector<int64_t> shape;
+    size_t pos = 0;
+    while (pos < line.size()) {
+        const size_t end = line.find(',', pos);
+        const size_t part_end = (end == std::string::npos) ? line.size() : end;
+        if (part_end > pos) {
+            shape.push_back(std::stoll(line.substr(pos, part_end - pos)));
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        pos = end + 1;
+    }
+
+    if (!std::ranges::equal(shape, expected_shape)) {
+        std::fprintf(stderr, "%s: %s expected shape [", __func__, prefix_owned.c_str());
+        for (size_t i = 0; i < expected_shape.size(); ++i) {
+            std::fprintf(
+                stderr, "%s%lld", i == 0 ? "" : ",", static_cast<long long>(expected_shape[i]));
+        }
+        std::fprintf(stderr, "], got [");
+        for (size_t i = 0; i < shape.size(); ++i) {
+            std::fprintf(stderr, "%s%lld", i == 0 ? "" : ",", static_cast<long long>(shape[i]));
+        }
+        std::fprintf(stderr, "]\n");
+        return false;
+    }
+
+    std::ifstream data_in(prefix_owned + ".bin", std::ios::binary);
+    if (!data_in) {
+        std::fprintf(stderr, "%s: missing %s.bin\n", __func__, prefix_owned.c_str());
+        return false;
+    }
+    data_in.read(reinterpret_cast<char*>(data.data()),
+                 static_cast<std::streamsize>(data.size_bytes()));
+    if (data_in.gcount() != static_cast<std::streamsize>(data.size_bytes())) {
+        std::fprintf(stderr,
+                     "%s: %s.bin expected %zu bytes, got %lld\n",
+                     __func__,
+                     prefix_owned.c_str(),
+                     data.size_bytes(),
+                     static_cast<long long>(data_in.gcount()));
+        return false;
+    }
+    return true;
+}
+
+struct sam3_block_selector {
+    bool all = false;
+    std::vector<std::pair<int, int>> ranges;
+
+    [[nodiscard]] bool contains(int block_idx) const {
+        if (all) {
+            return true;
+        }
+        return std::ranges::any_of(ranges, [block_idx](const auto& range) {
+            return range.first <= block_idx && block_idx <= range.second;
+        });
+    }
+};
+
+static std::string_view sam3_trim_ascii_space(std::string_view value) {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t' ||
+                              value.front() == '\n' || value.front() == '\r')) {
+        value.remove_prefix(1);
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\n' ||
+                              value.back() == '\r')) {
+        value.remove_suffix(1);
+    }
+    return value;
+}
+
+static std::optional<int> sam3_parse_i32(std::string_view value) {
+    value = sam3_trim_ascii_space(value);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    int parsed = 0;
+    const auto* first = value.data();
+    const auto* last = value.data() + value.size();
+    const auto result = std::from_chars(first, last, parsed);
+    if (result.ec != std::errc{} || result.ptr != last) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+static std::optional<sam3_block_selector> sam3_parse_block_selector(std::string_view value) {
+    value = sam3_trim_ascii_space(value);
+    sam3_block_selector selector;
+    if (value.empty()) {
+        return selector;
+    }
+    if (value == "all") {
+        selector.all = true;
+        return selector;
+    }
+
+    while (!value.empty()) {
+        const size_t comma = value.find(',');
+        std::string_view token = sam3_trim_ascii_space(value.substr(0, comma));
+        if (!token.empty()) {
+            const size_t dash = token.find('-');
+            const auto first =
+                sam3_parse_i32(dash == std::string_view::npos ? token : token.substr(0, dash));
+            const auto last =
+                dash == std::string_view::npos ? first : sam3_parse_i32(token.substr(dash + 1));
+            if (!first.has_value() || !last.has_value() || *first < 0 || *last < *first) {
+                return std::nullopt;
+            }
+            selector.ranges.emplace_back(*first, *last);
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        value.remove_prefix(comma + 1);
+    }
+
+    return selector;
+}
+
+static std::optional<sam3_block_selector> sam3_getenv_block_selector(std::string_view name) {
+    const auto value = sam3_getenv(name);
+    if (!value.has_value()) {
+        return std::nullopt;
+    }
+    auto selector = sam3_parse_block_selector(*value);
+    if (!selector.has_value()) {
+        std::println(stderr,
+                     "Ignoring invalid block selector {}='{}'. Use e.g. '1-7,12' or 'all'.",
+                     name,
+                     *value);
+    }
+    return selector;
+}
+
+static std::vector<int> sam31_mask_init_vit_block_dump_indices(const sam3_hparams& hp) {
+    if (const auto all_blocks = sam3_getenv("SAM31_MASK_INIT_DUMP_ALL_VIT_BLOCKS");
+        all_blocks.has_value() && !all_blocks->empty() && all_blocks->front() != '0') {
+        std::vector<int> indices;
+        indices.reserve(static_cast<size_t>(hp.vit_depth));
+        for (int i = 0; i < hp.vit_depth; ++i) {
+            indices.push_back(i);
+        }
+        return indices;
+    }
+    std::vector<int> indices = {0, 1, 2, 7, 8, 9, 10, 11, 12, 13, 14, 15, 23, 31};
+    std::erase_if(indices,
+                  [&](int block_idx) { return block_idx < 0 || block_idx >= hp.vit_depth; });
+    return indices;
+}
+
+static std::vector<int> sam31_mask_init_vit_stage_dump_indices(const sam3_hparams& hp) {
+    if (const auto selector = sam3_getenv_block_selector("SAM31_MASK_INIT_DUMP_VIT_STAGE_BLOCKS")) {
+        std::vector<int> indices;
+        indices.reserve(static_cast<size_t>(hp.vit_depth));
+        for (int i = 0; i < hp.vit_depth; ++i) {
+            if (selector->contains(i)) {
+                indices.push_back(i);
+            }
+        }
+        return indices;
+    }
+    std::vector<int> indices = {0, 12, 13, 14, 15, 23, 31};
+    std::erase_if(indices,
+                  [&](int block_idx) { return block_idx < 0 || block_idx >= hp.vit_depth; });
+    return indices;
 }
 
 static std::string sam3_shell_quote(std::string_view value) {
@@ -1984,9 +3155,9 @@ static struct ggml_tensor* sam3_layer_norm(struct ggml_context* ctx,
                                            struct ggml_tensor* w,
                                            struct ggml_tensor* b) {
     x = ggml_norm(ctx, x, 1e-5f);
-    x = ggml_mul_inplace(ctx, x, w);
+    x = ggml_mul(ctx, x, w);
     if (b) {
-        x = ggml_add_inplace(ctx, x, b);
+        x = ggml_add(ctx, x, b);
     }
     return x;
 }
@@ -2031,44 +3202,304 @@ static void sam3_read_f32(struct ggml_tensor* t, float* dst, int64_t n) {
 
 static struct ggml_tensor* sam3_conv_transpose_weight(struct ggml_context* ctx,
                                                       struct ggml_tensor* w) {
-    return w->type == GGML_TYPE_F16 ? w : ggml_cast(ctx, w, GGML_TYPE_F16);
+    static const bool keep_bf16 = [] {
+        const char* env = std::getenv("SAM3_CONV_TRANSPOSE_KEEP_BF16");
+        return env != nullptr && env[0] != '0';
+    }();
+    if (w->type == GGML_TYPE_F16 || (keep_bf16 && w->type == GGML_TYPE_BF16)) {
+        return w;
+    }
+    return ggml_cast(ctx, w, GGML_TYPE_F16);
 }
 
 static bool sam3_fast_f16_vit_mlp_enabled() {
     static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM3_DISABLE_FAST_F16_VIT_MLP");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
         const char* env = std::getenv("SAM3_FAST_F16_VIT_MLP");
-        return env != nullptr && env[0] != '0';
+        return env == nullptr || env[0] != '0';
     }();
     return enabled;
 }
 
 static bool sam3_fast_f16_vit_attention_enabled() {
     static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM3_DISABLE_FAST_F16_VIT_ATTENTION");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
         const char* env = std::getenv("SAM3_FAST_F16_VIT_ATTENTION");
+        return env == nullptr || env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam3_fast_f16_vit_attn_proj_input_enabled() {
+    static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM3_DISABLE_FAST_F16_VIT_ATTN_PROJ_INPUT");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
+        const char* env = std::getenv("SAM3_FAST_F16_VIT_ATTN_PROJ_INPUT");
+        return env == nullptr || env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam3_bf16_vit_linear_output_enabled(const sam3_hparams& hp, int block_idx) {
+    const auto disable_env = sam3_getenv("SAM3_DISABLE_BF16_VIT_LINEAR_OUTPUT");
+    if (disable_env.has_value() && !disable_env->empty() && disable_env->front() != '0') {
+        return false;
+    }
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_BF16_VIT_LINEAR_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto enabled = sam3_getenv_block_selector("SAM3_BF16_VIT_LINEAR_OUTPUT_BLOCKS");
+            enabled.has_value() && enabled->contains(block_idx)) {
+            return true;
+        }
+    }
+    const auto env = sam3_getenv("SAM3_BF16_VIT_LINEAR_OUTPUT");
+    if (env.has_value()) {
+        return !env->empty() && env->front() != '0';
+    }
+    if (!hp.is_sam3_1()) {
+        return false;
+    }
+    return block_idx < 0 || block_idx < 12;
+}
+
+static bool sam3_bf16_vit_attn_proj_output_enabled(const sam3_hparams& hp,
+                                                   bool is_global,
+                                                   int block_idx) {
+    if (!sam3_bf16_vit_linear_output_enabled(hp, block_idx)) {
+        return false;
+    }
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_BF16_VIT_ATTN_PROJ_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto enabled =
+                sam3_getenv_block_selector("SAM3_BF16_VIT_ATTN_PROJ_OUTPUT_BLOCKS");
+            enabled.has_value() && enabled->contains(block_idx)) {
+            return true;
+        }
+    }
+    const auto env = sam3_getenv("SAM3_BF16_VIT_ATTN_PROJ_OUTPUT");
+    if (!env.has_value()) {
+        return is_global;
+    }
+    if (env->empty() || env->front() == '0') {
+        return false;
+    }
+    if (*env == "all") {
+        return true;
+    }
+    if (*env == "global" || env->front() == '1') {
+        return is_global;
+    }
+    return is_global;
+}
+
+static bool sam3_f16_vit_attention_linear_output_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_F16_VIT_ATTENTION_LINEAR_OUTPUT");
         return env != nullptr && env[0] != '0';
     }();
     return enabled;
 }
 
-static bool sam3_bf16_vit_linear_output_enabled() {
+static bool sam3_f16_vit_qkv_output_enabled(int block_idx) {
     static const bool enabled = [] {
-        const char* env = std::getenv("SAM3_BF16_VIT_LINEAR_OUTPUT");
+        const char* env = std::getenv("SAM3_F16_VIT_QKV_OUTPUT");
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return sam3_f16_vit_attention_linear_output_enabled();
+    }();
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_F16_VIT_QKV_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector = sam3_getenv_block_selector("SAM3_F16_VIT_QKV_OUTPUT_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    return enabled;
+}
+
+static bool sam3_f16_vit_attn_proj_output_enabled(int block_idx) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_F16_VIT_ATTN_PROJ_OUTPUT");
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return sam3_f16_vit_attention_linear_output_enabled();
+    }();
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_F16_VIT_ATTN_PROJ_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector =
+                sam3_getenv_block_selector("SAM3_F16_VIT_ATTN_PROJ_OUTPUT_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    return enabled;
+}
+
+static bool sam3_f16_vit_mlp_linear_output_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_F16_VIT_MLP_LINEAR_OUTPUT");
+        if (env == nullptr) {
+            env = std::getenv("SAM3_F16_VIT_LINEAR_OUTPUT");
+        }
         return env != nullptr && env[0] != '0';
     }();
     return enabled;
 }
 
-static bool sam3_bf16_vit_qkv_chain_enabled() {
+static bool sam3_f16_vit_mlp_fc1_output_enabled(int block_idx) {
     static const bool enabled = [] {
-        const char* env = std::getenv("SAM3_BF16_VIT_QKV_CHAIN");
+        const char* env = std::getenv("SAM3_F16_VIT_MLP_FC1_OUTPUT");
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return sam3_f16_vit_mlp_linear_output_enabled();
+    }();
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_F16_VIT_MLP_FC1_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector = sam3_getenv_block_selector("SAM3_F16_VIT_MLP_FC1_OUTPUT_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    return enabled;
+}
+
+static bool sam3_f16_vit_mlp_fc2_output_enabled(int block_idx) {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_F16_VIT_MLP_FC2_OUTPUT");
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return sam3_f16_vit_mlp_linear_output_enabled();
+    }();
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_F16_VIT_MLP_FC2_OUTPUT_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector = sam3_getenv_block_selector("SAM3_F16_VIT_MLP_FC2_OUTPUT_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    return enabled;
+}
+
+static bool sam3_bf16_vit_qkv_chain_enabled(int block_idx) {
+    if (block_idx >= 0) {
+        if (const auto selector = sam3_getenv_block_selector("SAM3_BF16_VIT_QKV_CHAIN_BLOCKS");
+            selector.has_value() && selector->contains(block_idx)) {
+            return true;
+        }
+    }
+    const auto env = sam3_getenv("SAM3_BF16_VIT_QKV_CHAIN");
+    return env.has_value() && !env->empty() && env->front() != '0';
+}
+
+static bool sam3_bf16_vit_mlp_chain_enabled(int block_idx) {
+    if (block_idx >= 0) {
+        if (const auto selector = sam3_getenv_block_selector("SAM3_BF16_VIT_MLP_CHAIN_BLOCKS");
+            selector.has_value() && selector->contains(block_idx)) {
+            return true;
+        }
+    }
+    const auto env = sam3_getenv("SAM3_BF16_VIT_MLP_CHAIN");
+    return env.has_value() && !env->empty() && env->front() != '0';
+}
+
+static bool sam3_vit_mlp_approx_gelu_enabled(int block_idx) {
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_VIT_MLP_APPROX_GELU_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector = sam3_getenv_block_selector("SAM3_VIT_MLP_APPROX_GELU_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    const auto env = sam3_getenv("SAM3_VIT_MLP_APPROX_GELU");
+    return env.has_value() && !env->empty() && env->front() != '0';
+}
+
+static bool sam3_vit_mlp_flat_chain_enabled(int block_idx) {
+    if (block_idx >= 0) {
+        if (const auto disabled =
+                sam3_getenv_block_selector("SAM3_DISABLE_VIT_MLP_FLAT_CHAIN_BLOCKS");
+            disabled.has_value() && disabled->contains(block_idx)) {
+            return false;
+        }
+        if (const auto selector =
+                sam3_getenv_block_selector("SAM3_ENABLE_VIT_MLP_FLAT_CHAIN_BLOCKS");
+            selector.has_value()) {
+            return selector->contains(block_idx);
+        }
+    }
+    const auto env = sam3_getenv("SAM3_ENABLE_VIT_MLP_FLAT_CHAIN");
+    return env.has_value() && !env->empty() && env->front() != '0';
+}
+
+static bool sam3_vit_direct_qkv_views_enabled(const sam3_hparams& hp, ggml_type qkv_weight_type) {
+    static const std::optional<bool> env_override = [] -> std::optional<bool> {
+        const char* disable_env = std::getenv("SAM3_DISABLE_VIT_DIRECT_QKV_VIEWS");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
+        const char* env = std::getenv("SAM3_ENABLE_VIT_DIRECT_QKV_VIEWS");
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return std::nullopt;
+    }();
+    const bool sam3_f16_or_bf16_default =
+        hp.model_type == SAM3_MODEL_SAM3 &&
+        (qkv_weight_type == GGML_TYPE_F16 || qkv_weight_type == GGML_TYPE_BF16);
+    return env_override.value_or(hp.is_sam3_1() || sam3_f16_or_bf16_default);
+}
+
+static bool sam3_prop_rope_k_backend_cache_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_ENABLE_PROP_ROPE_K_BACKEND_CACHE");
         return env != nullptr && env[0] != '0';
     }();
     return enabled;
 }
 
-static bool sam3_bf16_vit_mlp_chain_enabled() {
+static bool sam3_vit_contiguous_attention_v_enabled() {
     static const bool enabled = [] {
-        const char* env = std::getenv("SAM3_BF16_VIT_MLP_CHAIN");
+        const char* env = std::getenv("SAM3_ENABLE_VIT_CONTIGUOUS_ATTENTION_V");
         return env != nullptr && env[0] != '0';
     }();
     return enabled;
@@ -2090,6 +3521,18 @@ static bool sam3_bf16_vit_linear_inputs_enabled() {
     return enabled;
 }
 
+static bool sam3_bf16_vit_window_part_input_enabled() {
+    static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM3_DISABLE_BF16_VIT_WIN_PART_INPUT");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
+        const char* env = std::getenv("SAM3_BF16_VIT_WIN_PART_INPUT");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
 static bool sam3_bf16_vit_fc2_input_enabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("SAM3_DISABLE_BF16_VIT_FC2_INPUT");
@@ -2098,36 +3541,184 @@ static bool sam3_bf16_vit_fc2_input_enabled() {
     return enabled;
 }
 
+static bool sam31_bf16_mem_attn_activation_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_BF16_MEM_ATTN_ACTIVATION");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_bf16_mem_attn_input_boundary_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_BF16_MEM_ATTN_INPUT_BOUNDARY");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_bf16_propagation_feature_boundary_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_BF16_PROPAGATION_FEATURE_BOUNDARY");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_f16_mem_attn_activation_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_F16_MEM_ATTN_ACTIVATION");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_f16_mem_attn_attention_activation_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_F16_MEM_ATTN_ATTENTION_ACTIVATION");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_f16_mem_attn_ffn_activation_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_F16_MEM_ATTN_FFN_ACTIVATION");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_fused_mem_attn_sa_qkv_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_ENABLE_FUSED_MEM_ATTN_SA_QKV");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam3_materialized_fused_mem_attn_sa_qkv_enabled() {
+    static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM3_DISABLE_MATERIALIZED_FUSED_MEM_ATTN_SA_QKV");
+        if (disable_env != nullptr && disable_env[0] != '\0' && disable_env[0] != '0') {
+            return false;
+        }
+        const char* enable_env = std::getenv("SAM3_ENABLE_MATERIALIZED_FUSED_MEM_ATTN_SA_QKV");
+        return enable_env != nullptr && enable_env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_direct_fused_mem_attn_sa_qkv_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_ENABLE_DIRECT_FUSED_MEM_ATTN_SA_QKV");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_materialized_fused_mem_attn_sa_qkv_enabled() {
+    static const bool enabled = [] {
+        const char* disable_env = std::getenv("SAM31_DISABLE_MATERIALIZED_FUSED_MEM_ATTN_SA_QKV");
+        if (disable_env != nullptr && disable_env[0] != '\0' && disable_env[0] != '0') {
+            return false;
+        }
+        const char* enable_env = std::getenv("SAM31_ENABLE_MATERIALIZED_FUSED_MEM_ATTN_SA_QKV");
+        return enable_env == nullptr || enable_env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_prop_graph_cache_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_ENABLE_PROP_GRAPH_CACHE");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_prop_direct_mem_output_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_ENABLE_PROP_DIRECT_MEM_OUTPUT");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static bool sam31_mux_direct_final_queries_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM31_ENABLE_MUX_DIRECT_FINAL_QUERIES");
+        return env != nullptr && env[0] != '0';
+    }();
+    return enabled;
+}
+
+static ggml_type sam3_vit_linear_output_type(const ggml_tensor* weight,
+                                             bool use_bf16_output,
+                                             bool use_f16_output) {
+    if (use_f16_output && weight->type == GGML_TYPE_F16) {
+        return GGML_TYPE_F16;
+    }
+    if (use_bf16_output && weight->type == GGML_TYPE_BF16) {
+        return GGML_TYPE_BF16;
+    }
+    return GGML_TYPE_F32;
+}
+
 static struct ggml_tensor* sam3_vit_linear_bias(struct ggml_context* ctx,
                                                 struct ggml_tensor* weight,
                                                 struct ggml_tensor* input,
                                                 struct ggml_tensor* bias,
-                                                bool use_bf16_output) {
+                                                ggml_type output_type,
+                                                std::string_view profile_name = {}) {
     struct ggml_tensor* out = nullptr;
-    if (use_bf16_output && weight->type == GGML_TYPE_BF16) {
-        out = ggml_mul_mat_cast(ctx, weight, input, GGML_TYPE_BF16);
+    if ((output_type == GGML_TYPE_F16 && weight->type == GGML_TYPE_F16) ||
+        (output_type == GGML_TYPE_BF16 && weight->type == GGML_TYPE_BF16)) {
+        out = ggml_mul_mat_cast(ctx, weight, input, output_type);
     } else {
         out = ggml_mul_mat(ctx, weight, input);
     }
-    return ggml_add(ctx, out, bias);
+    if (!profile_name.empty()) {
+        sam3_set_name(out, std::format("{}_matmul", profile_name));
+    }
+    out = ggml_add(ctx, out, bias);
+    if (!profile_name.empty()) {
+        sam3_set_name(out, std::format("{}_bias", profile_name));
+    }
+    return out;
 }
 
 static struct ggml_tensor* sam3_vit_linear_bias_flat_batch(struct ggml_context* ctx,
                                                            struct ggml_tensor* weight,
                                                            struct ggml_tensor* input,
                                                            struct ggml_tensor* bias,
-                                                           bool use_bf16_output) {
+                                                           ggml_type output_type,
+                                                           std::string_view profile_name = {}) {
     const int64_t c = input->ne[0];
     const int64_t w = input->ne[1];
     const int64_t h = input->ne[2];
     const int64_t b = input->ne[3];
     if (h == 1 && b == 1) {
-        return sam3_vit_linear_bias(ctx, weight, input, bias, use_bf16_output);
+        return sam3_vit_linear_bias(ctx, weight, input, bias, output_type, profile_name);
     }
 
     auto* flat = ggml_reshape_2d(ctx, input, c, w * h * b);
-    auto* out = sam3_vit_linear_bias(ctx, weight, flat, bias, use_bf16_output);
-    return ggml_reshape_4d(ctx, out, out->ne[0], w, h, b);
+    if (!profile_name.empty()) {
+        sam3_set_name(flat, std::format("{}_flat_input", profile_name));
+    }
+    auto* out = sam3_vit_linear_bias(ctx, weight, flat, bias, output_type, profile_name);
+    out = ggml_reshape_4d(ctx, out, out->ne[0], w, h, b);
+    if (!profile_name.empty()) {
+        sam3_set_name(out, std::format("{}_4d", profile_name));
+    }
+    return out;
+}
+
+static struct ggml_tensor* sam3_vit_mlp_gelu(struct ggml_context* ctx,
+                                             struct ggml_tensor* input,
+                                             int block_idx) {
+    return sam3_vit_mlp_approx_gelu_enabled(block_idx) ? ggml_gelu(ctx, input)
+                                                       : ggml_gelu_erf(ctx, input);
 }
 
 /*****************************************************************************
@@ -2631,6 +4222,7 @@ static void sam3_print_hparams(const sam3_hparams& hp) {
     fprintf(stderr, "  ddec_layers    = %d\n", hp.ddec_layers);
     fprintf(stderr, "  ddec_queries   = %d\n", hp.ddec_num_queries);
     fprintf(stderr, "  sam_embed_dim  = %d\n", hp.sam_embed_dim);
+    fprintf(stderr, "  mem_out_dim    = %d\n", hp.mem_out_dim);
     fprintf(stderr, "  mem_attn_lyrs  = %d\n", hp.mem_attn_layers);
     fprintf(stderr, "  num_maskmem    = %d\n", hp.num_maskmem);
     fprintf(stderr, "  visual_only    = %d\n", hp.visual_only);
@@ -2751,6 +4343,7 @@ static void edgetam_print_hparams(const sam3_hparams& hp) {
     fprintf(stderr, "  perceiver_dim     = %d\n", hp.perceiver_dim);
     fprintf(stderr, "  neck_dim          = %d\n", hp.neck_dim);
     fprintf(stderr, "  sam_embed_dim     = %d\n", hp.sam_embed_dim);
+    fprintf(stderr, "  mem_out_dim       = %d\n", hp.mem_out_dim);
     fprintf(stderr, "  mem_attn_layers   = %d\n", hp.mem_attn_layers);
     fprintf(stderr, "  num_maskmem       = %d\n", hp.num_maskmem);
     fprintf(stderr, "  feat_size         = %d\n", hp.edgetam_feat_size());
@@ -4075,6 +5668,14 @@ static void sam3_register_tensors(sam3_model& model) {
             register_sam31_manifest_tensor(spec.name, spec.shape);
         }
         sam31_bind_multiplex_mask_decoder(model);
+        sam31_bind_interactive_prompt_encoder(model);
+        sam31_bind_propagation_dense_pe(model);
+        sam31_bind_interactive_mask_decoder(model);
+        sam31_bind_multiplex_memory_backbone(model);
+        sam31_bind_multiplex_memory_attention(model);
+        sam31_bind_object_pointer_projection(model);
+        sam31_bind_propagation_feature_adapter(model);
+        sam31_bind_interactive_feature_adapter(model);
         return;
     }
 
@@ -4351,6 +5952,8 @@ static bool sam3_scan_tensor_file_types(std::ifstream& fin,
 // Load tensors from the binary file into the already-registered ggml tensors
 static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tensors) {
     int n_loaded = 0;
+    int n_skipped_unknown = 0;
+    std::vector<std::string> skipped_unknown_names;
     for (int t = 0; t < n_tensors; ++t) {
         int32_t n_dims;
         int32_t name_len;
@@ -4379,25 +5982,36 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
         if (pad > 0)
             fin.seekg(pad, std::ios::cur);
 
-        // Look up tensor — every tensor in the file must be registered
-        auto it = model.tensors.find(name);
-        if (it == model.tensors.end()) {
-            fprintf(stderr,
-                    "%s: unknown tensor '%s' in file (not registered by model)\n",
-                    __func__,
-                    name.c_str());
-            return false;
-        }
-
-        auto* tensor = it->second;
-
-        // Compute element count and data size from file dtype
+        // Compute element count and data size from file dtype.
         int64_t n_el = 1;
         for (auto d : shape)
             n_el *= d;
 
         const ggml_type file_type = static_cast<ggml_type>(dtype);
         const size_t bytes = sam3_tensor_file_nbytes(file_type, shape);
+
+        // Look up tensor — every tensor in the file must be registered
+        auto it = model.tensors.find(name);
+        if (it == model.tensors.end()) {
+            if (!model.hparams.is_sam3_1()) {
+                std::println(stderr,
+                             "{}: unknown tensor '{}' in file (not registered by model)",
+                             __func__,
+                             name);
+                return false;
+            }
+            fin.seekg(static_cast<std::streamoff>(bytes), std::ios::cur);
+            if (fin.fail()) {
+                return false;
+            }
+            if (skipped_unknown_names.size() < 5) {
+                skipped_unknown_names.push_back(name);
+            }
+            n_skipped_unknown++;
+            continue;
+        }
+
+        auto* tensor = it->second;
 
         // Read into a temporary CPU buffer, then copy to backend
         std::vector<char> buf(bytes);
@@ -4469,6 +6083,16 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
             n_loaded,
             model.tensors.size());
 
+    if (n_skipped_unknown > 0) {
+        std::println(stderr,
+                     "{}: SAM3.1 skipped {} unregistered tensors from the checkpoint",
+                     __func__,
+                     n_skipped_unknown);
+        for (const auto& name : skipped_unknown_names) {
+            std::println(stderr, "  skipped: {}", name);
+        }
+    }
+
     if (std::cmp_not_equal(n_loaded, model.tensors.size()) && !model.hparams.is_sam3_1()) {
         fprintf(stderr,
                 "%s: tensor count mismatch: file has %d, model registered %zu\n",
@@ -4483,6 +6107,98 @@ static bool sam3_load_tensors(std::ifstream& fin, sam3_model& model, int n_tenso
                 n_loaded,
                 model.tensors.size());
     }
+    return true;
+}
+
+static bool sam31_same_nonquant_tensor_layout(const ggml_tensor* a, const ggml_tensor* b) {
+    return a != nullptr && b != nullptr && a->type == b->type && !ggml_is_quantized(a->type) &&
+           a->ne[0] == b->ne[0] && a->ne[1] == b->ne[1] && a->ne[2] == b->ne[2] &&
+           a->ne[3] == b->ne[3];
+}
+
+static bool sam31_upload_materialized_fused_qkv_tensor(ggml_tensor* dst,
+                                                       ggml_tensor* q,
+                                                       ggml_tensor* k,
+                                                       ggml_tensor* v) {
+    if (!sam31_same_nonquant_tensor_layout(q, k) || !sam31_same_nonquant_tensor_layout(q, v)) {
+        return false;
+    }
+    const size_t part_bytes = ggml_nbytes(q);
+    const size_t total_bytes = part_bytes * 3;
+    if (ggml_nbytes(dst) != total_bytes) {
+        return false;
+    }
+
+    std::vector<std::byte> data(total_bytes);
+    ggml_backend_tensor_get(q, data.data(), 0, part_bytes);
+    ggml_backend_tensor_get(k, data.data() + part_bytes, 0, part_bytes);
+    ggml_backend_tensor_get(v, data.data() + 2 * part_bytes, 0, part_bytes);
+    ggml_backend_tensor_set(dst, data.data(), 0, data.size());
+    return true;
+}
+
+static bool sam31_materialize_fused_mem_attn_sa_qkv(sam3_model& model) {
+    const bool enabled = model.hparams.is_sam3_1()
+                             ? sam31_materialized_fused_mem_attn_sa_qkv_enabled()
+                             : model.hparams.model_type == SAM3_MODEL_SAM3 &&
+                                   sam3_materialized_fused_mem_attn_sa_qkv_enabled();
+    if (!enabled) {
+        return true;
+    }
+    if (model.mem_attn.layers.empty()) {
+        return false;
+    }
+
+    const size_t tensor_count = model.mem_attn.layers.size() * 2;
+    const ggml_init_params params = {
+        .mem_size = (ggml_tensor_overhead() * tensor_count) + 1024,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        return false;
+    }
+
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        auto& ly = model.mem_attn.layers[i];
+        if (!sam31_same_nonquant_tensor_layout(ly.sa_q_w, ly.sa_k_w) ||
+            !sam31_same_nonquant_tensor_layout(ly.sa_q_w, ly.sa_v_w) ||
+            !sam31_same_nonquant_tensor_layout(ly.sa_q_b, ly.sa_k_b) ||
+            !sam31_same_nonquant_tensor_layout(ly.sa_q_b, ly.sa_v_b)) {
+            std::println(
+                stderr, "{}: unsupported SAM3.1 layer {} SA QKV tensor layout", __func__, i);
+            return false;
+        }
+
+        const int64_t D_in = ly.sa_q_w->ne[0];
+        const int64_t D_out = ly.sa_q_w->ne[1];
+        ly.sa_qkv_w = ggml_new_tensor_2d(ctx.get(), ly.sa_q_w->type, D_in, D_out * 3);
+        sam3_set_name(ly.sa_qkv_w, std::format("sam31_mem_attn_layer{}_sa_qkv_weight", i));
+        ly.sa_qkv_b = ggml_new_tensor_1d(ctx.get(), ly.sa_q_b->type, ly.sa_q_b->ne[0] * 3);
+        sam3_set_name(ly.sa_qkv_b, std::format("sam31_mem_attn_layer{}_sa_qkv_bias", i));
+    }
+
+    GgmlBackendBufferHandle buffer{ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend)};
+    if (!buffer) {
+        return false;
+    }
+
+    for (auto& ly : model.mem_attn.layers) {
+        if (!sam31_upload_materialized_fused_qkv_tensor(
+                ly.sa_qkv_w, ly.sa_q_w, ly.sa_k_w, ly.sa_v_w) ||
+            !sam31_upload_materialized_fused_qkv_tensor(
+                ly.sa_qkv_b, ly.sa_q_b, ly.sa_k_b, ly.sa_v_b)) {
+            return false;
+        }
+    }
+
+    model.sam31_fused_mem_attn_sa_qkv_ctx = std::move(ctx);
+    model.sam31_fused_mem_attn_sa_qkv_buffer = std::move(buffer);
+    std::println(stderr,
+                 "{}: materialized fused memory-attention SA QKV tensors for {} layers",
+                 __func__,
+                 model.mem_attn.layers.size());
     return true;
 }
 
@@ -4683,6 +6399,12 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
         fprintf(stderr, "%s: failed to load tensors\n", __func__);
         return nullptr;
     }
+    if (!sam31_materialize_fused_mem_attn_sa_qkv(*model)) {
+        fprintf(stderr,
+                "%s: failed to materialize fused SAM3.1 memory-attention SA QKV tensors\n",
+                __func__);
+        return nullptr;
+    }
 
     // ── Load embedded BPE tokenizer (SAM3 only) ───────────────────────
     if (!is_sam2 && !model->hparams.visual_only && !model->hparams.is_sam3_1()) {
@@ -4703,6 +6425,11 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
 }
 
 void sam3_free_model(sam3_model& model) {
+    model.sam31_interactive_obj_ptr_cache.reset();
+    model.sam3_neck_pe_buffer.reset();
+    model.sam3_neck_pe_ctx.reset();
+    model.sam31_fused_mem_attn_sa_qkv_buffer.reset();
+    model.sam31_fused_mem_attn_sa_qkv_ctx.reset();
     sam3_reset_backend_buffer(model.buffer);
     sam3_reset_context(model.ctx);
     sam3_reset_backend(model.backend);
@@ -4815,11 +6542,13 @@ void sam3_free_state(sam3_state& state) {
 #ifdef SAM3_USE_CUDA_PREPROCESS
     sam3_cuda_preprocess_free_cache(state.cuda_preprocess_src);
     state.cuda_preprocess_src_bytes = 0;
+    sam3_cuda_bicubic_preprocess_free_cache(state.cuda_bicubic_preprocess_cache);
 #endif
     sam3_reset_gallocr(state.galloc);
     sam3_clear_prompt_backend_cache(state);
     sam3_clear_hiera_pos_backend_cache(state);
     sam3_clear_vit_pos_backend_cache(state);
+    state.mask_input_obj_ptr_cache.reset();
     sam3_reset_backend_buffer(state.buffer);
     sam3_reset_backend_buffer(state.pe_buf);
     sam3_reset_context(state.pe_ctx);
@@ -4837,6 +6566,24 @@ struct sam3_resize_axis_cache {
     std::vector<int> hi;
     std::vector<double> w;
     std::vector<double> w0;
+};
+
+struct sam3_bicubic_axis_cache {
+    // Match Pillow-style 8-bit separable resize paths used by official preprocessing.
+    static constexpr int precision_bits = 32 - 8 - 2;
+
+    int src = 0;
+    int dst = 0;
+    int ksize = 0;
+    std::vector<int> start;
+    std::vector<int> count;
+    std::vector<int32_t> coeff;
+};
+
+enum class sam3_resize_filter {
+    bilinear,
+    bilinear_antialias,
+    bicubic_antialias,
 };
 
 static const sam3_resize_axis_cache& sam3_get_resize_axis_cache(int src, int dst, bool vertical) {
@@ -4864,6 +6611,106 @@ static const sam3_resize_axis_cache& sam3_get_resize_axis_cache(int src, int dst
         cache.w0[static_cast<size_t>(i)] = 1.0 - cache.w[static_cast<size_t>(i)];
     }
     return cache;
+}
+
+[[nodiscard]] static double sam3_bicubic_weight(double x) {
+    constexpr double a = -0.5;
+    x = std::abs(x);
+    if (x < 1.0) {
+        return (((a + 2.0) * x - (a + 3.0)) * x * x) + 1.0;
+    }
+    if (x < 2.0) {
+        return (((a * x - (5.0 * a)) * x + (8.0 * a)) * x) - (4.0 * a);
+    }
+    return 0.0;
+}
+
+[[nodiscard]] static double sam3_bilinear_weight(double x) {
+    x = std::abs(x);
+    return x < 1.0 ? 1.0 - x : 0.0;
+}
+
+[[nodiscard]] static int32_t sam3_bicubic_quantize_coeff(double w) {
+    constexpr int scale = 1 << sam3_bicubic_axis_cache::precision_bits;
+    if (w < 0.0) {
+        return static_cast<int32_t>(-0.5 + (w * static_cast<double>(scale)));
+    }
+    return static_cast<int32_t>(0.5 + (w * static_cast<double>(scale)));
+}
+
+template <typename WeightFn>
+static void sam3_build_filter_axis_cache(
+    sam3_bicubic_axis_cache& cache, int src, int dst, double support_radius, WeightFn weight_fn) {
+    if (cache.src == src && cache.dst == dst) {
+        return;
+    }
+    cache.src = src;
+    cache.dst = dst;
+    const double scale = static_cast<double>(src) / static_cast<double>(dst);
+    const double filter_scale = std::max(scale, 1.0);
+    const double support = support_radius * filter_scale;
+    cache.ksize = (static_cast<int>(std::ceil(support)) * 2) + 1;
+    cache.start.resize(dst);
+    cache.count.resize(dst);
+    cache.coeff.assign(sam3_count_mul(dst, cache.ksize), 0);
+
+    for (int out = 0; out < dst; ++out) {
+        const double center = (static_cast<double>(out) + 0.5) * scale;
+        int xmin = static_cast<int>(center - support + 0.5);
+        if (xmin < 0) {
+            xmin = 0;
+        }
+        int xmax = static_cast<int>(center + support + 0.5);
+        if (xmax > src) {
+            xmax = src;
+        }
+        const int count = xmax - xmin;
+        double sum = 0.0;
+        std::vector<double> weights(static_cast<size_t>(count), 0.0);
+        for (int k = 0; k < count; ++k) {
+            const double x = (static_cast<double>(k + xmin) - center + 0.5) / filter_scale;
+            weights[static_cast<size_t>(k)] = weight_fn(x);
+            sum += weights[static_cast<size_t>(k)];
+        }
+        if (sum != 0.0) {
+            for (auto& weight : weights) {
+                weight /= sum;
+            }
+        }
+        cache.start[static_cast<size_t>(out)] = xmin;
+        cache.count[static_cast<size_t>(out)] = count;
+        auto* coeff = cache.coeff.data() + sam3_count_mul(out, cache.ksize);
+        for (int k = 0; k < count; ++k) {
+            coeff[k] = sam3_bicubic_quantize_coeff(weights[static_cast<size_t>(k)]);
+        }
+    }
+}
+
+static const sam3_bicubic_axis_cache& sam3_get_bicubic_axis_cache(int src, int dst, bool vertical) {
+    thread_local sam3_bicubic_axis_cache x_cache;
+    thread_local sam3_bicubic_axis_cache y_cache;
+    auto& cache = vertical ? y_cache : x_cache;
+    if (cache.src != src || cache.dst != dst) {
+        sam3_build_filter_axis_cache(cache, src, dst, 2.0, sam3_bicubic_weight);
+    }
+    return cache;
+}
+
+static const sam3_bicubic_axis_cache& sam3_get_bilinear_axis_cache(int src,
+                                                                   int dst,
+                                                                   bool vertical) {
+    thread_local sam3_bicubic_axis_cache x_cache;
+    thread_local sam3_bicubic_axis_cache y_cache;
+    auto& cache = vertical ? y_cache : x_cache;
+    if (cache.src != src || cache.dst != dst) {
+        sam3_build_filter_axis_cache(cache, src, dst, 1.0, sam3_bilinear_weight);
+    }
+    return cache;
+}
+
+[[nodiscard]] static uint8_t sam3_bicubic_clip8(int32_t value) {
+    const int scaled = value >> sam3_bicubic_axis_cache::precision_bits;
+    return static_cast<uint8_t>(std::clamp(scaled, 0, 255));
 }
 
 [[nodiscard]] static int sam3_preprocess_thread_count(int requested, int img_size) {
@@ -4898,6 +6745,8 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
                                                     int img_size,
                                                     const std::array<float, 3>& mean,
                                                     const std::array<float, 3>& std_d,
+                                                    sam3_resize_filter resize_filter,
+                                                    bool fp16_storage,
                                                     int n_threads = 1) {
     constexpr int C = 3;
     const size_t image_area = sam3_count_mul(img_size, img_size);
@@ -4906,6 +6755,16 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
     const int src_w = image.width;
     const int src_h = image.height;
     const int preprocess_threads = sam3_preprocess_thread_count(n_threads, img_size);
+    const auto normalize = [&](float pixel01, int c) {
+        if (!fp16_storage) {
+            return (pixel01 - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+        }
+        const float stored = ggml_fp16_to_fp32(ggml_fp32_to_fp16(pixel01));
+        const float mean_h = ggml_fp16_to_fp32(ggml_fp32_to_fp16(mean[static_cast<size_t>(c)]));
+        const float std_h = ggml_fp16_to_fp32(ggml_fp32_to_fp16(std_d[static_cast<size_t>(c)]));
+        const float centered = ggml_fp16_to_fp32(ggml_fp32_to_fp16(stored - mean_h));
+        return ggml_fp16_to_fp32(ggml_fp32_to_fp16(centered / std_h));
+    };
 
     if (src_w == img_size && src_h == img_size) {
         sam3_parallel_rows(img_size, preprocess_threads, [&](int y_begin, int y_end) {
@@ -4916,8 +6775,68 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
                     const size_t chw_base = sam3_count_mul(y, img_size) + static_cast<size_t>(x);
                     for (int c = 0; c < C; ++c) {
                         const float v = pixels[hwc_base + static_cast<size_t>(c)] / 255.0f;
-                        result[static_cast<size_t>(c) * image_area + chw_base] =
-                            (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+                        result[static_cast<size_t>(c) * image_area + chw_base] = normalize(v, c);
+                    }
+                }
+            }
+        });
+        return result;
+    }
+
+    const auto pixel_index = [src_w](int row, int col, int channel) {
+        return (((sam3_count_mul(row, src_w) + static_cast<size_t>(col)) * static_cast<size_t>(3)) +
+                static_cast<size_t>(channel));
+    };
+
+    if (resize_filter == sam3_resize_filter::bicubic_antialias ||
+        resize_filter == sam3_resize_filter::bilinear_antialias) {
+        const auto& x_cache = resize_filter == sam3_resize_filter::bicubic_antialias
+                                  ? sam3_get_bicubic_axis_cache(src_w, img_size, false)
+                                  : sam3_get_bilinear_axis_cache(src_w, img_size, false);
+        const auto& y_cache = resize_filter == sam3_resize_filter::bicubic_antialias
+                                  ? sam3_get_bicubic_axis_cache(src_h, img_size, true)
+                                  : sam3_get_bilinear_axis_cache(src_h, img_size, true);
+        std::vector<uint8_t> horizontal(sam3_count_mul(src_h, img_size, C));
+
+        sam3_parallel_rows(src_h, preprocess_threads, [&](int y_begin, int y_end) {
+            for (int y = y_begin; y < y_end; ++y) {
+                for (int x = 0; x < img_size; ++x) {
+                    const auto xo = static_cast<size_t>(x);
+                    const int xmin = x_cache.start[xo];
+                    const int count = x_cache.count[xo];
+                    const auto* coeff = x_cache.coeff.data() + sam3_count_mul(x, x_cache.ksize);
+                    for (int c = 0; c < C; ++c) {
+                        int32_t acc = 1 << (sam3_bicubic_axis_cache::precision_bits - 1);
+                        for (int k = 0; k < count; ++k) {
+                            acc += static_cast<int32_t>(pixels[pixel_index(y, xmin + k, c)]) *
+                                   coeff[k];
+                        }
+                        horizontal[((sam3_count_mul(y, img_size) + xo) * static_cast<size_t>(C)) +
+                                   static_cast<size_t>(c)] = sam3_bicubic_clip8(acc);
+                    }
+                }
+            }
+        });
+        sam3_parallel_rows(img_size, preprocess_threads, [&](int y_begin, int y_end) {
+            for (int y = y_begin; y < y_end; ++y) {
+                const auto yo = static_cast<size_t>(y);
+                const int ymin = y_cache.start[yo];
+                const int count = y_cache.count[yo];
+                const auto* coeff = y_cache.coeff.data() + sam3_count_mul(y, y_cache.ksize);
+                for (int x = 0; x < img_size; ++x) {
+                    const auto xo = static_cast<size_t>(x);
+                    const size_t chw_base = sam3_count_mul(y, img_size) + xo;
+                    for (int c = 0; c < C; ++c) {
+                        int32_t acc = 1 << (sam3_bicubic_axis_cache::precision_bits - 1);
+                        for (int k = 0; k < count; ++k) {
+                            acc += static_cast<int32_t>(
+                                       horizontal[((sam3_count_mul(ymin + k, img_size) + xo) *
+                                                   static_cast<size_t>(C)) +
+                                                  static_cast<size_t>(c)]) *
+                                   coeff[k];
+                        }
+                        const float v = static_cast<float>(sam3_bicubic_clip8(acc)) / 255.0f;
+                        result[static_cast<size_t>(c) * image_area + chw_base] = normalize(v, c);
                     }
                 }
             }
@@ -4927,11 +6846,6 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
 
     const auto& x_cache = sam3_get_resize_axis_cache(src_w, img_size, false);
     const auto& y_cache = sam3_get_resize_axis_cache(src_h, img_size, true);
-    const auto pixel_index = [src_w](int row, int col, int channel) {
-        return (((sam3_count_mul(row, src_w) + static_cast<size_t>(col)) * static_cast<size_t>(3)) +
-                static_cast<size_t>(channel));
-    };
-
     sam3_parallel_rows(img_size, preprocess_threads, [&](int y_begin, int y_end) {
         for (int y = y_begin; y < y_end; ++y) {
             const auto yi = static_cast<size_t>(y);
@@ -4955,8 +6869,7 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
                         (wy0 * ((wx0 * p00) + (wx * p01))) + (wy * ((wx0 * p10) + (wx * p11)));
                     const int iv = std::clamp(static_cast<int>(std::lround(resized)), 0, 255);
                     const float v = static_cast<float>(iv) / 255.0f;
-                    result[static_cast<size_t>(c) * image_area + chw_base] =
-                        (v - mean[static_cast<size_t>(c)]) / std_d[static_cast<size_t>(c)];
+                    result[static_cast<size_t>(c) * image_area + chw_base] = normalize(v, c);
                 }
             }
         }
@@ -4971,8 +6884,25 @@ static std::vector<float> sam3_preprocess_image_chw(const sam3_image& image,
 static std::vector<float> sam3_preprocess_image(const sam3_image& image,
                                                 int img_size,
                                                 int n_threads = 1) {
-    return sam3_preprocess_image_chw(
-        image, img_size, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, n_threads);
+    return sam3_preprocess_image_chw(image,
+                                     img_size,
+                                     {0.5f, 0.5f, 0.5f},
+                                     {0.5f, 0.5f, 0.5f},
+                                     sam3_resize_filter::bilinear_antialias,
+                                     true,
+                                     n_threads);
+}
+
+static std::vector<float> sam31_preprocess_image(const sam3_image& image,
+                                                 int img_size,
+                                                 int n_threads = 1) {
+    return sam3_preprocess_image_chw(image,
+                                     img_size,
+                                     {0.5f, 0.5f, 0.5f},
+                                     {0.5f, 0.5f, 0.5f},
+                                     sam3_resize_filter::bicubic_antialias,
+                                     true,
+                                     n_threads);
 }
 
 // SAM2 preprocessing: resize + ImageNet normalization.
@@ -4980,8 +6910,13 @@ static std::vector<float> sam3_preprocess_image(const sam3_image& image,
 static std::vector<float> sam2_preprocess_image(const sam3_image& image,
                                                 int img_size,
                                                 int n_threads = 1) {
-    return sam3_preprocess_image_chw(
-        image, img_size, {0.485f, 0.456f, 0.406f}, {0.229f, 0.224f, 0.225f}, n_threads);
+    return sam3_preprocess_image_chw(image,
+                                     img_size,
+                                     {0.485f, 0.456f, 0.406f},
+                                     {0.229f, 0.224f, 0.225f},
+                                     sam3_resize_filter::bilinear,
+                                     false,
+                                     n_threads);
 }
 
 /*****************************************************************************
@@ -5156,6 +7091,121 @@ static bool sam2_prepare_neck_pe_backend_cache(sam3_state& state, const sam3_mod
     return true;
 }
 
+static bool sam3_prepare_model_neck_pe_backend_cache(const sam3_model& model,
+                                                     int neck_dim,
+                                                     const std::array<int, 4>& scale_sizes,
+                                                     std::array<ggml_tensor*, 4>& pe_tensors) {
+    const auto bind_cached_tensors = [&]() -> bool {
+        if (!model.sam3_neck_pe_ctx || !model.sam3_neck_pe_buffer ||
+            model.sam3_neck_pe_dim != neck_dim || model.sam3_neck_pe_size != scale_sizes) {
+            return false;
+        }
+        for (size_t i = 0; i < pe_tensors.size(); ++i) {
+            pe_tensors[i] = ggml_get_tensor(model.sam3_neck_pe_ctx.get(),
+                                            std::format("sam3_model_neck_pe_{}", i).c_str());
+            if (pe_tensors[i] == nullptr) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (bind_cached_tensors()) {
+        return true;
+    }
+
+    model.sam3_neck_pe_buffer.reset();
+    model.sam3_neck_pe_ctx.reset();
+    model.sam3_neck_pe_size = {};
+    model.sam3_neck_pe_dim = 0;
+
+    const ggml_init_params pe_params = {
+        .mem_size = (ggml_tensor_overhead() * pe_tensors.size()) + 256,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    model.sam3_neck_pe_ctx = make_ggml_context(pe_params);
+    if (!model.sam3_neck_pe_ctx) {
+        return false;
+    }
+
+    for (size_t i = 0; i < pe_tensors.size(); ++i) {
+        const int S = scale_sizes[i];
+        pe_tensors[i] =
+            ggml_new_tensor_4d(model.sam3_neck_pe_ctx.get(), GGML_TYPE_F32, neck_dim, S, S, 1);
+        sam3_set_name(pe_tensors[i], std::format("sam3_model_neck_pe_{}", i));
+    }
+
+    model.sam3_neck_pe_buffer = GgmlBackendBufferHandle{
+        ggml_backend_alloc_ctx_tensors(model.sam3_neck_pe_ctx.get(), model.backend)};
+    if (!model.sam3_neck_pe_buffer) {
+        model.sam3_neck_pe_ctx.reset();
+        return false;
+    }
+
+    for (size_t i = 0; i < pe_tensors.size(); ++i) {
+        const auto pe_data = sam3_sinusoidal_pe_2d(scale_sizes[i], scale_sizes[i], neck_dim);
+        ggml_backend_tensor_set(pe_tensors[i], pe_data.data(), 0, pe_data.size() * sizeof(float));
+    }
+
+    model.sam3_neck_pe_size = scale_sizes;
+    model.sam3_neck_pe_dim = neck_dim;
+    return true;
+}
+
+static bool sam31_prepare_neck_pe_backend_cache(sam3_state& state,
+                                                const sam3_model& model,
+                                                const int feat_size) {
+    const auto& hp = model.hparams;
+    if (!hp.is_sam3_1() || feat_size <= 0) {
+        return false;
+    }
+
+    const std::array<int, 4> current_sizes = {0, 0, feat_size, 0};
+    const bool cache_hit = state.pe_ctx != nullptr && state.pe_buf != nullptr &&
+                           state.sam3_cached_neck_pe_dim == hp.neck_dim &&
+                           state.sam3_cached_neck_pe_size == current_sizes;
+    if (cache_hit) {
+        state.neck_trk_pe[0] = nullptr;
+        state.neck_trk_pe[1] = nullptr;
+        state.neck_trk_pe[2] = ggml_get_tensor(state.pe_ctx, "sam31_neck_trk_pe_2");
+        state.neck_trk_pe[3] = nullptr;
+        return state.neck_trk_pe[2] != nullptr;
+    }
+
+    sam3_reset_backend_buffer(state.pe_buf);
+    sam3_reset_context(state.pe_ctx);
+
+    ggml_init_params pe_params = {
+        .mem_size = (ggml_tensor_overhead() * 1) + 256,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    state.pe_ctx = ggml_init(pe_params);
+    if (state.pe_ctx == nullptr) {
+        return false;
+    }
+
+    state.neck_trk_pe[0] = nullptr;
+    state.neck_trk_pe[1] = nullptr;
+    state.neck_trk_pe[2] =
+        ggml_new_tensor_4d(state.pe_ctx, GGML_TYPE_F32, hp.neck_dim, feat_size, feat_size, 1);
+    sam3_set_name(state.neck_trk_pe[2], "sam31_neck_trk_pe_2");
+    state.neck_trk_pe[3] = nullptr;
+
+    state.pe_buf = ggml_backend_alloc_ctx_tensors(state.pe_ctx, model.backend);
+    if (state.pe_buf == nullptr) {
+        return false;
+    }
+
+    auto pe_data = sam3_sinusoidal_pe_2d(feat_size, feat_size, hp.neck_dim);
+    ggml_backend_tensor_set(
+        state.neck_trk_pe[2], pe_data.data(), 0, pe_data.size() * sizeof(float));
+    state.sam3_cached_neck_pe_size = current_sizes;
+    state.sam3_cached_neck_pe_dim = hp.neck_dim;
+    return true;
+}
+
 // 1-D sinusoidal PE matching Python get_1d_sine_pe(pos_inds, dim, temperature).
 // Output: [dim] floats — first dim/2 are sin, second dim/2 are cos.
 static void sam3_get_1d_sine_pe(float* out, float pos_ind, int dim, float temperature = 10000.0f) {
@@ -5306,15 +7356,27 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
     auto* shortcut = x;
 
     x = sam3_layer_norm(ctx, x, blk.norm1_w, blk.norm1_b);
+    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_norm1", block_idx));
 
     const int64_t w0 = x->ne[1];
     const int64_t h0 = x->ne[2];
 
+    const bool use_bf16_qkv_input =
+        sam3_bf16_vit_linear_inputs_enabled() && blk.qkv_w->type == GGML_TYPE_BF16;
+
     if (!is_global) {
+        if (use_bf16_qkv_input && sam3_bf16_vit_window_part_input_enabled()) {
+            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+            sam3_set_name(x,
+                          std::format("sam3_vit_block_{:02d}_window_part_input_bf16", block_idx));
+        }
         // Window partition: [E, W, H, B] → [E, WS, WS, B*num_windows]
         x = ggml_win_part(ctx, x, WS);
+        sam3_set_name(x, std::format("sam3_vit_block_{:02d}_window_part", block_idx));
     }
-    if (sam3_bf16_vit_linear_inputs_enabled() && blk.qkv_w->type == GGML_TYPE_BF16) {
+    if (sam3_fast_f16_vit_attention_enabled() && blk.qkv_w->type == GGML_TYPE_F16) {
+        x = ggml_cast(ctx, x, GGML_TYPE_F16);
+    } else if (use_bf16_qkv_input && x->type != GGML_TYPE_BF16) {
         x = ggml_cast(ctx, x, GGML_TYPE_BF16);
     }
 
@@ -5323,36 +7385,80 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
     const int64_t B_cur = x->ne[3];
 
     {
+        const auto qkv_name =
+            std::format("sam3_vit_block_{:02d}_{}_qkv", block_idx, is_global ? "global" : "window");
         auto* cur = sam3_vit_linear_bias_flat_batch(
-            ctx, blk.qkv_w, x, blk.qkv_b, sam3_bf16_vit_qkv_chain_enabled());
-        sam3_set_name(
-            cur,
-            std::format(
-                "sam3_vit_block_{:02d}_{}_qkv", block_idx, is_global ? "global" : "window"));
+            ctx,
+            blk.qkv_w,
+            x,
+            blk.qkv_b,
+            sam3_vit_linear_output_type(blk.qkv_w,
+                                        sam3_bf16_vit_qkv_chain_enabled(block_idx),
+                                        sam3_f16_vit_qkv_output_enabled(block_idx)),
+            qkv_name);
+        sam3_set_name(cur, qkv_name);
         // cur: [3*E, W_cur, H_cur, B_cur]
 
-        // [3*E, W*H, B_cur] → [E, 3, W*H, B_cur] → permute → [E, W*H, B_cur, 3]
-        cur = ggml_reshape_4d(ctx, cur, E, 3, W_cur * H_cur, B_cur);
-        cur = ggml_cont(ctx, ggml_permute(ctx, cur, 0, 3, 1, 2));
-        // cur: [E, W*H, B_cur, 3]  (ne[3]=3 separates Q/K/V)
+        struct ggml_tensor* Q = nullptr;
+        struct ggml_tensor* K = nullptr;
+        struct ggml_tensor* V = nullptr;
+        if (sam3_vit_direct_qkv_views_enabled(hp, blk.qkv_w->type)) {
+            cur = ggml_reshape_3d(ctx, cur, 3 * E, W_cur * H_cur, B_cur);
+            const size_t qkv_stride = static_cast<size_t>(E) * cur->nb[0];
+            Q = ggml_view_4d(
+                ctx, cur, HD, NH, W_cur * H_cur, B_cur, HD * cur->nb[0], cur->nb[1], cur->nb[2], 0);
+            K = ggml_view_4d(ctx,
+                             cur,
+                             HD,
+                             NH,
+                             W_cur * H_cur,
+                             B_cur,
+                             HD * cur->nb[0],
+                             cur->nb[1],
+                             cur->nb[2],
+                             qkv_stride);
+            V = ggml_view_4d(ctx,
+                             cur,
+                             HD,
+                             NH,
+                             W_cur * H_cur,
+                             B_cur,
+                             HD * cur->nb[0],
+                             cur->nb[1],
+                             cur->nb[2],
+                             2 * qkv_stride);
+        } else {
+            // [3*E, W*H, B_cur] → [E, 3, W*H, B_cur] → permute → [E, W*H, B_cur, 3]
+            cur = ggml_reshape_4d(ctx, cur, E, 3, W_cur * H_cur, B_cur);
+            cur = ggml_cont(ctx, ggml_permute(ctx, cur, 0, 3, 1, 2));
+            // cur: [E, W*H, B_cur, 3]  (ne[3]=3 separates Q/K/V)
 
-        auto* Q = ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 0);
-        auto* K =
-            ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 1 * cur->nb[3]);
-        auto* V =
-            ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 2 * cur->nb[3]);
+            Q = ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 0);
+            K = ggml_view_3d(
+                ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 1 * cur->nb[3]);
+            V = ggml_view_3d(
+                ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 2 * cur->nb[3]);
 
-        Q = ggml_reshape_4d(ctx, Q, HD, NH, W_cur * H_cur, B_cur);
+            Q = ggml_reshape_4d(ctx, Q, HD, NH, W_cur * H_cur, B_cur);
+            K = ggml_reshape_4d(ctx, K, HD, NH, W_cur * H_cur, B_cur);
+            V = ggml_reshape_4d(ctx, V, HD, NH, W_cur * H_cur, B_cur);
+        }
+
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
         Q = ggml_reshape_3d(ctx, Q, HD, W_cur * H_cur, NH * B_cur);
 
-        K = ggml_reshape_4d(ctx, K, HD, NH, W_cur * H_cur, B_cur);
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
         K = ggml_reshape_3d(ctx, K, HD, W_cur * H_cur, NH * B_cur);
 
-        V = ggml_reshape_4d(ctx, V, HD, NH, W_cur * H_cur, B_cur);
         V = ggml_permute(
             ctx, V, 0, 2, 1, 3);  // [HD, N, NH, B_cur] non-contiguous view; flash_attn uses strides
+        if (sam3_vit_contiguous_attention_v_enabled()) {
+            V = ggml_cont(ctx, V);
+            sam3_set_name(
+                V,
+                std::format(
+                    "sam3_vit_block_{:02d}_{}_v_cont", block_idx, is_global ? "global" : "window"));
+        }
 
         if (blk.freqs_cis) {
             Q = sam3_apply_rope(ctx, Q, blk.freqs_cis);
@@ -5376,7 +7482,13 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
             attn_out,
             std::format(
                 "sam3_vit_block_{:02d}_{}_attn", block_idx, is_global ? "global" : "window"));
-        if (sam3_bf16_vit_attn_proj_input_enabled() && blk.proj_w->type == GGML_TYPE_BF16) {
+        if (sam3_fast_f16_vit_attn_proj_input_enabled() && blk.proj_w->type == GGML_TYPE_F16) {
+            attn_out = ggml_cast(ctx, attn_out, GGML_TYPE_F16);
+            sam3_set_name(attn_out,
+                          std::format("sam3_vit_block_{:02d}_{}_attn_f16",
+                                      block_idx,
+                                      is_global ? "global" : "window"));
+        } else if (sam3_bf16_vit_attn_proj_input_enabled() && blk.proj_w->type == GGML_TYPE_BF16) {
             attn_out = ggml_cast(ctx, attn_out, GGML_TYPE_BF16);
             sam3_set_name(attn_out,
                           std::format("sam3_vit_block_{:02d}_{}_attn_bf16",
@@ -5386,42 +7498,109 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         // flash_attn_ext returns [HD, NH, N, B_cur] — HD and NH adjacent,
         // so reshaping directly to [E, W, H, B] is correct.
         x = ggml_reshape_4d(ctx, attn_out, E, W_cur, H_cur, B_cur);
-
-        x = sam3_vit_linear_bias_flat_batch(
-            ctx, blk.proj_w, x, blk.proj_b, is_global && sam3_bf16_vit_linear_output_enabled());
         sam3_set_name(
             x,
             std::format(
-                "sam3_vit_block_{:02d}_{}_proj", block_idx, is_global ? "global" : "window"));
+                "sam3_vit_block_{:02d}_{}_attn_core", block_idx, is_global ? "global" : "window"));
+
+        const auto proj_name = std::format(
+            "sam3_vit_block_{:02d}_{}_proj", block_idx, is_global ? "global" : "window");
+        x = sam3_vit_linear_bias_flat_batch(
+            ctx,
+            blk.proj_w,
+            x,
+            blk.proj_b,
+            sam3_vit_linear_output_type(
+                blk.proj_w,
+                sam3_bf16_vit_attn_proj_output_enabled(hp, is_global, block_idx),
+                sam3_f16_vit_attn_proj_output_enabled(block_idx)),
+            proj_name);
+        sam3_set_name(x, proj_name);
     }
 
     if (!is_global) {
         x = ggml_win_unpart(ctx, x, w0, h0, WS);
+        sam3_set_name(x, std::format("sam3_vit_block_{:02d}_window_unpart", block_idx));
     }
 
     x = ggml_add(ctx, shortcut, x);
+    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_after_attn_residual", block_idx));
 
     shortcut = x;
     x = sam3_layer_norm(ctx, x, blk.norm2_w, blk.norm2_b);
+    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_norm2", block_idx));
 
-    if (sam3_fast_f16_vit_mlp_enabled()) {
+    if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
         x = ggml_cast(ctx, x, GGML_TYPE_F16);
     } else if (sam3_bf16_vit_linear_inputs_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
         x = ggml_cast(ctx, x, GGML_TYPE_BF16);
     }
-    x = sam3_vit_linear_bias_flat_batch(
-        ctx, blk.mlp_fc1_w, x, blk.mlp_fc1_b, sam3_bf16_vit_mlp_chain_enabled());
-    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_fc1", block_idx));
-    x = ggml_gelu_erf(ctx, x);
-    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_gelu", block_idx));
-    if (sam3_fast_f16_vit_mlp_enabled()) {
-        x = ggml_cast(ctx, x, GGML_TYPE_F16);
-    } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
-        x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+    if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+        const int64_t w = x->ne[1];
+        const int64_t h = x->ne[2];
+        const int64_t b = x->ne[3];
+        x = ggml_reshape_2d(ctx, x, x->ne[0], w * h * b);
+        const auto fc1_name = std::format("sam3_vit_block_{:02d}_mlp_fc1_flat", block_idx);
+        x = sam3_vit_linear_bias(
+            ctx,
+            blk.mlp_fc1_w,
+            x,
+            blk.mlp_fc1_b,
+            sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                        sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                        sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
+            fc1_name);
+        sam3_set_name(x, fc1_name);
+        x = sam3_vit_mlp_gelu(ctx, x, block_idx);
+        sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_gelu_flat", block_idx));
+        if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
+            x = ggml_cast(ctx, x, GGML_TYPE_F16);
+        } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
+            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+        }
+        const auto fc2_name = std::format("sam3_vit_block_{:02d}_mlp_fc2", block_idx);
+        x = sam3_vit_linear_bias(
+            ctx,
+            blk.mlp_fc2_w,
+            x,
+            blk.mlp_fc2_b,
+            sam3_vit_linear_output_type(blk.mlp_fc2_w,
+                                        sam3_bf16_vit_linear_output_enabled(hp, block_idx),
+                                        sam3_f16_vit_mlp_fc2_output_enabled(block_idx)),
+            fc2_name);
+        x = ggml_reshape_4d(ctx, x, x->ne[0], w, h, b);
+        sam3_set_name(x, fc2_name);
+    } else {
+        const auto fc1_name = std::format("sam3_vit_block_{:02d}_mlp_fc1", block_idx);
+        x = sam3_vit_linear_bias_flat_batch(
+            ctx,
+            blk.mlp_fc1_w,
+            x,
+            blk.mlp_fc1_b,
+            sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                        sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                        sam3_f16_vit_mlp_fc1_output_enabled(block_idx)),
+            fc1_name);
+        sam3_set_name(x, fc1_name);
+        x = sam3_vit_mlp_gelu(ctx, x, block_idx);
+        sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_gelu", block_idx));
+        if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
+            x = ggml_cast(ctx, x, GGML_TYPE_F16);
+        } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
+            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+        }
+        const auto fc2_name = std::format("sam3_vit_block_{:02d}_mlp_fc2", block_idx);
+        x = sam3_vit_linear_bias_flat_batch(
+            ctx,
+            blk.mlp_fc2_w,
+            x,
+            blk.mlp_fc2_b,
+            sam3_vit_linear_output_type(blk.mlp_fc2_w,
+                                        sam3_bf16_vit_linear_output_enabled(hp, block_idx),
+                                        sam3_f16_vit_mlp_fc2_output_enabled(block_idx)),
+            fc2_name);
+        sam3_set_name(x, fc2_name);
     }
-    x = sam3_vit_linear_bias_flat_batch(
-        ctx, blk.mlp_fc2_w, x, blk.mlp_fc2_b, sam3_bf16_vit_linear_output_enabled());
-    sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_fc2", block_idx));
 
     x = ggml_add(ctx, shortcut, x);
     sam3_set_name(x, std::format("sam3_vit_block_{:02d}_out", block_idx));
@@ -5445,6 +7624,7 @@ static struct ggml_tensor* sam3_build_vit_prefix_graph(
     // Patch embedding: ggml conv outputs [W, H, E, 1], permute to [E, W, H, B]
     auto* x = ggml_conv_2d_sk_p0(ctx, model.vit.patch_embed_w, input);
     x = ggml_cont(ctx, ggml_permute(ctx, x, 1, 2, 0, 3));
+    ggml_set_name(x, "vit_patch_embed");
 
     auto* pos_tiled = cached_pos_embed;
     if (pos_tiled == nullptr) {
@@ -5455,10 +7635,14 @@ static struct ggml_tensor* sam3_build_vit_prefix_graph(
     }
 
     x = ggml_add(ctx, x, pos_tiled);
+    ggml_set_name(x, "vit_after_pos");
 
     x = ggml_norm(ctx, x, 1e-5f);
     x = ggml_mul_inplace(ctx, x, model.vit.ln_pre_w);
     x = ggml_add_inplace(ctx, x, model.vit.ln_pre_b);
+    if (sam3_getenv("SAM31_MASK_INIT_STATE_DUMP_DIR")) {
+        x = ggml_dup(ctx, x);
+    }
 
     return x;
 }
@@ -5466,17 +7650,23 @@ static struct ggml_tensor* sam3_build_vit_prefix_graph(
 // Build the full ViT graph.
 // Input: [img_size, img_size, 3, 1] (ggml convention: [W, H, C, B])
 // Output: [E, W, H, 1] where E=1024, W=H=72
-static struct ggml_tensor* sam3_build_vit_graph(struct ggml_context* ctx,
-                                                struct ggml_tensor* input,
-                                                const sam3_model& model,
-                                                struct ggml_tensor* cached_pos_embed = nullptr) {
+static struct ggml_tensor* sam3_build_vit_graph(
+    struct ggml_context* ctx,
+    struct ggml_tensor* input,
+    const sam3_model& model,
+    struct ggml_tensor* cached_pos_embed = nullptr,
+    std::vector<struct ggml_tensor*>* block_outs = nullptr) {
     const auto& hp = model.hparams;
 
     struct ggml_tensor* x = sam3_build_vit_prefix_graph(ctx, input, model, cached_pos_embed);
+    ggml_set_name(x, "vit_block_00_input");
 
     // ── 32 transformer blocks ─────────────────────────────────────────────
     for (int i = 0; i < hp.vit_depth; ++i) {
         x = sam3_vit_block_forward(ctx, x, model.vit.blocks[i], hp, i);
+        if (block_outs != nullptr && std::cmp_less(i, block_outs->size())) {
+            (*block_outs)[static_cast<size_t>(i)] = x;
+        }
     }
 
     // Output: [E, W, H, 1] = [1024, 72, 72, 1]
@@ -5495,23 +7685,243 @@ static struct ggml_tensor* sam3_build_vit_graph(struct ggml_context* ctx,
 //   out[1]: [256, 144, 144, B]  (2× upsample)
 //   out[2]: [256,  72,  72, B]  (1×)
 //   out[3]: [256,  36,  36, B]  (0.5× downsample)
+[[nodiscard]] static ggml_tensor* sam3_neck_conv_3x3(ggml_context* ctx,
+                                                     ggml_tensor* weight,
+                                                     ggml_tensor* input,
+                                                     bool use_direct,
+                                                     std::string_view profile_name = {}) {
+    auto set_profile_name = [&](ggml_tensor* tensor, std::string_view suffix = {}) {
+        if (!profile_name.empty()) {
+            sam3_set_name(
+                tensor, suffix.empty() ? profile_name : std::format("{}_{}", profile_name, suffix));
+        }
+    };
+    ggml_tensor* out = nullptr;
+    if (use_direct) {
+        out = ggml_conv_2d_direct(ctx,
+                                  weight,
+                                  input,
+                                  1,
+                                  1,
+                                  static_cast<int>(weight->ne[0] / 2),
+                                  static_cast<int>(weight->ne[1] / 2),
+                                  1,
+                                  1);
+    } else {
+        out = ggml_conv_2d_s1_ph(ctx, weight, input);
+    }
+    set_profile_name(out);
+    return out;
+}
+
+[[nodiscard]] static bool sam3_should_use_neck_1x1_mulmat() {
+    return sam3_getenv("SAM3_ENABLE_NECK_1X1_MULMAT").has_value();
+}
+
+[[nodiscard]] static bool sam3_should_build_neck_scale3() {
+    return !sam3_getenv("SAM3_DISABLE_NECK_SCALE3").has_value();
+}
+
+[[nodiscard]] static ggml_tensor* sam3_neck_conv_1x1(ggml_context* ctx,
+                                                     ggml_tensor* input_whcb,
+                                                     ggml_tensor* weight,
+                                                     ggml_tensor* bias,
+                                                     bool use_mulmat,
+                                                     std::string_view profile_name = {}) {
+    auto set_profile_name = [&](ggml_tensor* tensor, std::string_view suffix = {}) {
+        if (!profile_name.empty()) {
+            sam3_set_name(
+                tensor, suffix.empty() ? profile_name : std::format("{}_{}", profile_name, suffix));
+        }
+    };
+    if (!use_mulmat) {
+        auto* out = ggml_conv_2d_sk_p0(ctx, weight, input_whcb);
+        set_profile_name(out, "conv");
+        auto* bias_3d = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
+        out = ggml_add(ctx, out, bias_3d);
+        set_profile_name(out);
+        return out;
+    }
+
+    const int64_t w = input_whcb->ne[0];
+    const int64_t h = input_whcb->ne[1];
+    const int64_t ci = input_whcb->ne[2];
+    const int64_t co = weight->ne[3];
+
+    auto* input_cwhb = ggml_cont(ctx, ggml_permute(ctx, input_whcb, 1, 2, 0, 3));
+    set_profile_name(input_cwhb, "input_cwhb");
+    auto* input_2d = ggml_reshape_2d(ctx, input_cwhb, ci, w * h);
+    set_profile_name(input_2d, "input_2d");
+    auto* weight_2d = ggml_reshape_2d(ctx, weight, ci, co);
+    auto* out_cwhb = ggml_mul_mat(ctx, weight_2d, input_2d);
+    set_profile_name(out_cwhb, "matmul");
+    out_cwhb = ggml_add(ctx, out_cwhb, bias);
+    set_profile_name(out_cwhb, "bias");
+    out_cwhb = ggml_reshape_4d(ctx, out_cwhb, co, w, h, 1);
+    set_profile_name(out_cwhb, "cwhb");
+    auto* out = ggml_cont(ctx, ggml_permute(ctx, out_cwhb, 2, 0, 1, 3));
+    set_profile_name(out);
+    return out;
+}
+
+[[nodiscard]] static bool sam3_should_use_direct_neck_3x3(ggml_backend_t backend) {
+    if (sam3_getenv("SAM3_DISABLE_DIRECT_NECK_3X3_CONV").has_value()) {
+        return false;
+    }
+    if (sam3_getenv("SAM3_ENABLE_DIRECT_NECK_3X3_CONV").has_value()) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    if (ggml_backend_is_cuda(backend)) {
+        return true;
+    }
+#else
+    (void) backend;
+#endif
+    return false;
+}
+
 static void sam3_build_neck_graph(struct ggml_context* ctx,
                                   struct ggml_tensor* vit_out,
                                   const sam3_neck& neck,
-                                  struct ggml_tensor* out[4]) {
+                                  struct ggml_tensor* out[4],
+                                  bool use_direct_neck_3x3,
+                                  std::string_view profile_prefix = {}) {
+    auto scoped_name = [&](std::string_view suffix) -> std::string {
+        return profile_prefix.empty() ? std::string{}
+                                      : std::format("{}_{}", profile_prefix, suffix);
+    };
+    auto set_profile_name = [&](ggml_tensor* tensor, std::string_view suffix) {
+        if (!profile_prefix.empty()) {
+            sam3_set_name(tensor, scoped_name(suffix));
+        }
+    };
+
     // Permute from [E, W, H, B] to [W, H, E, B] for conv operations
     auto* x = ggml_cont(ctx, ggml_permute(ctx, vit_out, 2, 0, 1, 3));
+    set_profile_name(x, "input_whcb");
+    const bool use_1x1_mulmat = sam3_should_use_neck_1x1_mulmat();
 
     // Helper: add bias to conv output.
     // Conv output is [W, H, C, B]. Bias is [C] (1D).
-    // Reshape bias to [1, 1, C, 1] so ggml_repeat can broadcast.
+    // Reshape bias to [1, 1, C, 1]; ggml_add broadcasts it across W/H/B.
     auto add_bias = [&](struct ggml_tensor* conv_out,
-                        struct ggml_tensor* bias) -> struct ggml_tensor* {
+                        struct ggml_tensor* bias,
+                        std::string_view name) -> struct ggml_tensor* {
         auto* b3d = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
-        return ggml_add(ctx, conv_out, ggml_repeat(ctx, b3d, conv_out));
+        auto* out = ggml_add(ctx, conv_out, b3d);
+        set_profile_name(out, name);
+        return out;
     };
 
     // Scale 0 (4× upsample)
+    auto* s0 = ggml_conv_transpose_2d_p0(
+        ctx, sam3_conv_transpose_weight(ctx, neck.scales[0].deconv1_w), x, 2);
+    set_profile_name(s0, "s0_deconv1");
+    s0 = add_bias(s0, neck.scales[0].deconv1_b, "s0_deconv1_bias");
+    s0 = ggml_gelu_erf(ctx, s0);
+    set_profile_name(s0, "s0_gelu");
+    s0 = ggml_conv_transpose_2d_p0(
+        ctx, sam3_conv_transpose_weight(ctx, neck.scales[0].deconv2_w), s0, 2);
+    set_profile_name(s0, "s0_deconv2");
+    s0 = add_bias(s0, neck.scales[0].deconv2_b, "s0_deconv2_bias");
+    s0 = sam3_neck_conv_1x1(ctx,
+                            s0,
+                            neck.scales[0].conv1x1_w,
+                            neck.scales[0].conv1x1_b,
+                            use_1x1_mulmat,
+                            scoped_name("s0_conv1x1"));
+    s0 = sam3_neck_conv_3x3(
+        ctx, neck.scales[0].conv3x3_w, s0, use_direct_neck_3x3, scoped_name("s0_conv3x3"));
+    s0 = add_bias(s0, neck.scales[0].conv3x3_b, "s0_conv3x3_bias");
+    out[0] = ggml_cont(ctx, ggml_permute(ctx, s0, 1, 2, 0, 3));
+    set_profile_name(out[0], "s0_out");
+
+    // Scale 1 (2× upsample)
+    auto* s1 = ggml_conv_transpose_2d_p0(
+        ctx, sam3_conv_transpose_weight(ctx, neck.scales[1].deconv1_w), x, 2);
+    set_profile_name(s1, "s1_deconv1");
+    s1 = add_bias(s1, neck.scales[1].deconv1_b, "s1_deconv1_bias");
+    s1 = sam3_neck_conv_1x1(ctx,
+                            s1,
+                            neck.scales[1].conv1x1_w,
+                            neck.scales[1].conv1x1_b,
+                            use_1x1_mulmat,
+                            scoped_name("s1_conv1x1"));
+    s1 = sam3_neck_conv_3x3(
+        ctx, neck.scales[1].conv3x3_w, s1, use_direct_neck_3x3, scoped_name("s1_conv3x3"));
+    s1 = add_bias(s1, neck.scales[1].conv3x3_b, "s1_conv3x3_bias");
+    out[1] = ggml_cont(ctx, ggml_permute(ctx, s1, 1, 2, 0, 3));
+    set_profile_name(out[1], "s1_out");
+
+    // Scale 2 (1×)
+    auto* s2 = sam3_neck_conv_1x1(ctx,
+                                  x,
+                                  neck.scales[2].conv1x1_w,
+                                  neck.scales[2].conv1x1_b,
+                                  use_1x1_mulmat,
+                                  scoped_name("s2_conv1x1"));
+    s2 = sam3_neck_conv_3x3(
+        ctx, neck.scales[2].conv3x3_w, s2, use_direct_neck_3x3, scoped_name("s2_conv3x3"));
+    s2 = add_bias(s2, neck.scales[2].conv3x3_b, "s2_conv3x3_bias");
+    out[2] = ggml_cont(ctx, ggml_permute(ctx, s2, 1, 2, 0, 3));
+    set_profile_name(out[2], "s2_out");
+
+    // Scale 3 (0.5× downsample)
+    if (sam3_should_build_neck_scale3()) {
+        auto* s3 = ggml_pool_2d(ctx, x, GGML_OP_POOL_MAX, 2, 2, 2, 2, 0, 0);
+        set_profile_name(s3, "s3_pool");
+        s3 = sam3_neck_conv_1x1(ctx,
+                                s3,
+                                neck.scales[3].conv1x1_w,
+                                neck.scales[3].conv1x1_b,
+                                use_1x1_mulmat,
+                                scoped_name("s3_conv1x1"));
+        s3 = sam3_neck_conv_3x3(
+            ctx, neck.scales[3].conv3x3_w, s3, use_direct_neck_3x3, scoped_name("s3_conv3x3"));
+        s3 = add_bias(s3, neck.scales[3].conv3x3_b, "s3_conv3x3_bias");
+        out[3] = ggml_cont(ctx, ggml_permute(ctx, s3, 1, 2, 0, 3));
+        set_profile_name(out[3], "s3_out");
+    } else {
+        out[3] = nullptr;
+    }
+}
+
+static void sam31_build_feature_adapter_graph(struct ggml_context* ctx,
+                                              struct ggml_tensor* vit_out,
+                                              const sam3_neck& neck,
+                                              struct ggml_tensor* out[3],
+                                              bool project_high_res_features,
+                                              bool use_direct_neck_3x3,
+                                              struct ggml_tensor* conv_s0_w = nullptr,
+                                              struct ggml_tensor* conv_s0_b = nullptr,
+                                              struct ggml_tensor* conv_s1_w = nullptr,
+                                              struct ggml_tensor* conv_s1_b = nullptr,
+                                              std::string_view debug_prefix = {}) {
+    auto* x = ggml_cont(ctx, ggml_permute(ctx, vit_out, 2, 0, 1, 3));
+    const bool use_1x1_mulmat = sam3_should_use_neck_1x1_mulmat();
+
+    auto add_bias = [&](struct ggml_tensor* conv_out,
+                        struct ggml_tensor* bias) -> struct ggml_tensor* {
+        auto* b3d = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
+        return ggml_add(ctx, conv_out, b3d);
+    };
+
+    auto project_s0 = [&](struct ggml_tensor* raw) {
+        GGML_ASSERT(conv_s0_w != nullptr && conv_s0_b != nullptr);
+        auto* whcb = ggml_cont(ctx, ggml_permute(ctx, raw, 2, 0, 1, 3));
+        auto* projected = ggml_conv_2d_sk_p0(ctx, conv_s0_w, whcb);
+        projected = add_bias(projected, conv_s0_b);
+        return ggml_cont(ctx, ggml_permute(ctx, projected, 1, 2, 0, 3));
+    };
+    auto project_s1 = [&](struct ggml_tensor* raw) {
+        GGML_ASSERT(conv_s1_w != nullptr && conv_s1_b != nullptr);
+        auto* whcb = ggml_cont(ctx, ggml_permute(ctx, raw, 2, 0, 1, 3));
+        auto* projected = ggml_conv_2d_sk_p0(ctx, conv_s1_w, whcb);
+        projected = add_bias(projected, conv_s1_b);
+        return ggml_cont(ctx, ggml_permute(ctx, projected, 1, 2, 0, 3));
+    };
+
     {
         auto* s0 = ggml_conv_transpose_2d_p0(
             ctx, sam3_conv_transpose_weight(ctx, neck.scales[0].deconv1_w), x, 2);
@@ -5520,43 +7930,69 @@ static void sam3_build_neck_graph(struct ggml_context* ctx,
         s0 = ggml_conv_transpose_2d_p0(
             ctx, sam3_conv_transpose_weight(ctx, neck.scales[0].deconv2_w), s0, 2);
         s0 = add_bias(s0, neck.scales[0].deconv2_b);
-        s0 = ggml_conv_2d_sk_p0(ctx, neck.scales[0].conv1x1_w, s0);
-        s0 = add_bias(s0, neck.scales[0].conv1x1_b);
-        s0 = ggml_conv_2d_s1_ph(ctx, neck.scales[0].conv3x3_w, s0);
+        s0 = sam3_neck_conv_1x1(
+            ctx, s0, neck.scales[0].conv1x1_w, neck.scales[0].conv1x1_b, use_1x1_mulmat);
+        s0 = sam3_neck_conv_3x3(ctx, neck.scales[0].conv3x3_w, s0, use_direct_neck_3x3);
         s0 = add_bias(s0, neck.scales[0].conv3x3_b);
-        out[0] = ggml_cont(ctx, ggml_permute(ctx, s0, 1, 2, 0, 3));
+        auto* raw_s0 = ggml_cont(ctx, ggml_permute(ctx, s0, 1, 2, 0, 3));
+        if (!debug_prefix.empty()) {
+            sam3_set_name(raw_s0, std::format("{}_raw_s0", debug_prefix));
+        }
+        out[0] = project_high_res_features ? project_s0(raw_s0) : raw_s0;
     }
 
-    // Scale 1 (2× upsample)
     {
         auto* s1 = ggml_conv_transpose_2d_p0(
             ctx, sam3_conv_transpose_weight(ctx, neck.scales[1].deconv1_w), x, 2);
         s1 = add_bias(s1, neck.scales[1].deconv1_b);
-        s1 = ggml_conv_2d_sk_p0(ctx, neck.scales[1].conv1x1_w, s1);
-        s1 = add_bias(s1, neck.scales[1].conv1x1_b);
-        s1 = ggml_conv_2d_s1_ph(ctx, neck.scales[1].conv3x3_w, s1);
+        s1 = sam3_neck_conv_1x1(
+            ctx, s1, neck.scales[1].conv1x1_w, neck.scales[1].conv1x1_b, use_1x1_mulmat);
+        s1 = sam3_neck_conv_3x3(ctx, neck.scales[1].conv3x3_w, s1, use_direct_neck_3x3);
         s1 = add_bias(s1, neck.scales[1].conv3x3_b);
-        out[1] = ggml_cont(ctx, ggml_permute(ctx, s1, 1, 2, 0, 3));
+        auto* raw_s1 = ggml_cont(ctx, ggml_permute(ctx, s1, 1, 2, 0, 3));
+        if (!debug_prefix.empty()) {
+            sam3_set_name(raw_s1, std::format("{}_raw_s1", debug_prefix));
+        }
+        out[1] = project_high_res_features ? project_s1(raw_s1) : raw_s1;
     }
 
-    // Scale 2 (1×)
     {
-        auto* s2 = ggml_conv_2d_sk_p0(ctx, neck.scales[2].conv1x1_w, x);
-        s2 = add_bias(s2, neck.scales[2].conv1x1_b);
-        s2 = ggml_conv_2d_s1_ph(ctx, neck.scales[2].conv3x3_w, s2);
+        auto* s2 = sam3_neck_conv_1x1(
+            ctx, x, neck.scales[2].conv1x1_w, neck.scales[2].conv1x1_b, use_1x1_mulmat);
+        s2 = sam3_neck_conv_3x3(ctx, neck.scales[2].conv3x3_w, s2, use_direct_neck_3x3);
         s2 = add_bias(s2, neck.scales[2].conv3x3_b);
         out[2] = ggml_cont(ctx, ggml_permute(ctx, s2, 1, 2, 0, 3));
+        if (!debug_prefix.empty()) {
+            sam3_set_name(out[2], std::format("{}_raw_s2", debug_prefix));
+        }
     }
+}
 
-    // Scale 3 (0.5× downsample)
-    {
-        auto* s3 = ggml_pool_2d(ctx, x, GGML_OP_POOL_MAX, 2, 2, 2, 2, 0, 0);
-        s3 = ggml_conv_2d_sk_p0(ctx, neck.scales[3].conv1x1_w, s3);
-        s3 = add_bias(s3, neck.scales[3].conv1x1_b);
-        s3 = ggml_conv_2d_s1_ph(ctx, neck.scales[3].conv3x3_w, s3);
-        s3 = add_bias(s3, neck.scales[3].conv3x3_b);
-        out[3] = ggml_cont(ctx, ggml_permute(ctx, s3, 1, 2, 0, 3));
-    }
+static void sam31_build_propagation_feature_graph(struct ggml_context* ctx,
+                                                  struct ggml_tensor* vit_out,
+                                                  const sam3_model& model,
+                                                  struct ggml_tensor* out[3]) {
+    const bool use_direct_neck_3x3 = sam3_should_use_direct_neck_3x3(model.backend);
+    sam31_build_feature_adapter_graph(ctx,
+                                      vit_out,
+                                      model.neck_trk,
+                                      out,
+                                      true,
+                                      use_direct_neck_3x3,
+                                      model.sam31_sam_dec.conv_s0_w,
+                                      model.sam31_sam_dec.conv_s0_b,
+                                      model.sam31_sam_dec.conv_s1_w,
+                                      model.sam31_sam_dec.conv_s1_b,
+                                      "sam31_prop");
+}
+
+static void sam31_build_interactive_feature_graph(struct ggml_context* ctx,
+                                                  struct ggml_tensor* vit_out,
+                                                  const sam3_model& model,
+                                                  struct ggml_tensor* out[3]) {
+    const bool use_direct_neck_3x3 = sam3_should_use_direct_neck_3x3(model.backend);
+    sam31_build_feature_adapter_graph(
+        ctx, vit_out, model.sam31_interactive_neck, out, false, use_direct_neck_3x3);
 }
 
 /*****************************************************************************
@@ -8181,10 +10617,523 @@ static bool sam2_encode_image_hiera(sam3_state& state,
 ** Image backbone — public API
 *****************************************************************************/
 
+static void sam3_dump_f32_tensor_if_requested(std::string_view env_name,
+                                              std::string_view name,
+                                              std::span<const float> data,
+                                              std::span<const int64_t> shape);
+
+static bool sam31_encode_image_impl(sam3_state& state,
+                                    const sam3_model& model,
+                                    const sam3_image& image,
+                                    bool include_interactive_neck) {
+#if SAM3_LOG_LEVEL >= 1
+    auto t_start = std::chrono::high_resolution_clock::now();
+#endif
+    const auto& hp = model.hparams;
+    const int img_size = sam3_eff_img_size(state, hp);
+    const int H = sam3_effective_feat_size(hp, img_size);
+
+    state.orig_width = image.width;
+    state.orig_height = image.height;
+
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    const bool use_cuda_bicubic_preprocess =
+        !sam3_getenv("SAM31_DISABLE_CUDA_BICUBIC_PREPROCESS").has_value() &&
+        ggml_backend_is_cuda(model.backend);
+#else
+    const bool use_cuda_bicubic_preprocess = false;
+#endif
+    sam3_encode_timing_scope encode_timing_scope(g_sam3_last_encode_timing);
+    auto& encode_timing = g_sam3_last_encode_timing;
+    encode_timing.used_cuda_preprocess = use_cuda_bicubic_preprocess;
+    encode_timing.include_detector_neck = include_interactive_neck;
+
+    static bool sam31_profile_encode_cuts_frame0_done = false;
+    static bool sam31_profile_encode_cuts_tracking_done = false;
+    const bool profile_encode_cuts_done = include_interactive_neck
+                                              ? sam31_profile_encode_cuts_frame0_done
+                                              : sam31_profile_encode_cuts_tracking_done;
+
+    const int64_t preprocess_t0 = ggml_time_us();
+    SAM3_PROFILE_CPU_START(sam31_encode_preprocess);
+    std::vector<float> img_data;
+    if (!use_cuda_bicubic_preprocess) {
+        img_data = sam31_preprocess_image(image, img_size, state.n_threads);
+    }
+    SAM3_PROFILE_CPU_END(sam31_encode_preprocess);
+    encode_timing.preprocess_ms = sam3_encode_timing_scope::elapsed_ms(preprocess_t0);
+    if (!use_cuda_bicubic_preprocess) {
+        if (const auto dump_dir = sam3_getenv("SAM31_MASK_INIT_STATE_DUMP_DIR")) {
+            const auto input_dump_path = std::format("{}/input_image_preprocessed.bin", *dump_dir);
+            if (!std::ifstream(input_dump_path, std::ios::binary).good()) {
+                const std::array<int64_t, 4> input_shape = {img_size, img_size, 3, 1};
+                sam3_dump_f32_tensor_if_requested("SAM31_MASK_INIT_STATE_DUMP_DIR",
+                                                  "input_image_preprocessed",
+                                                  img_data,
+                                                  input_shape);
+            }
+        }
+    }
+    const int64_t graph_build_t0 = ggml_time_us();
+    SAM3_PROFILE_CPU_START(sam31_encode_graph_build);
+    const bool profile_encode_cuts =
+        sam3_getenv("SAM31_PROFILE_ENCODE_CUTS").has_value() &&
+        (!include_interactive_neck ||
+         sam3_getenv("SAM31_PROFILE_ENCODE_CUTS_FRAME0").has_value()) &&
+        !profile_encode_cuts_done;
+    const size_t graph_overheads =
+        profile_encode_cuts ? static_cast<size_t>(hp.vit_depth + 64) : static_cast<size_t>(2);
+    const size_t tensor_overheads =
+        profile_encode_cuts ? static_cast<size_t>(131072) : static_cast<size_t>(16384);
+    const size_t buf_size =
+        (ggml_tensor_overhead() * tensor_overheads) + (ggml_graph_overhead() * graph_overheads);
+    ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        std::println(stderr, "{}: failed to init compute context", __func__);
+        return false;
+    }
+
+    auto* inp = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, img_size, img_size, 3, 1);
+    ggml_set_name(inp, "input_image");
+    ggml_set_input(inp);
+
+    struct ggml_tensor* cached_vit_pos = nullptr;
+    if (sam3_getenv("SAM3_ENABLE_VIT_POS_CACHE").has_value() &&
+        sam3_prepare_vit_pos_backend_cache(state, model)) {
+        cached_vit_pos = state.sam3_vit_pos_tensor;
+    }
+
+    std::vector<ggml_tensor*> vit_block_outs;
+    if (profile_encode_cuts) {
+        vit_block_outs.resize(static_cast<size_t>(hp.vit_depth));
+    }
+
+    auto* vit_out = sam3_build_vit_graph(
+        ctx0.get(), inp, model, cached_vit_pos, profile_encode_cuts ? &vit_block_outs : nullptr);
+    ggml_set_name(vit_out, "vit_output");
+    ggml_set_output(vit_out);
+
+    std::array<ggml_tensor*, 3> propagation = {};
+    sam31_build_propagation_feature_graph(ctx0.get(), vit_out, model, propagation.data());
+    if (model.weight_type == GGML_TYPE_BF16 && sam31_bf16_propagation_feature_boundary_enabled()) {
+        for (auto*& tensor : propagation) {
+            tensor =
+                ggml_cast(ctx0.get(), ggml_cast(ctx0.get(), tensor, GGML_TYPE_BF16), GGML_TYPE_F32);
+        }
+    }
+    for (size_t i = 0; i < propagation.size(); ++i) {
+        sam3_set_name(propagation[i], std::format("sam31_neck_trk_{}", i));
+        ggml_set_output(propagation[i]);
+    }
+    std::array<ggml_tensor*, 3> interactive = {};
+    if (include_interactive_neck) {
+        sam31_build_interactive_feature_graph(ctx0.get(), vit_out, model, interactive.data());
+        for (size_t i = 0; i < interactive.size(); ++i) {
+            sam3_set_name(interactive[i], std::format("sam31_neck_det_{}", i));
+            ggml_set_output(interactive[i]);
+        }
+    }
+
+    std::vector<std::pair<std::string, ggml_tensor*>> debug_dump_tensors;
+    auto add_debug_snapshot = [&](std::string dump_name, ggml_tensor* tensor) {
+        if (tensor == nullptr) {
+            return;
+        }
+        auto* snapshot = ggml_cont(ctx0.get(), tensor);
+        sam3_set_name(snapshot, std::format("sam31_debug_{}", dump_name));
+        ggml_set_output(snapshot);
+        debug_dump_tensors.emplace_back(std::move(dump_name), snapshot);
+    };
+
+    if (sam3_getenv("SAM31_MASK_INIT_STATE_DUMP_DIR")) {
+        const std::string encode_dump_prefix = include_interactive_neck ? "frame0" : "tracking";
+        constexpr std::array<std::pair<std::string_view, std::string_view>, 3> prefix_debug_names =
+            {{
+                {"vit_patch_embed", "vit_patch_embed"},
+                {"vit_after_pos", "vit_after_pos"},
+                {"vit_block_00_input", "vit_block_00_input"},
+            }};
+        for (const auto& [dump_name, graph_name] : prefix_debug_names) {
+            if (include_interactive_neck) {
+                add_debug_snapshot(std::string{dump_name},
+                                   ggml_get_tensor(ctx0.get(), std::string{graph_name}.c_str()));
+            }
+            add_debug_snapshot(std::format("{}_{}", encode_dump_prefix, dump_name),
+                               ggml_get_tensor(ctx0.get(), std::string{graph_name}.c_str()));
+        }
+        for (const int block_idx : sam31_mask_init_vit_block_dump_indices(hp)) {
+            const auto dump_name = std::format("vit_block_{:02d}_out", block_idx);
+            if (block_idx == hp.vit_depth - 1) {
+                if (include_interactive_neck) {
+                    add_debug_snapshot(dump_name, vit_out);
+                }
+                add_debug_snapshot(std::format("{}_{}", encode_dump_prefix, dump_name), vit_out);
+            } else {
+                const auto graph_name = std::format("sam3_vit_block_{:02d}_out", block_idx);
+                if (include_interactive_neck) {
+                    add_debug_snapshot(dump_name, ggml_get_tensor(ctx0.get(), graph_name.c_str()));
+                }
+                add_debug_snapshot(std::format("{}_{}", encode_dump_prefix, dump_name),
+                                   ggml_get_tensor(ctx0.get(), graph_name.c_str()));
+            }
+        }
+        for (const int block_idx : sam31_mask_init_vit_stage_dump_indices(hp)) {
+            const bool is_global = hp.is_global_attn(block_idx);
+            const auto attn_scope = is_global ? "global" : "window";
+            constexpr std::array<std::pair<std::string_view, std::string_view>, 9> stage_names = {{
+                {"norm1", "norm1"},
+                {"qkv", "qkv"},
+                {"attn_core", "attn_core"},
+                {"attn_proj", "proj"},
+                {"after_attn_residual", "after_attn_residual"},
+                {"norm2", "norm2"},
+                {"mlp_fc1", "mlp_fc1"},
+                {"mlp_gelu", "mlp_gelu"},
+                {"mlp_fc2", "mlp_fc2"},
+            }};
+            for (const auto& [dump_suffix, graph_suffix] : stage_names) {
+                std::string graph_name;
+                if (graph_suffix == "qkv" || graph_suffix == "attn_core" ||
+                    graph_suffix == "proj") {
+                    graph_name = std::format(
+                        "sam3_vit_block_{:02d}_{}_{}", block_idx, attn_scope, graph_suffix);
+                } else {
+                    graph_name = std::format("sam3_vit_block_{:02d}_{}", block_idx, graph_suffix);
+                }
+                if (include_interactive_neck) {
+                    add_debug_snapshot(std::format("vit_block_{:02d}_{}", block_idx, dump_suffix),
+                                       ggml_get_tensor(ctx0.get(), graph_name.c_str()));
+                }
+                add_debug_snapshot(
+                    std::format(
+                        "{}_vit_block_{:02d}_{}", encode_dump_prefix, block_idx, dump_suffix),
+                    ggml_get_tensor(ctx0.get(), graph_name.c_str()));
+            }
+        }
+        add_debug_snapshot(std::format("{}_vit_output", encode_dump_prefix), vit_out);
+        constexpr std::array<std::string_view, 2> raw_prop_graph_names = {{
+            "sam31_prop_raw_s0",
+            "sam31_prop_raw_s1",
+        }};
+        for (const auto graph_name : raw_prop_graph_names) {
+            add_debug_snapshot(std::format("{}_{}", encode_dump_prefix, graph_name),
+                               ggml_get_tensor(ctx0.get(), std::string{graph_name}.c_str()));
+        }
+        add_debug_snapshot(std::format("{}_sam31_prop_raw_s2", encode_dump_prefix), propagation[2]);
+        for (size_t i = 0; i < propagation.size(); ++i) {
+            add_debug_snapshot(std::format("{}_sam31_neck_trk_{}", encode_dump_prefix, i),
+                               propagation[i]);
+        }
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
+    for (auto* tensor : propagation) {
+        ggml_build_forward_expand(graph, tensor);
+    }
+    for (auto* tensor : interactive) {
+        if (tensor != nullptr) {
+            ggml_build_forward_expand(graph, tensor);
+        }
+    }
+    for (const auto& [_, tensor] : debug_dump_tensors) {
+        ggml_build_forward_expand(graph, tensor);
+    }
+    SAM3_PROFILE_CPU_END(sam31_encode_graph_build);
+    encode_timing.graph_build_ms = sam3_encode_timing_scope::elapsed_ms(graph_build_t0);
+
+    auto upload_input = [&]() -> bool {
+#ifdef SAM3_USE_CUDA_PREPROCESS
+        if (use_cuda_bicubic_preprocess) {
+            const auto& x_cache = sam3_get_bicubic_axis_cache(image.width, img_size, false);
+            const auto& y_cache = sam3_get_bicubic_axis_cache(image.height, img_size, true);
+            const float mean[3] = {0.5f, 0.5f, 0.5f};
+            const float std_d[3] = {0.5f, 0.5f, 0.5f};
+            if (!sam3_cuda_preprocess_image_chw_bicubic_fp16_cached(
+                    image.data.data(),
+                    image.width,
+                    image.height,
+                    static_cast<float*>(inp->data),
+                    img_size,
+                    mean,
+                    std_d,
+                    x_cache.start.data(),
+                    x_cache.count.data(),
+                    x_cache.coeff.data(),
+                    x_cache.ksize,
+                    y_cache.start.data(),
+                    y_cache.count.data(),
+                    y_cache.coeff.data(),
+                    y_cache.ksize,
+                    &state.cuda_bicubic_preprocess_cache)) {
+                std::println(stderr, "{}: CUDA BICUBIC preprocessing failed", __func__);
+                return false;
+            }
+            return true;
+        }
+#endif
+        sam3_backend_tensor_set_prefer_async(
+            model.backend, inp, img_data.data(), 0, img_data.size() * sizeof(float));
+        return true;
+    };
+
+    if (profile_encode_cuts) {
+        const int n_warmup = std::max(0, sam3_env_int("SAM31_PROFILE_ENCODE_CUTS_WARMUP", 0));
+        const int n_iter = std::max(1, sam3_env_int("SAM31_PROFILE_ENCODE_CUTS_ITER", 1));
+        const bool profile_all_blocks = sam3_getenv("SAM31_PROFILE_ENCODE_CUTS_ALL").has_value();
+        const char* mode = include_interactive_neck ? "frame0" : "tracking";
+        std::vector<std::pair<std::string, std::vector<ggml_tensor*>>> cuts;
+        if (auto* prefix = ggml_get_tensor(ctx0.get(), "vit_block_00_input")) {
+            cuts.push_back({std::format("{}:vit_prefix", mode), {prefix}});
+        }
+        for (int i = 0; i < hp.vit_depth; ++i) {
+            const bool selected = profile_all_blocks || i == 0 || i == 1 || i == 3 || i == 7 ||
+                                  i == 15 || i == 23 || i == hp.vit_depth - 1;
+            if (!selected || !std::cmp_less(i, vit_block_outs.size())) {
+                continue;
+            }
+            if (auto* block_out = vit_block_outs[static_cast<size_t>(i)]) {
+                cuts.push_back({std::format("{}:vit_block_{:02d}", mode, i), {block_out}});
+            }
+        }
+        for (size_t i = 0; i < propagation.size(); ++i) {
+            if (propagation[i] != nullptr) {
+                cuts.push_back({std::format("{}:neck_trk_{}", mode, i), {propagation[i]}});
+            }
+        }
+        if (include_interactive_neck) {
+            for (size_t i = 0; i < interactive.size(); ++i) {
+                if (interactive[i] != nullptr) {
+                    cuts.push_back({std::format("{}:neck_det_{}", mode, i), {interactive[i]}});
+                }
+            }
+        }
+        cuts.push_back(
+            {std::format("{}:encode_outputs", mode),
+             include_interactive_neck
+                 ? std::vector<ggml_tensor*>{propagation[0],
+                                             propagation[1],
+                                             propagation[2],
+                                             interactive[0],
+                                             interactive[1],
+                                             interactive[2]}
+                 : std::vector<ggml_tensor*>{propagation[0], propagation[1], propagation[2]}});
+
+        for (const auto& [label, tensors] : cuts) {
+            auto* cut_graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
+            for (auto* tensor : tensors) {
+                if (tensor != nullptr) {
+                    ggml_set_output(tensor);
+                    ggml_build_forward_expand(cut_graph, tensor);
+                }
+            }
+            auto cut_galloc = make_ggml_gallocr(model.backend);
+            if (!reserve_and_alloc_graph(cut_galloc.get(), cut_graph)) {
+                std::println(
+                    stderr, "SAM31_PROFILE_ENCODE_CUT label={} status=alloc_failed", label);
+                return false;
+            }
+            for (int i = 0; i < n_warmup; ++i) {
+                if (!upload_input() ||
+                    !sam3_graph_compute(
+                        model.backend, cut_graph, state.n_threads, "sam31_encode_cut")) {
+                    return false;
+                }
+                ggml_backend_synchronize(model.backend);
+            }
+            double total_ms = 0.0;
+            for (int i = 0; i < n_iter; ++i) {
+                if (!upload_input()) {
+                    return false;
+                }
+                const auto t0 = std::chrono::high_resolution_clock::now();
+                if (!sam3_graph_compute(
+                        model.backend, cut_graph, state.n_threads, "sam31_encode_cut")) {
+                    return false;
+                }
+                ggml_backend_synchronize(model.backend);
+                const auto t1 = std::chrono::high_resolution_clock::now();
+                total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            }
+            std::println(stderr,
+                         "SAM31_PROFILE_ENCODE_CUT label={} nodes={} mean_ms={:.3f} warmup={} "
+                         "iter={}",
+                         label,
+                         ggml_graph_n_nodes(cut_graph),
+                         total_ms / static_cast<double>(n_iter),
+                         n_warmup,
+                         n_iter);
+        }
+
+        auto clear_runtime_allocation = [](ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            tensor->data = nullptr;
+            tensor->buffer = nullptr;
+        };
+        clear_runtime_allocation(inp);
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            clear_runtime_allocation(ggml_graph_node(graph, i));
+        }
+        if (include_interactive_neck) {
+            sam31_profile_encode_cuts_frame0_done = true;
+        } else {
+            sam31_profile_encode_cuts_tracking_done = true;
+        }
+    }
+
+    const int64_t graph_alloc_t0 = ggml_time_us();
+    SAM3_PROFILE_CPU_START(sam31_encode_graph_alloc);
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        std::println(stderr, "{}: failed to allocate graph", __func__);
+        return false;
+    }
+    SAM3_PROFILE_CPU_END(sam31_encode_graph_alloc);
+    encode_timing.graph_alloc_ms = sam3_encode_timing_scope::elapsed_ms(graph_alloc_t0);
+
+    const int64_t input_upload_t0 = ggml_time_us();
+    SAM3_PROFILE_CPU_START(sam31_encode_input_upload);
+    if (!upload_input()) {
+        return false;
+    }
+    SAM3_PROFILE_CPU_END(sam31_encode_input_upload);
+    encode_timing.input_upload_ms = sam3_encode_timing_scope::elapsed_ms(input_upload_t0);
+
+    if (const auto dump_dir = sam3_getenv("SAM31_MASK_INIT_STATE_DUMP_DIR");
+        dump_dir && use_cuda_bicubic_preprocess) {
+        const auto input_dump_path = std::format("{}/input_image_preprocessed.bin", *dump_dir);
+        if (!std::ifstream(input_dump_path, std::ios::binary).good()) {
+            std::vector<float> input_data;
+            if (!sam3_copy_tensor_to_f32(inp, input_data)) {
+                std::println(stderr, "{}: failed to copy CUDA preprocessed input", __func__);
+                return false;
+            }
+            const std::array<int64_t, 4> input_shape = {img_size, img_size, 3, 1};
+            sam3_dump_f32_tensor_if_requested("SAM31_MASK_INIT_STATE_DUMP_DIR",
+                                              "input_image_preprocessed",
+                                              input_data,
+                                              input_shape);
+        }
+    }
+
+    const int64_t graph_compute_t0 = ggml_time_us();
+    if (!sam3_graph_compute(model.backend, graph, state.n_threads, "sam31_encode")) {
+        return false;
+    }
+    encode_timing.graph_compute_ms = sam3_encode_timing_scope::elapsed_ms(graph_compute_t0);
+    if (const auto dump_dir = sam3_getenv("SAM31_MASK_INIT_STATE_DUMP_DIR")) {
+        auto dump_tensor_once = [&](std::string_view dump_name, ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            const auto dump_path = std::format("{}/{}.bin", *dump_dir, dump_name);
+            if (std::ifstream(dump_path, std::ios::binary).good()) {
+                return;
+            }
+            std::vector<float> data;
+            if (!sam3_copy_tensor_to_f32(tensor, data)) {
+                std::println(stderr, "{}: failed to copy debug tensor '{}'", __func__, dump_name);
+                return;
+            }
+            const std::array<int64_t, 4> shape = {
+                tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]};
+            sam3_dump_f32_tensor_if_requested(
+                "SAM31_MASK_INIT_STATE_DUMP_DIR", dump_name, data, shape);
+        };
+        for (const auto& [dump_name, tensor] : debug_dump_tensors) {
+            dump_tensor_once(dump_name, tensor);
+        }
+        dump_tensor_once("vit_output", vit_out);
+        dump_tensor_once("vit_patch_embed", ggml_graph_get_tensor(graph, "vit_patch_embed"));
+        dump_tensor_once("vit_after_pos", ggml_graph_get_tensor(graph, "vit_after_pos"));
+        dump_tensor_once("vit_block_00_input", ggml_graph_get_tensor(graph, "vit_block_00_input"));
+        for (const int block_idx : sam31_mask_init_vit_block_dump_indices(hp)) {
+            const auto dump_name = std::format("vit_block_{:02d}_out", block_idx);
+            if (block_idx == 31) {
+                dump_tensor_once(dump_name, vit_out);
+            } else {
+                const auto graph_name = std::format("sam3_vit_block_{:02d}_out", block_idx);
+                dump_tensor_once(dump_name, ggml_graph_get_tensor(graph, graph_name.c_str()));
+            }
+        }
+        for (const int block_idx : sam31_mask_init_vit_stage_dump_indices(hp)) {
+            const bool is_global = hp.is_global_attn(block_idx);
+            const auto attn_scope = is_global ? "global" : "window";
+            constexpr std::array<std::pair<std::string_view, std::string_view>, 9> stage_names = {{
+                {"norm1", "norm1"},
+                {"qkv", "qkv"},
+                {"attn_core", "attn_core"},
+                {"attn_proj", "proj"},
+                {"after_attn_residual", "after_attn_residual"},
+                {"norm2", "norm2"},
+                {"mlp_fc1", "mlp_fc1"},
+                {"mlp_gelu", "mlp_gelu"},
+                {"mlp_fc2", "mlp_fc2"},
+            }};
+            for (const auto& [dump_suffix, graph_suffix] : stage_names) {
+                std::string graph_name;
+                if (graph_suffix == "qkv" || graph_suffix == "attn_core" ||
+                    graph_suffix == "proj") {
+                    graph_name = std::format(
+                        "sam3_vit_block_{:02d}_{}_{}", block_idx, attn_scope, graph_suffix);
+                } else {
+                    graph_name = std::format("sam3_vit_block_{:02d}_{}", block_idx, graph_suffix);
+                }
+                dump_tensor_once(std::format("vit_block_{:02d}_{}", block_idx, dump_suffix),
+                                 ggml_graph_get_tensor(graph, graph_name.c_str()));
+            }
+        }
+    }
+
+    const int64_t state_update_t0 = ggml_time_us();
+    sam3_reset_gallocr(state.galloc);
+    sam3_reset_context(state.ctx);
+    state.ctx = ctx0.release();
+    state.galloc = galloc.release();
+    state.backend = model.backend;
+    state.vit_output = vit_out;
+    std::fill_n(state.neck_det, 4, nullptr);
+    std::fill_n(state.neck_det_pe, 4, nullptr);
+    std::fill_n(state.neck_trk, 4, nullptr);
+    for (size_t i = 0; i < propagation.size(); ++i) {
+        state.neck_trk[i] = propagation[i];
+        state.neck_det[i] = interactive[i];
+    }
+    encode_timing.state_update_ms = sam3_encode_timing_scope::elapsed_ms(state_update_t0);
+
+    {
+        const int64_t pe_build_t0 = ggml_time_us();
+        SAM3_PROFILE_CPU_START(sam31_encode_pe_build);
+        if (!sam31_prepare_neck_pe_backend_cache(state, model, H)) {
+            std::println(stderr, "{}: failed to prepare SAM3.1 PE cache", __func__);
+            return false;
+        }
+        SAM3_PROFILE_CPU_END(sam31_encode_pe_build);
+        encode_timing.pe_build_ms = sam3_encode_timing_scope::elapsed_ms(pe_build_t0);
+    }
+
+#if SAM3_LOG_LEVEL >= 1
+    auto t_end = std::chrono::high_resolution_clock::now();
+    double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+    SAM3_LOG(1, "%s: image encoded successfully in %.1f ms\n", __func__, total_ms);
+#endif
+    return true;
+}
+
 static bool sam3_encode_image_impl(sam3_state& state,
                                    const sam3_model& model,
                                    const sam3_image& image,
                                    bool include_detector_neck) {
+    if (model.hparams.is_sam3_1()) {
+        return sam31_encode_image_impl(state, model, image, include_detector_neck);
+    }
+
     // ── EdgeTAM dispatch ─────────────────────────────────────────────────
     if (model.hparams.is_edgetam()) {
         return edgetam_encode_image(state, model, image);
@@ -8212,12 +11161,61 @@ static bool sam3_encode_image_impl(sam3_state& state,
     state.orig_width = image.width;
     state.orig_height = image.height;
 
-    SAM3_PROFILE_CPU_START(sam3_encode_preprocess);
-    auto img_data = sam3_preprocess_image(image, img_size, state.n_threads);
-    SAM3_PROFILE_CPU_END(sam3_encode_preprocess);
+#ifdef SAM3_USE_CUDA_PREPROCESS
+    const bool use_cuda_preprocess = !sam3_getenv("SAM3_DISABLE_CUDA_PREPROCESS").has_value() &&
+                                     ggml_backend_is_cuda(model.backend);
+#else
+    const bool use_cuda_preprocess = false;
+#endif
+    sam3_encode_timing_scope encode_timing_scope(g_sam3_last_encode_timing);
+    auto& encode_timing = g_sam3_last_encode_timing;
+    encode_timing.used_cuda_preprocess = use_cuda_preprocess;
+    encode_timing.include_detector_neck = include_detector_neck;
 
+    static bool sam3_profile_encode_cuts_frame0_done = false;
+    static bool sam3_profile_encode_cuts_tracking_done = false;
+    const bool profile_encode_cuts_requested = sam3_getenv("SAM3_PROFILE_ENCODE_CUTS").has_value();
+    const bool profile_encode_cuts_done = include_detector_neck
+                                              ? sam3_profile_encode_cuts_frame0_done
+                                              : sam3_profile_encode_cuts_tracking_done;
+    const bool profile_encode_cuts_cuda_disabled =
+#ifdef GGML_USE_CUDA
+        profile_encode_cuts_requested && ggml_backend_is_cuda(model.backend);
+#else
+        false;
+#endif
+    if (profile_encode_cuts_cuda_disabled && !profile_encode_cuts_done) {
+        std::println(stderr,
+                     "SAM3_PROFILE_ENCODE_CUT status=disabled_cuda reason=partial_cut_graphs_"
+                     "are_not_safe_on_cuda use=GGML_CUDA_PROFILE_NODES");
+        if (include_detector_neck) {
+            sam3_profile_encode_cuts_frame0_done = true;
+        } else {
+            sam3_profile_encode_cuts_tracking_done = true;
+        }
+    }
+
+    const int64_t preprocess_t0 = ggml_time_us();
+    SAM3_PROFILE_CPU_START(sam3_encode_preprocess);
+    std::vector<float> img_data;
+    if (!use_cuda_preprocess) {
+        img_data = sam3_preprocess_image(image, img_size, state.n_threads);
+    }
+    SAM3_PROFILE_CPU_END(sam3_encode_preprocess);
+    encode_timing.preprocess_ms = sam3_encode_timing_scope::elapsed_ms(preprocess_t0);
+
+    const int64_t graph_build_t0 = ggml_time_us();
     SAM3_PROFILE_CPU_START(sam3_encode_graph_build);
-    const size_t buf_size = (ggml_tensor_overhead() * 8192) + (ggml_graph_overhead() * 2);
+    const bool profile_encode_cuts =
+        profile_encode_cuts_requested && !profile_encode_cuts_cuda_disabled &&
+        (!include_detector_neck || sam3_getenv("SAM3_PROFILE_ENCODE_CUTS_FRAME0").has_value()) &&
+        !profile_encode_cuts_done;
+    const size_t tensor_overheads =
+        profile_encode_cuts ? static_cast<size_t>(32768) : static_cast<size_t>(8192);
+    const size_t graph_overheads =
+        profile_encode_cuts ? static_cast<size_t>(hp.vit_depth + 16) : static_cast<size_t>(2);
+    const size_t buf_size =
+        (ggml_tensor_overhead() * tensor_overheads) + (ggml_graph_overhead() * graph_overheads);
     struct ggml_init_params gparams = {
         .mem_size = buf_size,
         .mem_buffer = nullptr,
@@ -8225,7 +11223,7 @@ static bool sam3_encode_image_impl(sam3_state& state,
     };
     auto ctx0 = make_ggml_context(gparams);
     if (!ctx0) {
-        fprintf(stderr, "%s: failed to init compute context\n", __func__);
+        std::println(stderr, "{}: failed to init compute context", __func__);
         return false;
     }
 
@@ -8239,35 +11237,190 @@ static bool sam3_encode_image_impl(sam3_state& state,
         cached_vit_pos = state.sam3_vit_pos_tensor;
     }
 
-    auto* vit_out = sam3_build_vit_graph(ctx0.get(), inp, model, cached_vit_pos);
+    std::vector<ggml_tensor*> vit_block_outs;
+    if (profile_encode_cuts) {
+        vit_block_outs.resize(static_cast<size_t>(hp.vit_depth));
+    }
+
+    auto* vit_out = sam3_build_vit_graph(
+        ctx0.get(), inp, model, cached_vit_pos, profile_encode_cuts ? &vit_block_outs : nullptr);
     ggml_set_name(vit_out, "vit_output");
     ggml_set_output(vit_out);
     struct ggml_tensor* neck_det_out[4] = {};
     struct ggml_tensor* neck_trk_out[4];
     const bool build_detector_neck = !model.hparams.visual_only && include_detector_neck;
+    const bool use_direct_neck_3x3 = sam3_should_use_direct_neck_3x3(model.backend);
     if (build_detector_neck) {
-        sam3_build_neck_graph(ctx0.get(), vit_out, model.neck_det, neck_det_out);
+        sam3_build_neck_graph(ctx0.get(),
+                              vit_out,
+                              model.neck_det,
+                              neck_det_out,
+                              use_direct_neck_3x3,
+                              "sam3_neck_det");
     }
-    sam3_build_neck_graph(ctx0.get(), vit_out, model.neck_trk, neck_trk_out);
+    sam3_build_neck_graph(
+        ctx0.get(), vit_out, model.neck_trk, neck_trk_out, use_direct_neck_3x3, "sam3_neck_trk");
 
     for (int i = 0; i < 4; ++i) {
-        if (build_detector_neck) {
+        if (build_detector_neck && neck_det_out[i] != nullptr) {
             sam3_set_name(neck_det_out[i], std::format("neck_det_{}", i));
             ggml_set_output(neck_det_out[i]);
         }
-        sam3_set_name(neck_trk_out[i], std::format("neck_trk_{}", i));
-        ggml_set_output(neck_trk_out[i]);
+        if (neck_trk_out[i] != nullptr) {
+            sam3_set_name(neck_trk_out[i], std::format("neck_trk_{}", i));
+            ggml_set_output(neck_trk_out[i]);
+        }
     }
 
     struct ggml_cgraph* graph = ggml_new_graph_custom(ctx0.get(), 16384, false);
     for (int i = 0; i < 4; ++i) {
-        if (build_detector_neck) {
+        if (build_detector_neck && neck_det_out[i] != nullptr) {
             ggml_build_forward_expand(graph, neck_det_out[i]);
         }
-        ggml_build_forward_expand(graph, neck_trk_out[i]);
+        if (neck_trk_out[i] != nullptr) {
+            ggml_build_forward_expand(graph, neck_trk_out[i]);
+        }
     }
     SAM3_PROFILE_CPU_END(sam3_encode_graph_build);
+    encode_timing.graph_build_ms = sam3_encode_timing_scope::elapsed_ms(graph_build_t0);
 
+    auto upload_input = [&]() -> bool {
+#ifdef SAM3_USE_CUDA_PREPROCESS
+        if (use_cuda_preprocess) {
+            const auto& x_cache = sam3_get_bilinear_axis_cache(image.width, img_size, false);
+            const auto& y_cache = sam3_get_bilinear_axis_cache(image.height, img_size, true);
+            const float mean[3] = {0.5f, 0.5f, 0.5f};
+            const float std_d[3] = {0.5f, 0.5f, 0.5f};
+            if (!sam3_cuda_preprocess_image_chw_bicubic_fp16_cached(
+                    image.data.data(),
+                    image.width,
+                    image.height,
+                    static_cast<float*>(inp->data),
+                    img_size,
+                    mean,
+                    std_d,
+                    x_cache.start.data(),
+                    x_cache.count.data(),
+                    x_cache.coeff.data(),
+                    x_cache.ksize,
+                    y_cache.start.data(),
+                    y_cache.count.data(),
+                    y_cache.coeff.data(),
+                    y_cache.ksize,
+                    &state.cuda_bicubic_preprocess_cache)) {
+                fprintf(stderr, "%s: CUDA preprocessing failed\n", __func__);
+                return false;
+            }
+            return true;
+        }
+#endif
+        sam3_backend_tensor_set_prefer_async(
+            model.backend, inp, img_data.data(), 0, img_data.size() * sizeof(float));
+        return true;
+    };
+
+    if (profile_encode_cuts) {
+        const int n_warmup = std::max(0, sam3_env_int("SAM3_PROFILE_ENCODE_CUTS_WARMUP", 0));
+        const int n_iter = std::max(1, sam3_env_int("SAM3_PROFILE_ENCODE_CUTS_ITER", 1));
+        const bool profile_all_blocks = sam3_getenv("SAM3_PROFILE_ENCODE_CUTS_ALL").has_value();
+        const char* mode = include_detector_neck ? "frame0" : "tracking";
+        std::vector<std::pair<std::string, std::vector<ggml_tensor*>>> cuts;
+        if (auto* prefix = ggml_get_tensor(ctx0.get(), "vit_block_00_input")) {
+            cuts.push_back({std::format("{}:vit_prefix", mode), {prefix}});
+        }
+        for (int i = 0; i < hp.vit_depth; ++i) {
+            const bool selected = profile_all_blocks || i == 0 || i == 1 || i == 3 || i == 7 ||
+                                  i == 15 || i == 23 || i == hp.vit_depth - 1;
+            if (!selected || !std::cmp_less(i, vit_block_outs.size())) {
+                continue;
+            }
+            if (auto* block_out = vit_block_outs[static_cast<size_t>(i)]) {
+                cuts.push_back({std::format("{}:vit_block_{:02d}", mode, i), {block_out}});
+            }
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (neck_trk_out[i] != nullptr) {
+                cuts.push_back({std::format("{}:neck_trk_{}", mode, i), {neck_trk_out[i]}});
+            }
+            if (build_detector_neck && neck_det_out[i] != nullptr) {
+                cuts.push_back({std::format("{}:neck_det_{}", mode, i), {neck_det_out[i]}});
+            }
+        }
+        std::vector<ggml_tensor*> encode_outputs;
+        for (int i = 0; i < 4; ++i) {
+            if (build_detector_neck && neck_det_out[i] != nullptr) {
+                encode_outputs.push_back(neck_det_out[i]);
+            }
+            if (neck_trk_out[i] != nullptr) {
+                encode_outputs.push_back(neck_trk_out[i]);
+            }
+        }
+        cuts.push_back({std::format("{}:encode_outputs", mode), std::move(encode_outputs)});
+
+        for (const auto& [label, tensors] : cuts) {
+            auto* cut_graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
+            for (auto* tensor : tensors) {
+                if (tensor != nullptr) {
+                    ggml_set_output(tensor);
+                    ggml_build_forward_expand(cut_graph, tensor);
+                }
+            }
+            auto cut_galloc = make_ggml_gallocr(model.backend);
+            if (!reserve_and_alloc_graph(cut_galloc.get(), cut_graph)) {
+                std::println(stderr, "SAM3_PROFILE_ENCODE_CUT label={} status=alloc_failed", label);
+                return false;
+            }
+            for (int i = 0; i < n_warmup; ++i) {
+                if (!upload_input() ||
+                    !sam3_graph_compute(
+                        model.backend, cut_graph, state.n_threads, "sam3_encode_cut")) {
+                    return false;
+                }
+                ggml_backend_synchronize(model.backend);
+            }
+            double total_ms = 0.0;
+            for (int i = 0; i < n_iter; ++i) {
+                if (!upload_input()) {
+                    return false;
+                }
+                const auto t0 = std::chrono::high_resolution_clock::now();
+                if (!sam3_graph_compute(
+                        model.backend, cut_graph, state.n_threads, "sam3_encode_cut")) {
+                    return false;
+                }
+                ggml_backend_synchronize(model.backend);
+                const auto t1 = std::chrono::high_resolution_clock::now();
+                total_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+            }
+            std::println(stderr,
+                         "SAM3_PROFILE_ENCODE_CUT label={} nodes={} mean_ms={:.3f} warmup={} "
+                         "iter={}",
+                         label,
+                         ggml_graph_n_nodes(cut_graph),
+                         total_ms / static_cast<double>(n_iter),
+                         n_warmup,
+                         n_iter);
+        }
+
+        auto clear_runtime_allocation = [](ggml_tensor* tensor) {
+            if (tensor == nullptr) {
+                return;
+            }
+            tensor->data = nullptr;
+            tensor->buffer = nullptr;
+        };
+        clear_runtime_allocation(inp);
+        for (int i = 0; i < ggml_graph_n_nodes(graph); ++i) {
+            clear_runtime_allocation(ggml_graph_node(graph, i));
+        }
+        if (include_detector_neck) {
+            sam3_profile_encode_cuts_frame0_done = true;
+        } else {
+            sam3_profile_encode_cuts_tracking_done = true;
+        }
+    }
+
+    const int64_t graph_alloc_t0 = ggml_time_us();
     SAM3_PROFILE_CPU_START(sam3_encode_graph_alloc);
     auto galloc = make_ggml_gallocr(model.backend);
     if (!reserve_and_alloc_graph(galloc.get(), graph)) {
@@ -8275,20 +11428,49 @@ static bool sam3_encode_image_impl(sam3_state& state,
         return false;
     }
     SAM3_PROFILE_CPU_END(sam3_encode_graph_alloc);
+    encode_timing.graph_alloc_ms = sam3_encode_timing_scope::elapsed_ms(graph_alloc_t0);
 
     SAM3_LOG(2, "%s: graph allocated, %d nodes\n", __func__, ggml_graph_n_nodes(graph));
 
+    const int64_t input_upload_t0 = ggml_time_us();
     SAM3_PROFILE_CPU_START(sam3_encode_input_upload);
-    ggml_backend_tensor_set(inp, img_data.data(), 0, img_data.size() * sizeof(float));
+    if (!upload_input()) {
+        return false;
+    }
     SAM3_PROFILE_CPU_END(sam3_encode_input_upload);
+    encode_timing.input_upload_ms = sam3_encode_timing_scope::elapsed_ms(input_upload_t0);
+
+    if (const auto dump_dir = sam3_getenv("SAM3_PCS_DUMP_DIR")) {
+        const std::string input_dump_prefix =
+            std::format("{}/{}", *dump_dir, "input_image_preprocessed");
+        if (!std::ifstream(input_dump_prefix + ".bin", std::ios::binary).good()) {
+            std::vector<float> input_dump;
+#ifdef SAM3_USE_CUDA_PREPROCESS
+            if (use_cuda_preprocess) {
+                if (!sam3_copy_tensor_to_f32(inp, input_dump)) {
+                    fprintf(stderr, "%s: failed to copy preprocessed input for dump\n", __func__);
+                    return false;
+                }
+            } else
+#endif
+            {
+                input_dump = img_data;
+            }
+            const std::array<int64_t, 4> input_shape = {img_size, img_size, 3, 1};
+            (void) sam3_dump_debug_f32(
+                *dump_dir, "input_image_preprocessed", input_dump, input_shape);
+        }
+    }
 
     {
+        const int64_t graph_compute_t0 = ggml_time_us();
 #if SAM3_LOG_LEVEL >= 1
         auto t0 = std::chrono::high_resolution_clock::now();
 #endif
         if (!sam3_graph_compute(model.backend, graph, state.n_threads, "sam3_encode")) {
             return false;
         }
+        encode_timing.graph_compute_ms = sam3_encode_timing_scope::elapsed_ms(graph_compute_t0);
 #if SAM3_LOG_LEVEL >= 1
         auto t1 = std::chrono::high_resolution_clock::now();
         double compute_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
@@ -8300,6 +11482,7 @@ static bool sam3_encode_image_impl(sam3_state& state,
 #endif
     }
 
+    const int64_t state_update_t0 = ggml_time_us();
     sam3_reset_gallocr(state.galloc);
     sam3_reset_context(state.ctx);
 
@@ -8312,9 +11495,11 @@ static bool sam3_encode_image_impl(sam3_state& state,
         state.neck_det[i] = build_detector_neck ? neck_det_out[i] : nullptr;
         state.neck_trk[i] = neck_trk_out[i];
     }
+    encode_timing.state_update_ms = sam3_encode_timing_scope::elapsed_ms(state_update_t0);
 
     // PEs live in a separate buffer so they survive gallocr teardown.
     {
+        const int64_t pe_build_t0 = ggml_time_us();
         SAM3_PROFILE_CPU_START(sam3_encode_pe_build);
         const int neck_dim = hp.neck_dim;  // 256
         const int scale_sizes[4] = {
@@ -8333,7 +11518,17 @@ static bool sam3_encode_image_impl(sam3_state& state,
         const bool cache_hit = state.pe_buf != nullptr && state.pe_ctx != nullptr &&
                                state.sam3_cached_neck_pe_dim == neck_dim &&
                                state.sam3_cached_neck_pe_size == current_sizes;
-        if (cache_hit) {
+        const bool use_model_pe_cache =
+            !sam3_getenv("SAM3_DISABLE_MODEL_NECK_PE_CACHE").has_value();
+        std::array<ggml_tensor*, 4> model_pe_tensors = {};
+        if (use_model_pe_cache && sam3_prepare_model_neck_pe_backend_cache(
+                                      model, neck_dim, current_sizes, model_pe_tensors)) {
+            for (size_t i = 0; i < model_pe_tensors.size(); ++i) {
+                state.neck_det_pe[i] = model_pe_tensors[i];
+                state.neck_trk_pe[i] = model_pe_tensors[i];
+            }
+            SAM3_PROFILE_CPU_END(sam3_encode_pe_build);
+        } else if (cache_hit) {
             for (int i = 0; i < 4; ++i) {
                 auto* pe = ggml_get_tensor(state.pe_ctx, std::format("pe_{}", i).c_str());
                 state.neck_det_pe[i] = pe;
@@ -8382,10 +11577,8 @@ static bool sam3_encode_image_impl(sam3_state& state,
             }
             SAM3_PROFILE_CPU_END(sam3_encode_pe_build);
         }
+        encode_timing.pe_build_ms = sam3_encode_timing_scope::elapsed_ms(pe_build_t0);
     }
-
-    // Invalidate PE cache so it's re-populated on next PVS call if needed
-    state.pe_cache_valid = false;
 
 #if SAM3_LOG_LEVEL >= 1
     auto t_end = std::chrono::high_resolution_clock::now();
@@ -8397,6 +11590,12 @@ static bool sam3_encode_image_impl(sam3_state& state,
 
 bool sam3_encode_image(sam3_state& state, const sam3_model& model, const sam3_image& image) {
     return sam3_encode_image_impl(state, model, image, true);
+}
+
+bool sam3_encode_image_for_tracking(sam3_state& state,
+                                    const sam3_model& model,
+                                    const sam3_image& image) {
+    return sam3_encode_image_impl(state, model, image, false);
 }
 
 static void sam3_clear_encoder_state(sam3_state& state) {
@@ -8492,9 +11691,65 @@ bool sam3_encode_vit_from_preprocessed_selective(sam3_state& state,
     state.backend = model.backend;
     sam3_clear_encoder_state(state);
     state.vit_output = vit_out;
-    state.pe_cache_valid = false;
 
     return true;
+}
+
+bool sam3_encode_vit_from_image_selective(sam3_state& state,
+                                          const sam3_model& model,
+                                          const sam3_image& image,
+                                          const std::vector<std::string>& output_tensors) {
+    const auto& hp = model.hparams;
+    if (hp.is_sam2() || hp.is_edgetam()) {
+        std::println(stderr, "{}: only SAM3/SAM3.1 ViT models are supported", __func__);
+        return false;
+    }
+    if (image.data.empty() || image.width <= 0 || image.height <= 0) {
+        std::println(stderr, "{}: invalid image", __func__);
+        return false;
+    }
+
+    const int img_size = sam3_eff_img_size(state, hp);
+    if (img_size != hp.img_size) {
+        std::println(stderr,
+                     "{}: selective ViT capture requires native img_size={}, got {}",
+                     __func__,
+                     hp.img_size,
+                     img_size);
+        return false;
+    }
+
+    const std::vector<float> input = hp.is_sam3_1()
+                                         ? sam31_preprocess_image(image, img_size, state.n_threads)
+                                         : sam3_preprocess_image(image, img_size, state.n_threads);
+    const size_t expected = sam3_count_mul(3, img_size, img_size);
+    if (input.size() != expected) {
+        std::println(stderr,
+                     "{}: preprocessed image has {} elements, expected {}",
+                     __func__,
+                     input.size(),
+                     expected);
+        return false;
+    }
+
+    const bool ok = sam3_encode_vit_from_preprocessed_selective(
+        state, model, input.data(), img_size, output_tensors);
+    if (ok) {
+        state.orig_width = image.width;
+        state.orig_height = image.height;
+    }
+    return ok;
+}
+
+int sam3_test_vit_depth(const sam3_model& model) {
+    return model.hparams.vit_depth;
+}
+
+bool sam3_test_vit_block_is_global(const sam3_model& model, int block_idx) {
+    if (block_idx < 0 || block_idx >= model.hparams.vit_depth) {
+        return false;
+    }
+    return model.hparams.is_global_attn(block_idx);
 }
 
 static std::array<int64_t, 4> sam3_normalize_ne4(std::array<int64_t, 4> input_ne);
@@ -8922,6 +12177,13 @@ static bool sam3_copy_tensor_to_f32(struct ggml_tensor* t, std::vector<float>& o
         return true;
     }
 
+    if (t->type == GGML_TYPE_BF16) {
+        std::vector<ggml_bf16_t> tmp(static_cast<size_t>(numel));
+        ggml_backend_tensor_get(t, tmp.data(), 0, (size_t) numel * sizeof(ggml_bf16_t));
+        ggml_bf16_to_fp32_row(tmp.data(), output.data(), numel);
+        return true;
+    }
+
     fprintf(stderr,
             "%s: unsupported tensor type %d for '%s'\n",
             __func__,
@@ -9003,46 +12265,122 @@ static struct ggml_tensor* sam3_build_vit_prefix_stage_from_input(struct ggml_co
     return nullptr;
 }
 
-static struct ggml_tensor* sam3_build_vit_attn_core_from_qkv(struct ggml_context* ctx,
-                                                             struct ggml_tensor* qkv,
-                                                             const sam3_vit_block& blk,
-                                                             const sam3_hparams& hp) {
+enum class sam3_vit_qkv_attn_stop {
+    layout,
+    rope,
+    core,
+};
+
+static struct ggml_tensor* sam3_qk_stop_tensor(struct ggml_context* ctx,
+                                               struct ggml_tensor* q,
+                                               struct ggml_tensor* k,
+                                               int64_t head_dim,
+                                               int64_t tokens,
+                                               int64_t heads,
+                                               int64_t batch,
+                                               std::string_view name) {
+    struct ggml_tensor* out = ggml_add(ctx, q, k);
+    sam3_set_name(out, name);
+    return ggml_reshape_4d(ctx, out, head_dim, tokens, heads, batch);
+}
+
+static struct ggml_tensor* sam3_build_vit_qkv_attn_from_qkv(struct ggml_context* ctx,
+                                                            struct ggml_tensor* qkv,
+                                                            const sam3_vit_block& blk,
+                                                            const sam3_hparams& hp,
+                                                            int block_idx,
+                                                            sam3_vit_qkv_attn_stop stop) {
     const int E = hp.vit_embed_dim;
     const int NH = hp.vit_num_heads;
     const int HD = hp.vit_head_dim();
+    const bool is_global = hp.is_global_attn(block_idx);
 
     const int64_t W_cur = qkv->ne[1];
     const int64_t H_cur = qkv->ne[2];
     const int64_t B_cur = qkv->ne[3];
 
-    struct ggml_tensor* cur = ggml_reshape_4d(ctx, qkv, E, 3, W_cur * H_cur, B_cur);
-    cur = ggml_cont(ctx, ggml_permute(ctx, cur, 0, 3, 1, 2));
+    struct ggml_tensor* cur = qkv;
+    struct ggml_tensor* Q = nullptr;
+    struct ggml_tensor* K = nullptr;
+    struct ggml_tensor* V = nullptr;
+    if (sam3_vit_direct_qkv_views_enabled(hp, blk.qkv_w->type)) {
+        cur = ggml_reshape_3d(ctx, cur, 3 * E, W_cur * H_cur, B_cur);
+        const size_t qkv_stride = static_cast<size_t>(E) * cur->nb[0];
+        Q = ggml_view_4d(
+            ctx, cur, HD, NH, W_cur * H_cur, B_cur, HD * cur->nb[0], cur->nb[1], cur->nb[2], 0);
+        K = ggml_view_4d(ctx,
+                         cur,
+                         HD,
+                         NH,
+                         W_cur * H_cur,
+                         B_cur,
+                         HD * cur->nb[0],
+                         cur->nb[1],
+                         cur->nb[2],
+                         qkv_stride);
+        V = ggml_view_4d(ctx,
+                         cur,
+                         HD,
+                         NH,
+                         W_cur * H_cur,
+                         B_cur,
+                         HD * cur->nb[0],
+                         cur->nb[1],
+                         cur->nb[2],
+                         2 * qkv_stride);
+    } else {
+        cur = ggml_reshape_4d(ctx, cur, E, 3, W_cur * H_cur, B_cur);
+        cur = ggml_cont(ctx, ggml_permute(ctx, cur, 0, 3, 1, 2));
 
-    struct ggml_tensor* Q =
-        ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 0);
-    struct ggml_tensor* K =
-        ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 1 * cur->nb[3]);
-    struct ggml_tensor* V =
-        ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 2 * cur->nb[3]);
+        Q = ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 0);
+        K = ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 1 * cur->nb[3]);
+        V = ggml_view_3d(ctx, cur, E, W_cur * H_cur, B_cur, cur->nb[1], cur->nb[2], 2 * cur->nb[3]);
 
-    if (Q->type == GGML_TYPE_F16) {
-        Q = ggml_cast(ctx, Q, GGML_TYPE_F32);
+        Q = ggml_reshape_4d(ctx, Q, HD, NH, W_cur * H_cur, B_cur);
+        K = ggml_reshape_4d(ctx, K, HD, NH, W_cur * H_cur, B_cur);
+        V = ggml_reshape_4d(ctx, V, HD, NH, W_cur * H_cur, B_cur);
     }
 
-    Q = ggml_reshape_4d(ctx, Q, HD, NH, W_cur * H_cur, B_cur);
     Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
     Q = ggml_reshape_3d(ctx, Q, HD, W_cur * H_cur, NH * B_cur);
 
-    K = ggml_reshape_4d(ctx, K, HD, NH, W_cur * H_cur, B_cur);
     K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
     K = ggml_reshape_3d(ctx, K, HD, W_cur * H_cur, NH * B_cur);
 
-    V = ggml_reshape_4d(ctx, V, HD, NH, W_cur * H_cur, B_cur);
     V = ggml_permute(ctx, V, 0, 2, 1, 3);
+    if (sam3_vit_contiguous_attention_v_enabled()) {
+        V = ggml_cont(ctx, V);
+    }
+
+    if (stop == sam3_vit_qkv_attn_stop::layout) {
+        return sam3_qk_stop_tensor(
+            ctx,
+            Q,
+            K,
+            HD,
+            W_cur * H_cur,
+            NH,
+            B_cur,
+            std::format(
+                "sam3_vit_block_{:02d}_{}_qk_layout", block_idx, is_global ? "global" : "window"));
+    }
 
     if (blk.freqs_cis) {
         Q = sam3_apply_rope(ctx, Q, blk.freqs_cis);
         K = sam3_apply_rope(ctx, K, blk.freqs_cis);
+    }
+
+    if (stop == sam3_vit_qkv_attn_stop::rope) {
+        return sam3_qk_stop_tensor(
+            ctx,
+            Q,
+            K,
+            HD,
+            W_cur * H_cur,
+            NH,
+            B_cur,
+            std::format(
+                "sam3_vit_block_{:02d}_{}_qk_rope", block_idx, is_global ? "global" : "window"));
     }
 
     Q = ggml_reshape_4d(ctx, Q, HD, W_cur * H_cur, NH, B_cur);
@@ -9050,15 +12388,29 @@ static struct ggml_tensor* sam3_build_vit_attn_core_from_qkv(struct ggml_context
 
     const float scale = 1.0f / sqrtf(static_cast<float>(HD));
     struct ggml_tensor* attn_out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+    sam3_set_name(
+        attn_out,
+        std::format("sam3_vit_block_{:02d}_{}_attn", block_idx, is_global ? "global" : "window"));
 
     return ggml_cont(ctx, ggml_reshape_4d(ctx, attn_out, E, W_cur, H_cur, B_cur));
+}
+
+static struct ggml_tensor* sam3_build_vit_attn_core_from_qkv(struct ggml_context* ctx,
+                                                             struct ggml_tensor* qkv,
+                                                             const sam3_vit_block& blk,
+                                                             const sam3_hparams& hp,
+                                                             int block_idx) {
+    return sam3_build_vit_qkv_attn_from_qkv(
+        ctx, qkv, blk, hp, block_idx, sam3_vit_qkv_attn_stop::core);
 }
 
 static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_context* ctx,
                                                                  struct ggml_tensor* input,
                                                                  const sam3_vit_block& blk,
                                                                  const sam3_hparams& hp,
+                                                                 int block_idx,
                                                                  sam3_vit_block_stage stage) {
+    const bool is_global = hp.is_global_attn(block_idx);
     switch (stage) {
         case SAM3_VIT_BLOCK_STAGE_NORM1:
             return sam3_layer_norm(ctx, input, blk.norm1_w, blk.norm1_b);
@@ -9067,18 +12419,47 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
             return ggml_win_part(ctx, input, hp.vit_window_size);
 
         case SAM3_VIT_BLOCK_STAGE_QKV_PROJ:
-            if (sam3_fast_f16_vit_attention_enabled()) {
-                return ggml_cast(ctx,
-                                 ggml_add(ctx, ggml_mul_mat(ctx, blk.qkv_w, input), blk.qkv_b),
-                                 GGML_TYPE_F16);
+            if (sam3_fast_f16_vit_attention_enabled() && blk.qkv_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_linear_inputs_enabled() && blk.qkv_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
             }
-            return ggml_add(ctx, ggml_mul_mat(ctx, blk.qkv_w, input), blk.qkv_b);
+            return sam3_vit_linear_bias_flat_batch(
+                ctx,
+                blk.qkv_w,
+                input,
+                blk.qkv_b,
+                sam3_vit_linear_output_type(blk.qkv_w,
+                                            sam3_bf16_vit_qkv_chain_enabled(block_idx),
+                                            sam3_f16_vit_qkv_output_enabled(block_idx)));
+
+        case SAM3_VIT_BLOCK_STAGE_QKV_LAYOUT:
+            return sam3_build_vit_qkv_attn_from_qkv(
+                ctx, input, blk, hp, block_idx, sam3_vit_qkv_attn_stop::layout);
+
+        case SAM3_VIT_BLOCK_STAGE_QKV_ROPE:
+            return sam3_build_vit_qkv_attn_from_qkv(
+                ctx, input, blk, hp, block_idx, sam3_vit_qkv_attn_stop::rope);
 
         case SAM3_VIT_BLOCK_STAGE_ATTN_CORE:
-            return sam3_build_vit_attn_core_from_qkv(ctx, input, blk, hp);
+            return sam3_build_vit_attn_core_from_qkv(ctx, input, blk, hp, block_idx);
 
         case SAM3_VIT_BLOCK_STAGE_ATTN_PROJ:
-            return ggml_add(ctx, ggml_mul_mat(ctx, blk.proj_w, input), blk.proj_b);
+            if (sam3_fast_f16_vit_attn_proj_input_enabled() && blk.proj_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_attn_proj_input_enabled() &&
+                       blk.proj_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+            }
+            return sam3_vit_linear_bias_flat_batch(
+                ctx,
+                blk.proj_w,
+                input,
+                blk.proj_b,
+                sam3_vit_linear_output_type(
+                    blk.proj_w,
+                    sam3_bf16_vit_attn_proj_output_enabled(hp, is_global, block_idx),
+                    sam3_f16_vit_attn_proj_output_enabled(block_idx)));
 
         case SAM3_VIT_BLOCK_STAGE_WINDOW_UNPART:
             return ggml_win_unpart(
@@ -9088,37 +12469,141 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
             return sam3_layer_norm(ctx, input, blk.norm2_w, blk.norm2_b);
 
         case SAM3_VIT_BLOCK_STAGE_MLP_FC1:
-            return ggml_add(ctx, ggml_mul_mat(ctx, blk.mlp_fc1_w, input), blk.mlp_fc1_b);
+            if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_linear_inputs_enabled() &&
+                       blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+            }
+            return sam3_vit_linear_bias_flat_batch(
+                ctx,
+                blk.mlp_fc1_w,
+                input,
+                blk.mlp_fc1_b,
+                sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                            sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                            sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
 
         case SAM3_VIT_BLOCK_STAGE_MLP_GELU:
-            return ggml_gelu_erf(ctx, input);
+            return sam3_vit_mlp_gelu(ctx, input, block_idx);
+
+        case SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU: {
+            if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_linear_inputs_enabled() &&
+                       blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+            }
+            struct ggml_tensor* x = sam3_vit_linear_bias_flat_batch(
+                ctx,
+                blk.mlp_fc1_w,
+                input,
+                blk.mlp_fc1_b,
+                sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                            sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                            sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
+            return sam3_vit_mlp_gelu(ctx, x, block_idx);
+        }
 
         case SAM3_VIT_BLOCK_STAGE_MLP_FC2:
-            return ggml_add(ctx, ggml_mul_mat(ctx, blk.mlp_fc2_w, input), blk.mlp_fc2_b);
+            if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+            }
+            return sam3_vit_linear_bias_flat_batch(
+                ctx,
+                blk.mlp_fc2_w,
+                input,
+                blk.mlp_fc2_b,
+                sam3_vit_linear_output_type(blk.mlp_fc2_w,
+                                            sam3_bf16_vit_linear_output_enabled(hp, block_idx),
+                                            sam3_f16_vit_mlp_fc2_output_enabled(block_idx)));
 
         case SAM3_VIT_BLOCK_STAGE_MLP: {
-            struct ggml_tensor* x = ggml_mul_mat(ctx, blk.mlp_fc1_w, input);
-            x = ggml_add(ctx, x, blk.mlp_fc1_b);
-            x = ggml_gelu_erf(ctx, x);
-            x = ggml_mul_mat(ctx, blk.mlp_fc2_w, x);
-            x = ggml_add(ctx, x, blk.mlp_fc2_b);
+            if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_linear_inputs_enabled() &&
+                       blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
+                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+            }
+            const int64_t w = input->ne[1];
+            const int64_t h = input->ne[2];
+            const int64_t b = input->ne[3];
+            struct ggml_tensor* x = input;
+            if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+                x = ggml_reshape_2d(ctx, x, x->ne[0], w * h * b);
+                x = sam3_vit_linear_bias(
+                    ctx,
+                    blk.mlp_fc1_w,
+                    x,
+                    blk.mlp_fc1_b,
+                    sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                                sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                                sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
+            } else {
+                x = sam3_vit_linear_bias_flat_batch(
+                    ctx,
+                    blk.mlp_fc1_w,
+                    x,
+                    blk.mlp_fc1_b,
+                    sam3_vit_linear_output_type(blk.mlp_fc1_w,
+                                                sam3_bf16_vit_mlp_chain_enabled(block_idx),
+                                                sam3_f16_vit_mlp_fc1_output_enabled(block_idx)));
+            }
+            x = sam3_vit_mlp_gelu(ctx, x, block_idx);
+            if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
+                x = ggml_cast(ctx, x, GGML_TYPE_F16);
+            } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
+                x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+            }
+            if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
+                x = sam3_vit_linear_bias(
+                    ctx,
+                    blk.mlp_fc2_w,
+                    x,
+                    blk.mlp_fc2_b,
+                    sam3_vit_linear_output_type(blk.mlp_fc2_w,
+                                                sam3_bf16_vit_linear_output_enabled(hp, block_idx),
+                                                sam3_f16_vit_mlp_fc2_output_enabled(block_idx)));
+                x = ggml_reshape_4d(ctx, x, x->ne[0], w, h, b);
+            } else {
+                x = sam3_vit_linear_bias_flat_batch(
+                    ctx,
+                    blk.mlp_fc2_w,
+                    x,
+                    blk.mlp_fc2_b,
+                    sam3_vit_linear_output_type(blk.mlp_fc2_w,
+                                                sam3_bf16_vit_linear_output_enabled(hp, block_idx),
+                                                sam3_f16_vit_mlp_fc2_output_enabled(block_idx)));
+            }
             return x;
         }
+
+        case SAM3_VIT_BLOCK_STAGE_BLOCK:
+            return sam3_vit_block_forward(ctx, input, blk, hp, block_idx);
     }
 
     return nullptr;
 }
 
-bool sam3_test_run_vit_block_stage(const sam3_model& model,
-                                   int block_idx,
-                                   sam3_vit_block_stage stage,
-                                   std::span<const float> input_data,
-                                   std::array<int64_t, 4> input_ne,
-                                   std::vector<float>& output_data,
-                                   int64_t output_ne[4],
-                                   int n_threads) {
+bool sam3_test_bench_vit_block_stage(const sam3_model& model,
+                                     int block_idx,
+                                     sam3_vit_block_stage stage,
+                                     std::span<const float> input_data,
+                                     std::array<int64_t, 4> input_ne,
+                                     int warmup_runs,
+                                     int repeats,
+                                     std::vector<double>& timings_ms,
+                                     std::vector<float>& output_data,
+                                     int64_t output_ne[4],
+                                     int n_threads) {
     if (input_data.empty()) {
         fprintf(stderr, "%s: input_data is empty\n", __func__);
+        return false;
+    }
+    if (warmup_runs < 0 || repeats <= 0) {
+        fprintf(stderr, "%s: invalid warmup_runs=%d repeats=%d\n", __func__, warmup_runs, repeats);
         return false;
     }
     if (block_idx < 0 || std::cmp_greater_equal(block_idx, model.vit.blocks.size())) {
@@ -9162,6 +12647,8 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
                 return false;
             }
             break;
+        case SAM3_VIT_BLOCK_STAGE_QKV_LAYOUT:
+        case SAM3_VIT_BLOCK_STAGE_QKV_ROPE:
         case SAM3_VIT_BLOCK_STAGE_ATTN_CORE:
             if (ne[0] != sam3_dim_mul(hp.vit_embed_dim, 3)) {
                 fprintf(stderr,
@@ -9173,6 +12660,7 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
             }
             break;
         case SAM3_VIT_BLOCK_STAGE_MLP_FC1:
+        case SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU:
             if (ne[0] != hp.vit_embed_dim) {
                 fprintf(stderr,
                         "%s: mlp_fc1 input ne0=%lld expected %d\n",
@@ -9205,7 +12693,7 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
             break;
     }
 
-    const size_t ctx_size = (ggml_tensor_overhead() * 256) + ggml_graph_overhead();
+    const size_t ctx_size = (ggml_tensor_overhead() * 1024) + ggml_graph_overhead();
     ggml_init_params params = {
         .mem_size = ctx_size,
         .mem_buffer = nullptr,
@@ -9223,7 +12711,7 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
     ggml_set_input(input);
 
     struct ggml_tensor* output =
-        sam3_build_vit_block_stage_from_input(ctx.get(), input, blk, hp, stage);
+        sam3_build_vit_block_stage_from_input(ctx.get(), input, blk, hp, block_idx, stage);
     if (!output) {
         fprintf(stderr, "%s: failed to build stage %d\n", __func__, static_cast<int>(stage));
         return false;
@@ -9246,8 +12734,28 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
     const size_t input_bytes = static_cast<size_t>(ne[0]) * static_cast<size_t>(ne[1]) *
                                static_cast<size_t>(ne[2]) * static_cast<size_t>(ne[3]) *
                                sizeof(float);
-    ggml_backend_tensor_set(input, input_data.data(), 0, input_bytes);
-    sam3_graph_compute(model.backend, graph, n_threads);
+    auto reset_input = [&]() { ggml_backend_tensor_set(input, input_data.data(), 0, input_bytes); };
+
+    for (int i = 0; i < warmup_runs; ++i) {
+        reset_input();
+        if (!sam3_graph_compute(model.backend, graph, n_threads)) {
+            fprintf(stderr, "%s: warmup compute failed at run %d\n", __func__, i);
+            return false;
+        }
+    }
+
+    timings_ms.clear();
+    timings_ms.reserve(static_cast<size_t>(repeats));
+    for (int i = 0; i < repeats; ++i) {
+        reset_input();
+        const auto started_at = std::chrono::steady_clock::now();
+        if (!sam3_graph_compute(model.backend, graph, n_threads)) {
+            fprintf(stderr, "%s: compute failed at run %d\n", __func__, i);
+            return false;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - started_at;
+        timings_ms.push_back(std::chrono::duration<double, std::milli>(elapsed).count());
+    }
 
     for (int i = 0; i < 4; ++i) {
         output_ne[i] = output->ne[i];
@@ -9255,6 +12763,347 @@ bool sam3_test_run_vit_block_stage(const sam3_model& model,
 
     const bool ok = sam3_copy_tensor_to_f32(output, output_data);
     return ok;
+}
+
+bool sam3_test_run_vit_block_stage(const sam3_model& model,
+                                   int block_idx,
+                                   sam3_vit_block_stage stage,
+                                   std::span<const float> input_data,
+                                   std::array<int64_t, 4> input_ne,
+                                   std::vector<float>& output_data,
+                                   int64_t output_ne[4],
+                                   int n_threads) {
+    std::vector<double> timings_ms;
+    return sam3_test_bench_vit_block_stage(model,
+                                           block_idx,
+                                           stage,
+                                           input_data,
+                                           input_ne,
+                                           0,
+                                           1,
+                                           timings_ms,
+                                           output_data,
+                                           output_ne,
+                                           n_threads);
+}
+
+bool sam3_test_bench_sam3_vit_batch(const sam3_model& model,
+                                    const sam3_image& image,
+                                    int batch_size,
+                                    bool include_tracker_neck,
+                                    int vit_blocks,
+                                    int block_stage_index,
+                                    std::optional<sam3_vit_block_stage> block_stage,
+                                    int warmup_runs,
+                                    int repeats,
+                                    std::vector<double>& timings_ms,
+                                    int64_t output_ne[4],
+                                    std::optional<sam3_batch_lane_check>& lane_check,
+                                    int n_threads) {
+    if (batch_size <= 0 || warmup_runs < 0 || repeats <= 0) {
+        std::println(stderr,
+                     "{}: invalid batch_size={} warmup_runs={} repeats={}",
+                     __func__,
+                     batch_size,
+                     warmup_runs,
+                     repeats);
+        return false;
+    }
+    const auto& hp = model.hparams;
+    if (vit_blocks < 0) {
+        vit_blocks = hp.vit_depth;
+    }
+    if (vit_blocks > hp.vit_depth || (include_tracker_neck && vit_blocks != hp.vit_depth) ||
+        (include_tracker_neck && block_stage.has_value()) || block_stage_index < 0 ||
+        (block_stage.has_value() && block_stage_index >= hp.vit_depth)) {
+        std::println(
+            stderr,
+            "{}: invalid vit_blocks={} for depth={} include_tracker_neck={} block_stage_index={} "
+            "block_stage={}",
+            __func__,
+            vit_blocks,
+            hp.vit_depth,
+            include_tracker_neck,
+            block_stage_index,
+            block_stage.has_value());
+        return false;
+    }
+    if (block_stage.has_value() && hp.is_global_attn(block_stage_index) &&
+        (*block_stage == SAM3_VIT_BLOCK_STAGE_WINDOW_PART ||
+         *block_stage == SAM3_VIT_BLOCK_STAGE_WINDOW_UNPART)) {
+        std::println(stderr,
+                     "{}: window stage {} is invalid for global ViT block {}",
+                     __func__,
+                     static_cast<int>(*block_stage),
+                     block_stage_index);
+        return false;
+    }
+    if (hp.is_sam2() || hp.is_edgetam()) {
+        std::println(stderr, "{}: only SAM3/SAM3.1 ViT models are supported", __func__);
+        return false;
+    }
+    if (image.data.empty() || image.width <= 0 || image.height <= 0) {
+        std::println(stderr, "{}: invalid image", __func__);
+        return false;
+    }
+
+    const int img_size = hp.img_size;
+    const std::vector<float> single = hp.is_sam3_1()
+                                          ? sam31_preprocess_image(image, img_size, n_threads)
+                                          : sam3_preprocess_image(image, img_size, n_threads);
+    const size_t single_count = single.size();
+    if (single_count != sam3_count_mul(3, img_size, img_size)) {
+        std::println(stderr,
+                     "{}: unexpected preprocessed size {}, expected {}",
+                     __func__,
+                     single_count,
+                     sam3_count_mul(3, img_size, img_size));
+        return false;
+    }
+
+    std::vector<float> batched(single_count * static_cast<size_t>(batch_size));
+    for (int b = 0; b < batch_size; ++b) {
+        std::ranges::copy(single, batched.begin() + static_cast<ptrdiff_t>(single_count) * b);
+    }
+
+    const size_t ctx_size = (ggml_tensor_overhead() * 32768) + (ggml_graph_overhead() * 2);
+    ggml_init_params params = {
+        .mem_size = ctx_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        std::println(stderr, "{}: failed to create ggml context", __func__);
+        return false;
+    }
+
+    auto* input = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, img_size, img_size, 3, batch_size);
+    ggml_set_name(input, "sam3_vit_batch_input");
+    ggml_set_input(input);
+
+    auto* vit_out = sam3_build_vit_prefix_graph(ctx.get(), input, model);
+    ggml_set_name(vit_out, "sam3_vit_batch_prefix_output");
+    if (block_stage.has_value()) {
+        for (int i = 0; i < block_stage_index; ++i) {
+            vit_out = sam3_vit_block_forward(ctx.get(), vit_out, model.vit.blocks[i], hp, i);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_output", i));
+        }
+
+        const int bi = block_stage_index;
+        const auto& blk = model.vit.blocks[bi];
+        const bool is_global = hp.is_global_attn(bi);
+        auto* attention_shortcut = vit_out;
+        vit_out = sam3_build_vit_block_stage_from_input(
+            ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_NORM1);
+        sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_norm1_stop", bi));
+        if (*block_stage != SAM3_VIT_BLOCK_STAGE_NORM1 && !is_global) {
+            if (sam3_bf16_vit_linear_inputs_enabled() &&
+                sam3_bf16_vit_window_part_input_enabled() && blk.qkv_w->type == GGML_TYPE_BF16) {
+                vit_out = ggml_cast(ctx.get(), vit_out, GGML_TYPE_BF16);
+            }
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_WINDOW_PART);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_window_part_stop", bi));
+        }
+        if (*block_stage != SAM3_VIT_BLOCK_STAGE_NORM1 &&
+            (is_global || *block_stage != SAM3_VIT_BLOCK_STAGE_WINDOW_PART)) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_QKV_PROJ);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_qkv_stop", bi));
+        }
+        auto* qkv_out = vit_out;
+        if (*block_stage == SAM3_VIT_BLOCK_STAGE_QKV_LAYOUT) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), qkv_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_QKV_LAYOUT);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_qkv_layout_stop", bi));
+        } else if (*block_stage == SAM3_VIT_BLOCK_STAGE_QKV_ROPE) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), qkv_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_QKV_ROPE);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_qkv_rope_stop", bi));
+        } else if (*block_stage >= SAM3_VIT_BLOCK_STAGE_ATTN_CORE) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), qkv_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_ATTN_CORE);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_attn_core_stop", bi));
+        }
+        if (*block_stage >= SAM3_VIT_BLOCK_STAGE_ATTN_PROJ) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_ATTN_PROJ);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_attn_proj_stop", bi));
+        }
+        if (!is_global && *block_stage >= SAM3_VIT_BLOCK_STAGE_WINDOW_UNPART) {
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_WINDOW_UNPART);
+            sam3_set_name(vit_out,
+                          std::format("sam3_vit_batch_block_{:02d}_window_unpart_stop", bi));
+        }
+        if (*block_stage >= SAM3_VIT_BLOCK_STAGE_NORM2 ||
+            *block_stage == SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU) {
+            vit_out = ggml_add(ctx.get(), attention_shortcut, vit_out);
+            sam3_set_name(vit_out,
+                          std::format("sam3_vit_batch_block_{:02d}_after_attn_residual", bi));
+
+            auto* mlp_shortcut = vit_out;
+            vit_out = sam3_build_vit_block_stage_from_input(
+                ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_NORM2);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_norm2_stop", bi));
+
+            if (*block_stage == SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU) {
+                vit_out = sam3_build_vit_block_stage_from_input(
+                    ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU);
+                sam3_set_name(vit_out,
+                              std::format("sam3_vit_batch_block_{:02d}_mlp_fc1_gelu_stop", bi));
+            } else if (*block_stage >= SAM3_VIT_BLOCK_STAGE_MLP_FC1) {
+                vit_out = sam3_build_vit_block_stage_from_input(
+                    ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_MLP_FC1);
+                sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_mlp_fc1_stop", bi));
+
+                if (*block_stage >= SAM3_VIT_BLOCK_STAGE_MLP_GELU) {
+                    vit_out = sam3_build_vit_block_stage_from_input(
+                        ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_MLP_GELU);
+                    sam3_set_name(vit_out,
+                                  std::format("sam3_vit_batch_block_{:02d}_mlp_gelu_stop", bi));
+                }
+                if (*block_stage >= SAM3_VIT_BLOCK_STAGE_MLP_FC2) {
+                    vit_out = sam3_build_vit_block_stage_from_input(
+                        ctx.get(), vit_out, blk, hp, bi, SAM3_VIT_BLOCK_STAGE_MLP_FC2);
+                    sam3_set_name(vit_out,
+                                  std::format("sam3_vit_batch_block_{:02d}_mlp_fc2_stop", bi));
+                }
+                if (*block_stage == SAM3_VIT_BLOCK_STAGE_BLOCK) {
+                    vit_out = ggml_add(ctx.get(), mlp_shortcut, vit_out);
+                    sam3_set_name(vit_out,
+                                  std::format("sam3_vit_batch_block_{:02d}_output_stop", bi));
+                }
+            }
+        }
+    } else {
+        for (int i = 0; i < vit_blocks; ++i) {
+            vit_out = sam3_vit_block_forward(ctx.get(), vit_out, model.vit.blocks[i], hp, i);
+            sam3_set_name(vit_out, std::format("sam3_vit_batch_block_{:02d}_output", i));
+        }
+    }
+    ggml_set_name(vit_out, "sam3_vit_batch_output");
+
+    ggml_tensor* output = vit_out;
+    std::array<ggml_tensor*, 4> neck_out = {};
+    if (include_tracker_neck) {
+        if (hp.is_sam3_1()) {
+            std::array<ggml_tensor*, 3> sam31_neck_out = {};
+            sam31_build_propagation_feature_graph(ctx.get(), vit_out, model, sam31_neck_out.data());
+            std::ranges::copy(sam31_neck_out, neck_out.begin());
+        } else {
+            sam3_build_neck_graph(ctx.get(),
+                                  vit_out,
+                                  model.neck_trk,
+                                  neck_out.data(),
+                                  sam3_should_use_direct_neck_3x3(model.backend),
+                                  "sam3_vit_batch_neck_trk");
+        }
+        output = neck_out[0] != nullptr ? neck_out[0] : vit_out;
+        for (int i = 0; i < 4; ++i) {
+            if (neck_out[i] != nullptr) {
+                sam3_set_name(neck_out[i], std::format("sam3_vit_batch_neck_trk_{}", i));
+                ggml_set_output(neck_out[i]);
+            }
+        }
+    } else {
+        ggml_set_output(output);
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx.get(), 32768, false);
+    if (include_tracker_neck) {
+        for (auto* tensor : neck_out) {
+            if (tensor != nullptr) {
+                ggml_build_forward_expand(graph, tensor);
+            }
+        }
+    } else {
+        ggml_build_forward_expand(graph, output);
+    }
+
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        std::println(stderr, "{}: failed to allocate graph", __func__);
+        return false;
+    }
+
+    const size_t input_bytes = batched.size() * sizeof(float);
+    auto reset_input = [&]() { ggml_backend_tensor_set(input, batched.data(), 0, input_bytes); };
+
+    for (int i = 0; i < warmup_runs; ++i) {
+        reset_input();
+        if (!sam3_graph_compute(model.backend, graph, n_threads, "sam3_vit_batch_bench")) {
+            std::println(stderr, "{}: warmup compute failed at {}", __func__, i);
+            return false;
+        }
+    }
+
+    timings_ms.clear();
+    timings_ms.reserve(static_cast<size_t>(repeats));
+    for (int i = 0; i < repeats; ++i) {
+        reset_input();
+        const auto started_at = std::chrono::steady_clock::now();
+        if (!sam3_graph_compute(model.backend, graph, n_threads, "sam3_vit_batch_bench")) {
+            std::println(stderr, "{}: compute failed at {}", __func__, i);
+            return false;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - started_at;
+        timings_ms.push_back(std::chrono::duration<double, std::milli>(elapsed).count());
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        output_ne[i] = output->ne[i];
+    }
+    lane_check = std::nullopt;
+    if (output->type == GGML_TYPE_F32 && output->ne[3] > 1) {
+        const int64_t lane_count = output->ne[0] * output->ne[1] * output->ne[2];
+        const size_t output_bytes = ggml_nbytes(output);
+        if (lane_count > 0 && output_bytes > 0) {
+            std::vector<std::byte> output_values(output_bytes);
+            ggml_backend_tensor_get(output, output_values.data(), 0, output_values.size());
+            auto read_f32 = [&](int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
+                const size_t offset = static_cast<size_t>(i0 * output->nb[0] + i1 * output->nb[1] +
+                                                          i2 * output->nb[2] + i3 * output->nb[3]);
+                float value = 0.0f;
+                std::memcpy(&value, output_values.data() + offset, sizeof(value));
+                return value;
+            };
+            double max_abs_diff = 0.0;
+            double sum_abs_diff = 0.0;
+            int64_t compared = 0;
+            const bool window_grouped =
+                block_stage.has_value() && !hp.is_global_attn(block_stage_index) &&
+                *block_stage >= SAM3_VIT_BLOCK_STAGE_WINDOW_PART &&
+                *block_stage <= SAM3_VIT_BLOCK_STAGE_ATTN_PROJ && output->ne[3] % batch_size == 0;
+            const int64_t groups_per_batch = window_grouped ? output->ne[3] / batch_size : 1;
+            const int64_t logical_batches = window_grouped ? batch_size : output->ne[3];
+            for (int64_t b = 1; b < logical_batches; ++b) {
+                for (int64_t g = 0; g < groups_per_batch; ++g) {
+                    const int64_t ref_i3 = g;
+                    const int64_t cmp_i3 = b * groups_per_batch + g;
+                    for (int64_t i2 = 0; i2 < output->ne[2]; ++i2) {
+                        for (int64_t i1 = 0; i1 < output->ne[1]; ++i1) {
+                            for (int64_t i0 = 0; i0 < output->ne[0]; ++i0) {
+                                const double diff =
+                                    std::fabs(static_cast<double>(read_f32(i0, i1, i2, ref_i3)) -
+                                              static_cast<double>(read_f32(i0, i1, i2, cmp_i3)));
+                                max_abs_diff = std::max(max_abs_diff, diff);
+                                sum_abs_diff += diff;
+                                ++compared;
+                            }
+                        }
+                    }
+                }
+            }
+            lane_check = sam3_batch_lane_check{
+                .max_abs_diff = max_abs_diff,
+                .mean_abs_diff = compared > 0 ? sum_abs_diff / static_cast<double>(compared) : 0.0,
+                .compared_lanes = static_cast<int>(logical_batches - 1),
+            };
+        }
+    }
+    return true;
 }
 
 // Test-only: encode from pre-preprocessed float data (bypasses C++ resize/normalize).
@@ -9628,26 +13477,37 @@ bool sam3_encode_image_from_preprocessed(sam3_state& state,
 
     struct ggml_tensor* neck_det_out[4] = {};
     struct ggml_tensor* neck_trk_out[4];
+    const bool use_direct_neck_3x3 = sam3_should_use_direct_neck_3x3(model.backend);
     if (!model.hparams.visual_only) {
-        sam3_build_neck_graph(ctx0.get(), vit_out, model.neck_det, neck_det_out);
+        sam3_build_neck_graph(ctx0.get(),
+                              vit_out,
+                              model.neck_det,
+                              neck_det_out,
+                              use_direct_neck_3x3,
+                              "sam3_neck_det");
     }
-    sam3_build_neck_graph(ctx0.get(), vit_out, model.neck_trk, neck_trk_out);
+    sam3_build_neck_graph(
+        ctx0.get(), vit_out, model.neck_trk, neck_trk_out, use_direct_neck_3x3, "sam3_neck_trk");
 
     for (int i = 0; i < 4; ++i) {
-        if (!model.hparams.visual_only) {
+        if (!model.hparams.visual_only && neck_det_out[i] != nullptr) {
             sam3_set_name(neck_det_out[i], std::format("neck_det_{}", i));
             ggml_set_output(neck_det_out[i]);
         }
-        sam3_set_name(neck_trk_out[i], std::format("neck_trk_{}", i));
-        ggml_set_output(neck_trk_out[i]);
+        if (neck_trk_out[i] != nullptr) {
+            sam3_set_name(neck_trk_out[i], std::format("neck_trk_{}", i));
+            ggml_set_output(neck_trk_out[i]);
+        }
     }
 
     struct ggml_cgraph* graph = ggml_new_graph_custom(ctx0.get(), 16384, false);
     for (int i = 0; i < 4; ++i) {
-        if (!model.hparams.visual_only) {
+        if (!model.hparams.visual_only && neck_det_out[i] != nullptr) {
             ggml_build_forward_expand(graph, neck_det_out[i]);
         }
-        ggml_build_forward_expand(graph, neck_trk_out[i]);
+        if (neck_trk_out[i] != nullptr) {
+            ggml_build_forward_expand(graph, neck_trk_out[i]);
+        }
     }
 
     auto galloc = make_ggml_gallocr(model.backend);
@@ -9728,8 +13588,6 @@ bool sam3_encode_image_from_preprocessed(sam3_state& state,
         }
     }
 
-    state.pe_cache_valid = false;
-
     auto t_end = std::chrono::high_resolution_clock::now();
     double total_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
     fprintf(stderr, "%s: encoded successfully in %.1f ms\n", __func__, total_ms);
@@ -9745,20 +13603,20 @@ static struct ggml_tensor* sam3_attention_with_mask_fallback(
     struct ggml_tensor* Q,          // [HD, N_q, NH, B]
     struct ggml_tensor* K,          // [HD, N_kv, NH, B]
     struct ggml_tensor* V,          // [HD, N_kv, NH, B]
-    struct ggml_tensor* attn_mask,  // optional [N_kv, N_q, NH, B] additive mask
+    struct ggml_tensor* attn_mask,  // optional [N_kv, N_q, NH-or-1, B] additive mask
     float scale) {
-    const bool needs_cuda_mask_fallback = attn_mask && Q->ne[1] > K->ne[1];
-    if (!needs_cuda_mask_fallback) {
+    const bool has_cuda_broadcastable_mask = attn_mask && attn_mask->ne[2] == 1;
+    const bool needs_cuda_mask_fallback =
+        attn_mask && Q->ne[1] > K->ne[1] && !has_cuda_broadcastable_mask;
+    if (!needs_cuda_mask_fallback || sam3_getenv("SAM3_FORCE_DIRECT_MASKED_FATTN").has_value()) {
         return ggml_flash_attn_ext(ctx, Q, K, V, attn_mask, scale, 0.0f, 0.0f);
     }
 
     auto* scores = ggml_mul_mat(ctx, K, Q);  // [N_kv, N_q, NH, B]
-    scores = ggml_scale(ctx, scores, scale);
-    scores = ggml_add(ctx, scores, ggml_cont(ctx, ggml_cast(ctx, attn_mask, GGML_TYPE_F32)));
-    auto* probs = ggml_soft_max(ctx, scores);
-    auto* v_t = ggml_cont(ctx, ggml_permute(ctx, V, 1, 0, 2, 3));  // [N_kv, HD, NH, B]
-    auto* attn_out = ggml_mul_mat(ctx, probs, v_t);                // [N_q, HD, NH, B]
-    return ggml_cont(ctx, ggml_permute(ctx, attn_out, 1, 0, 2, 3));
+    auto* probs = ggml_soft_max_ext(ctx, scores, attn_mask, scale, 0.0f);
+    auto* v_t = ggml_cont(ctx, ggml_permute(ctx, V, 1, 0, 2, 3));    // [N_kv, HD, NH, B]
+    auto* attn_out = ggml_mul_mat(ctx, probs, v_t);                  // [N_q, HD, NH, B]
+    return ggml_cont(ctx, ggml_permute(ctx, attn_out, 2, 0, 1, 3));  // [HD, NH, N_q, B]
 }
 
 // Standard multi-head attention with fused in_proj.
@@ -9826,16 +13684,18 @@ static struct ggml_tensor* sam3_expand_token_attn_bias(
     int64_t n_q,
     int n_heads,
     int64_t batch) {
+    GGML_UNUSED(n_heads);
+
     if (!token_bias) {
         return nullptr;
     }
 
     const int64_t n_kv = token_bias->ne[0];
     auto* bias_4d = ggml_reshape_4d(ctx, token_bias, n_kv, 1, 1, batch);
-    auto* full_bias = ggml_repeat(
-        ctx, bias_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_kv, n_q, n_heads, batch));
+    auto* full_bias =
+        ggml_repeat(ctx, bias_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_kv, n_q, 1, batch));
 
-    // ggml_flash_attn_ext expects mask storage in fp16.
+    // ggml_flash_attn_ext broadcasts mask head dim and CUDA requires ne[2] == 1.
     return ggml_cont(ctx, ggml_cast(ctx, full_bias, GGML_TYPE_F16));
 }
 
@@ -10408,7 +14268,9 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
                                                    struct ggml_tensor* prompt,
                                                    struct ggml_tensor* pos,
                                                    struct ggml_tensor* prompt_attn_bias,
-                                                   int n_heads) {
+                                                   int n_heads,
+                                                   int layer_idx) {
+    const bool dump_fenc_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
     // Self-attention: Q/K get positional encoding, V does not
     {
         auto* shortcut = x;
@@ -10431,6 +14293,14 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
         auto* Q = ggml_add(ctx, ggml_mul_mat(ctx, q_w, q_in), q_b);
         auto* K = ggml_add(ctx, ggml_mul_mat(ctx, k_w, k_in), k_b);
         auto* V = ggml_add(ctx, ggml_mul_mat(ctx, v_w, x_norm), v_b);
+        if (dump_fenc_inner) {
+            sam3_set_name(Q, std::format("fenc_layer{}_sa_q_proj", layer_idx));
+            ggml_set_output(Q);
+            sam3_set_name(K, std::format("fenc_layer{}_sa_k_proj", layer_idx));
+            ggml_set_output(K);
+            sam3_set_name(V, std::format("fenc_layer{}_sa_v_proj", layer_idx));
+            ggml_set_output(V);
+        }
 
         const int64_t N = x->ne[1];
         const int64_t B = x->ne[2];
@@ -10442,15 +14312,44 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
         K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
         V = ggml_reshape_4d(ctx, V, HD, n_heads, N, B);
         V = ggml_permute(ctx, V, 0, 2, 1, 3);
+        if (dump_fenc_inner) {
+            sam3_set_name(Q, std::format("fenc_layer{}_sa_q_packed", layer_idx));
+            ggml_set_output(Q);
+            sam3_set_name(K, std::format("fenc_layer{}_sa_k_packed", layer_idx));
+            ggml_set_output(K);
+            sam3_set_name(V, std::format("fenc_layer{}_sa_v_packed", layer_idx));
+            ggml_set_output(V);
+        }
 
         float scale = 1.0f / sqrtf(static_cast<float>(HD));
         auto* sa_out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        if (dump_fenc_inner) {
+            sam3_set_name(sa_out, std::format("fenc_layer{}_sa_raw", layer_idx));
+            ggml_set_output(sa_out);
+        }
         sa_out = ggml_reshape_3d(ctx, sa_out, D, N, B);
+        if (dump_fenc_inner) {
+            sam3_set_name(sa_out, std::format("fenc_layer{}_sa_core", layer_idx));
+            ggml_set_output(sa_out);
+        }
+        sa_out = ggml_cont(ctx, sa_out);
+        if (dump_fenc_inner) {
+            sam3_set_name(sa_out, std::format("fenc_layer{}_sa_core_cont", layer_idx));
+            ggml_set_output(sa_out);
+        }
 
         sa_out = ggml_mul_mat(ctx, ly.sa_out_proj_w, sa_out);
         sa_out = ggml_add(ctx, sa_out, ly.sa_out_proj_b);
+        sam3_set_name(sa_out, std::format("fenc_layer{}_sa_out", layer_idx));
+        if (dump_fenc_inner) {
+            ggml_set_output(sa_out);
+        }
 
         x = ggml_add(ctx, shortcut, sa_out);
+        sam3_set_name(x, std::format("fenc_layer{}_after_sa", layer_idx));
+        if (dump_fenc_inner) {
+            ggml_set_output(x);
+        }
     }
 
     // Cross-attention: Q from image features, K/V from prompt tokens.
@@ -10471,6 +14370,14 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
         auto* Q = ggml_add(ctx, ggml_mul_mat(ctx, q_w, x_norm), q_b);
         auto* K = ggml_add(ctx, ggml_mul_mat(ctx, k_w, prompt), k_b);
         auto* V = ggml_add(ctx, ggml_mul_mat(ctx, v_w, prompt), v_b);
+        if (dump_fenc_inner) {
+            sam3_set_name(Q, std::format("fenc_layer{}_ca_q_proj", layer_idx));
+            ggml_set_output(Q);
+            sam3_set_name(K, std::format("fenc_layer{}_ca_k_proj", layer_idx));
+            ggml_set_output(K);
+            sam3_set_name(V, std::format("fenc_layer{}_ca_v_proj", layer_idx));
+            ggml_set_output(V);
+        }
 
         const int64_t N_q = x->ne[1];
         const int64_t N_kv = prompt->ne[1];
@@ -10487,12 +14394,33 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
         auto* ca_mask = sam3_expand_token_attn_bias(ctx, prompt_attn_bias, N_q, n_heads, B);
         float scale = 1.0f / sqrtf(static_cast<float>(HD));
         auto* ca_out = sam3_attention_with_mask_fallback(ctx, Q, K, V, ca_mask, scale);
+        if (dump_fenc_inner) {
+            sam3_set_name(ca_out, std::format("fenc_layer{}_ca_raw", layer_idx));
+            ggml_set_output(ca_out);
+        }
         ca_out = ggml_reshape_3d(ctx, ca_out, D, N_q, B);
+        if (dump_fenc_inner) {
+            sam3_set_name(ca_out, std::format("fenc_layer{}_ca_core", layer_idx));
+            ggml_set_output(ca_out);
+        }
+        ca_out = ggml_cont(ctx, ca_out);
+        if (dump_fenc_inner) {
+            sam3_set_name(ca_out, std::format("fenc_layer{}_ca_core_cont", layer_idx));
+            ggml_set_output(ca_out);
+        }
 
         ca_out = ggml_mul_mat(ctx, ly.ca_out_w, ca_out);
         ca_out = ggml_add(ctx, ca_out, ly.ca_out_b);
+        sam3_set_name(ca_out, std::format("fenc_layer{}_ca_out", layer_idx));
+        if (dump_fenc_inner) {
+            ggml_set_output(ca_out);
+        }
 
         x = ggml_add(ctx, shortcut, ca_out);
+        sam3_set_name(x, std::format("fenc_layer{}_after_ca", layer_idx));
+        if (dump_fenc_inner) {
+            ggml_set_output(x);
+        }
     }
 
     {
@@ -10504,6 +14432,10 @@ static struct ggml_tensor* sam3_fenc_layer_forward(struct ggml_context* ctx,
         ffn = ggml_relu(ctx, ffn);
         ffn = ggml_mul_mat(ctx, ly.ffn_fc2_w, ffn);
         ffn = ggml_add(ctx, ffn, ly.ffn_fc2_b);
+        sam3_set_name(ffn, std::format("fenc_layer{}_ffn_out", layer_idx));
+        if (dump_fenc_inner) {
+            ggml_set_output(ffn);
+        }
 
         x = ggml_add(ctx, shortcut, ffn);
     }
@@ -10526,9 +14458,18 @@ static struct ggml_tensor* sam3_build_fenc_graph(struct ggml_context* ctx,
     auto* x = image_feats;
 
     for (int i = 0; i < hp.fenc_layers; ++i) {
-        x = sam3_fenc_layer_forward(
-            ctx, model.fenc.layers[i], x, prompt_tokens, pos_enc, prompt_attn_bias, hp.fenc_heads);
+        x = sam3_fenc_layer_forward(ctx,
+                                    model.fenc.layers[i],
+                                    x,
+                                    prompt_tokens,
+                                    pos_enc,
+                                    prompt_attn_bias,
+                                    hp.fenc_heads,
+                                    i);
         sam3_set_name(x, std::format("fenc_layer{}_out", i));
+        if (sam3_getenv("SAM3_PCS_DUMP_DIR").has_value()) {
+            ggml_set_output(x);
+        }
     }
 
     return x;
@@ -10674,6 +14615,7 @@ static struct ggml_tensor* sam3_compute_box_rpb(
     const int W = feat_hw;
     const int H = feat_hw;
     const auto& tensors = model.tensors;
+    const bool dump_rpb = layer_idx >= 0 && sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
 
     // ── 1. Convert cxcywh → xyxy ─────────────────────────────────────────
     // ggml_view_2d on strided data is non-contiguous — ggml_scale requires contiguous.
@@ -10702,20 +14644,38 @@ static struct ggml_tensor* sam3_compute_box_rpb(
     // Instead: repeat coords to [W, NQ], repeat edge to [W, NQ], subtract.
     auto* shape_wn = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, W, NQ);
 
-    auto* cw_rep = ggml_repeat(ctx, cw, shape_wn);         // [W, NQ] (each column = coords)
-    auto* x0_t = ggml_cont(ctx, ggml_transpose(ctx, x0));  // [NQ, 1]
-    auto* x0_rep = ggml_repeat(ctx, ggml_reshape_2d(ctx, x0_t, 1, NQ), shape_wn);
-    auto* x1_t = ggml_cont(ctx, ggml_transpose(ctx, x1));
-    auto* x1_rep = ggml_repeat(ctx, ggml_reshape_2d(ctx, x1_t, 1, NQ), shape_wn);
-    auto* y0_t = ggml_cont(ctx, ggml_transpose(ctx, y0));
-    auto* y0_rep = ggml_repeat(ctx, ggml_reshape_2d(ctx, y0_t, 1, NQ), shape_wn);
-    auto* y1_t = ggml_cont(ctx, ggml_transpose(ctx, y1));
-    auto* y1_rep = ggml_repeat(ctx, ggml_reshape_2d(ctx, y1_t, 1, NQ), shape_wn);
+    auto* cw_rep = ggml_repeat(ctx, cw, shape_wn);  // [W, NQ] (each column = coords)
+    auto* x0_rep = ggml_repeat(ctx, x0, shape_wn);  // [W, NQ] (each row = x0 per query)
+    auto* x1_rep = ggml_repeat(ctx, x1, shape_wn);
+    auto* y0_rep = ggml_repeat(ctx, y0, shape_wn);
+    auto* y1_rep = ggml_repeat(ctx, y1, shape_wn);
 
     auto* dx0 = ggml_sub(ctx, cw_rep, x0_rep);  // [W, NQ]
     auto* dx1 = ggml_sub(ctx, cw_rep, x1_rep);
     auto* dy0 = ggml_sub(ctx, cw_rep, y0_rep);  // reusing coords for H (H==W)
     auto* dy1 = ggml_sub(ctx, cw_rep, y1_rep);
+    if (layer_idx == 0) {
+        sam3_set_name(cw_rep, "ddec_rpb_cw_rep_0");
+        sam3_set_name(x0_rep, "ddec_rpb_x0_rep_0");
+        sam3_set_name(x1_rep, "ddec_rpb_x1_rep_0");
+        sam3_set_name(y0_rep, "ddec_rpb_y0_rep_0");
+        sam3_set_name(y1_rep, "ddec_rpb_y1_rep_0");
+        sam3_set_name(dx0, "ddec_rpb_dx0_raw_0");
+        sam3_set_name(dx1, "ddec_rpb_dx1_raw_0");
+        sam3_set_name(dy0, "ddec_rpb_dy0_raw_0");
+        sam3_set_name(dy1, "ddec_rpb_dy1_raw_0");
+        if (dump_rpb) {
+            ggml_set_output(cw_rep);
+            ggml_set_output(x0_rep);
+            ggml_set_output(x1_rep);
+            ggml_set_output(y0_rep);
+            ggml_set_output(y1_rep);
+            ggml_set_output(dx0);
+            ggml_set_output(dx1);
+            ggml_set_output(dy0);
+            ggml_set_output(dy1);
+        }
+    }
 
     // Stack into [2, W, NQ]: reshape each to [1, W, NQ], concat dim 0
     auto* dx0_r = ggml_reshape_3d(ctx, dx0, 1, W, NQ);
@@ -10741,6 +14701,14 @@ static struct ggml_tensor* sam3_compute_box_rpb(
 
     deltas_x = rpb_log(deltas_x);  // [2, W, NQ]
     deltas_y = rpb_log(deltas_y);  // [2, H, NQ]
+    if (layer_idx >= 0) {
+        sam3_set_name(deltas_x, std::format("ddec_rpb_deltas_x_{}", layer_idx));
+        sam3_set_name(deltas_y, std::format("ddec_rpb_deltas_y_{}", layer_idx));
+        if (dump_rpb) {
+            ggml_set_output(deltas_x);
+            ggml_set_output(deltas_y);
+        }
+    }
 
     // ── 4. MLP: [2, W*NQ] → [NH, W*NQ] ───────────────────────────────────
     // boxRPB_embed_x: MLP(2, 256, 8, 2) = Linear(2→256)+ReLU, Linear(256→8)
@@ -10764,6 +14732,14 @@ static struct ggml_tensor* sam3_compute_box_rpb(
 
     auto* rpb_x = rpb_mlp(deltas_x, "x");  // [NH, W, NQ]
     auto* rpb_y = rpb_mlp(deltas_y, "y");  // [NH, H, NQ]
+    if (layer_idx >= 0) {
+        sam3_set_name(rpb_x, std::format("ddec_rpb_x_{}", layer_idx));
+        sam3_set_name(rpb_y, std::format("ddec_rpb_y_{}", layer_idx));
+        if (dump_rpb) {
+            ggml_set_output(rpb_x);
+            ggml_set_output(rpb_y);
+        }
+    }
 
     // ── 5. Outer sum: B[nh, w, h, q] = rpb_y[nh, h, q] + rpb_x[nh, w, q] ─
     // Reshape for broadcasting:
@@ -10781,24 +14757,18 @@ static struct ggml_tensor* sam3_compute_box_rpb(
         ggml_repeat(ctx, rpb_x_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, NH, W, H, NQ));
     auto* rpb = ggml_add(ctx, rpb_hw, rpb_hw_x);  // [NH, W, H, NQ]
 
-    // ── 6. Reshape to [H*W, NQ, NH, 1] for flash_attn_ext mask ───────────
+    // ── 6. Reshape to object-query mask [H*W, NQ, NH, 1] ────────────────
     // Current: [NH, W, H, NQ]. Need: [N_kv=H*W, NQ, NH, B=1]
     rpb = ggml_reshape_4d(ctx, rpb, NH, sam3_dim_mul(H, W), NQ, 1);
     rpb = ggml_cont(ctx, ggml_permute(ctx, rpb, 2, 0, 1, 3));  // [H*W, NQ, NH, 1]
-
-    // Prepend zeros for presence token: mask for presence token has no box-relative bias
-    auto* pres_mask = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, sam3_dim_mul(H, W), 1, NH, 1);
-    ggml_set_name(pres_mask, "rpb_pres_zeros");
-    ggml_set_input(pres_mask);  // zeros — set by caller
-
-    // [H*W, NQ+1, NH, 1]
-    auto* full_rpb = ggml_concat(ctx, pres_mask, rpb, 1);
-    full_rpb = ggml_cont(ctx, full_rpb);
-    if (layer_idx == 0) {
-        ggml_set_name(full_rpb, "ddec_rpb_mask_0");
+    if (layer_idx >= 0) {
+        sam3_set_name(rpb, std::format("ddec_rpb_mask_obj_{}", layer_idx));
+        if (dump_rpb) {
+            ggml_set_output(rpb);
+        }
     }
 
-    return full_rpb;
+    return rpb;
 }
 
 // Single DETR decoder layer.
@@ -10807,7 +14777,7 @@ static struct ggml_tensor* sam3_compute_box_rpb(
 // enc_feats: [D, N_kv, B] conditioned image features from fusion encoder
 // enc_pos: [D, N_kv, B] positional encoding for image features
 // text_feats: [D, T, B] text features
-// rpb_mask: [N_kv, N_q, n_heads, B] box-relative positional bias (or nullptr)
+// rpb_mask: [N_kv, N_q-1, n_heads, B] object-query box-relative positional bias (or nullptr)
 // Returns: updated queries [D, N_q, B]
 static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
                                                    const sam3_ddec_layer& ly,
@@ -10821,6 +14791,7 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
                                                    struct ggml_tensor* rpb_mask = nullptr,
                                                    int layer_idx = -1) {
     const int64_t D = queries->ne[0];
+    const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
 
     // Python decoder layer order (all post-norm):
     //   1. Self-attention → norm2 (post-norm)
@@ -10838,6 +14809,12 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
     {
         // Q = K = queries + query_pos, V = queries (no pos)
         auto* q_in = ggml_add(ctx, queries, query_pos);
+        if (layer_idx >= 0) {
+            sam3_set_name(q_in, std::format("ddec_layer{}_sa_q_in", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(q_in);
+            }
+        }
 
         auto* q_w = ggml_view_2d(ctx, ly.sa_in_proj_w, D, D, ly.sa_in_proj_w->nb[1], 0);
         auto* k_w = ggml_view_2d(
@@ -10855,6 +14832,16 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         auto* Q = ggml_add(ctx, ggml_mul_mat(ctx, q_w, q_in), q_b);
         auto* K = ggml_add(ctx, ggml_mul_mat(ctx, k_w, q_in), k_b);
         auto* V = ggml_add(ctx, ggml_mul_mat(ctx, v_w, queries), v_b);
+        if (layer_idx >= 0) {
+            sam3_set_name(Q, std::format("ddec_layer{}_sa_q_proj", layer_idx));
+            sam3_set_name(K, std::format("ddec_layer{}_sa_k_proj", layer_idx));
+            sam3_set_name(V, std::format("ddec_layer{}_sa_v_proj", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(Q);
+                ggml_set_output(K);
+                ggml_set_output(V);
+            }
+        }
 
         Q = ggml_reshape_4d(ctx, Q, HD, n_heads, N, B);
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
@@ -10865,15 +14852,36 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
 
         float scale = 1.0f / sqrtf(static_cast<float>(HD));
         auto* sa_out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+        if (layer_idx >= 0) {
+            sam3_set_name(sa_out, std::format("ddec_layer{}_sa_core", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(sa_out);
+            }
+        }
         sa_out = ggml_reshape_3d(ctx, sa_out, D, N, B);
         sa_out = ggml_mul_mat(ctx, ly.sa_out_proj_w, sa_out);
         sa_out = ggml_add(ctx, sa_out, ly.sa_out_proj_b);
+        if (layer_idx >= 0) {
+            sam3_set_name(sa_out, std::format("ddec_layer{}_sa_out", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(sa_out);
+            }
+        }
 
         queries = ggml_add(ctx, queries, sa_out);
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_sa_pre_norm", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
+        }
         // Post-norm: norm2 (Python's post-SA norm)
         queries = sam3_layer_norm(ctx, queries, ly.norm2_w, ly.norm2_b);
-        if (layer_idx == 0) {
-            ggml_set_name(queries, "ddec_layer0_after_sa");
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_after_sa", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
         }
     }
 
@@ -10917,8 +14925,11 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         queries = ggml_add(ctx, queries, ca_out);
         // Post-norm: catext_norm (Python's post-text-CA norm)
         queries = sam3_layer_norm(ctx, queries, ly.norm3_w, ly.norm3_b);
-        if (layer_idx == 0) {
-            ggml_set_name(queries, "ddec_layer0_after_text_ca");
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_after_text_ca", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
         }
     }
 
@@ -10927,6 +14938,14 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         // Q = queries + query_pos, K = enc_feats + enc_pos, V = enc_feats
         auto* q_in = ggml_add(ctx, queries, query_pos);
         auto* k_in = ggml_add(ctx, enc_feats, enc_pos);
+        if (layer_idx >= 0) {
+            sam3_set_name(q_in, std::format("ddec_layer{}_img_ca_q_in", layer_idx));
+            sam3_set_name(k_in, std::format("ddec_layer{}_img_ca_k_in", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(q_in);
+                ggml_set_output(k_in);
+            }
+        }
 
         auto* q_w = ggml_view_2d(ctx, ly.ca_q_w, D, D, ly.ca_q_w->nb[1], 0);
         auto* k_w = ggml_view_2d(ctx, ly.ca_q_w, D, D, ly.ca_q_w->nb[1], D * ly.ca_q_w->nb[1]);
@@ -10943,6 +14962,16 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         auto* Q = ggml_add(ctx, ggml_mul_mat(ctx, q_w, q_in), q_b);
         auto* K = ggml_add(ctx, ggml_mul_mat(ctx, k_w, k_in), k_b);
         auto* V = ggml_add(ctx, ggml_mul_mat(ctx, v_w, enc_feats), v_b);
+        if (layer_idx >= 0) {
+            sam3_set_name(Q, std::format("ddec_layer{}_img_ca_q_proj", layer_idx));
+            sam3_set_name(K, std::format("ddec_layer{}_img_ca_k_proj", layer_idx));
+            sam3_set_name(V, std::format("ddec_layer{}_img_ca_v_proj", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(Q);
+                ggml_set_output(K);
+                ggml_set_output(V);
+            }
+        }
 
         Q = ggml_reshape_4d(ctx, Q, HD, n_heads, N_q, B);
         Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
@@ -10958,12 +14987,23 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
             // Keep the box-relative positional bias in fp32. The CPU flash-attn
             // kernel reads mask storage as fp16, which is good enough for token
             // padding masks but introduces avoidable drift here.
-            auto* kq = ggml_mul_mat(ctx, K, Q);                      // [N_kv, N_q, NH, B]
-            kq = ggml_soft_max_ext(ctx, kq, rpb_mask, scale, 0.0f);  // [N_kv, N_q, NH, B]
-
             auto* v_t = ggml_cont(ctx, ggml_transpose(ctx, V));  // [N_kv, HD, NH, B]
-            ca_out = ggml_mul_mat(ctx, v_t, kq);                 // [HD, N_q, NH, B]
-            ca_out = ggml_cont(ctx, ggml_permute(ctx, ca_out, 0, 2, 1, 3));
+
+            auto attend = [&](struct ggml_tensor* q,
+                              struct ggml_tensor* mask) -> struct ggml_tensor* {
+                auto* kq = ggml_mul_mat(ctx, K, q);                         // [N_kv, N_q, NH, B]
+                kq = ggml_soft_max_ext(ctx, kq, mask, scale, 0.0f);         // [N_kv, N_q, NH, B]
+                auto* out = ggml_mul_mat(ctx, v_t, kq);                     // [HD, N_q, NH, B]
+                return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));  // [HD, NH, N_q, B]
+            };
+
+            auto* q_presence =
+                ggml_view_4d(ctx, Q, HD, 1, n_heads, B, Q->nb[1], Q->nb[2], Q->nb[3], 0);
+            auto* q_objects = ggml_view_4d(
+                ctx, Q, HD, N_q - 1, n_heads, B, Q->nb[1], Q->nb[2], Q->nb[3], Q->nb[1]);
+            auto* pres_out = attend(q_presence, nullptr);
+            auto* obj_out = attend(q_objects, rpb_mask);
+            ca_out = ggml_concat(ctx, pres_out, obj_out, 2);  // [HD, NH, N_q, B]
         } else {
             ca_out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
         }
@@ -10971,12 +15011,27 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         ca_out = ggml_reshape_3d(ctx, ca_out, D, N_q, B);
         ca_out = ggml_mul_mat(ctx, ly.ca_out_w, ca_out);
         ca_out = ggml_add(ctx, ca_out, ly.ca_out_b);
+        if (layer_idx >= 0) {
+            sam3_set_name(ca_out, std::format("ddec_layer{}_img_ca_out", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(ca_out);
+            }
+        }
 
         queries = ggml_add(ctx, queries, ca_out);
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_img_ca_pre_norm", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
+        }
         // Post-norm: norm1 (Python's post-image-CA norm)
         queries = sam3_layer_norm(ctx, queries, ly.norm1_w, ly.norm1_b);
-        if (layer_idx == 0) {
-            ggml_set_name(queries, "ddec_layer0_after_img_ca");
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_after_img_ca", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
         }
     }
 
@@ -10991,8 +15046,11 @@ static struct ggml_tensor* sam3_ddec_layer_forward(struct ggml_context* ctx,
         queries = ggml_add(ctx, queries, ffn);
         // Post-norm: norm3 (Python's post-FFN norm)
         queries = sam3_layer_norm(ctx, queries, ly.norm4_w, ly.norm4_b);
-        if (layer_idx == 0) {
-            ggml_set_name(queries, "ddec_layer0_full_out");
+        if (layer_idx >= 0) {
+            sam3_set_name(queries, std::format("ddec_layer{}_full_out", layer_idx));
+            if (dump_inner) {
+                ggml_set_output(queries);
+            }
         }
     }
 
@@ -11269,6 +15327,7 @@ static struct ggml_tensor* sam3_pixel_decoder(
     struct ggml_tensor* fpn_feats[3])  // [D, W, H, B] at 3 scales
 {
     const auto& seg = model.seg_head;
+    const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
 
     // Start from lowest resolution
     auto* feat = fpn_feats[2];  // [D, 72, 72, B]
@@ -11296,6 +15355,9 @@ static struct ggml_tensor* sam3_pixel_decoder(
     }
     prev = ggml_relu(ctx, prev);
     ggml_set_name(prev, "seg_pixel_dec_stage0");
+    if (dump_inner) {
+        ggml_set_output(prev);
+    }
 
     // Iteration 1: merge with FPN[0] (288x288)
     prev = ggml_upscale(ctx, prev, 2, GGML_SCALE_MODE_NEAREST);                // [288, 288, D, B]
@@ -11317,6 +15379,9 @@ static struct ggml_tensor* sam3_pixel_decoder(
     }
     prev = ggml_relu(ctx, prev);
     ggml_set_name(prev, "seg_pixel_dec_stage1");
+    if (dump_inner) {
+        ggml_set_output(prev);
+    }
 
     // Python PixelDecoder allocates 3 conv layers but only uses 2 (one per
     // upsample step). The 3rd conv (up_conv_w[2]) is unused.
@@ -11351,6 +15416,7 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
     const auto& tensors = model.tensors;
     const int64_t D = enc_hidden->ne[0];  // 256
     const int64_t B = enc_hidden->ne[2];  // 1
+    const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
 
     auto* enc = enc_hidden;
     if (text_features) {
@@ -11358,6 +15424,10 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
                                         enc,
                                         tensors.at("seg.cross_attn_norm.weight"),
                                         tensors.at("seg.cross_attn_norm.bias"));
+        ggml_set_name(ca_norm, "seg_ca_norm");
+        if (dump_inner) {
+            ggml_set_output(ca_norm);
+        }
 
         auto* ca_mask = sam3_expand_token_attn_bias(ctx, text_attn_bias, enc->ne[1], 8, B);
         auto* ca_out = sam3_multihead_attn_fused(ctx,
@@ -11369,10 +15439,17 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
                                                  seg.ca_prompt_out_b,
                                                  8,
                                                  ca_mask);
+        ggml_set_name(ca_out, "seg_ca_out");
+        if (dump_inner) {
+            ggml_set_output(ca_out);
+        }
         enc = ggml_add(ctx, enc, ca_out);
     }
     // enc: [D, N_spatial, B]
     ggml_set_name(enc, "seg_enc_after_ca");
+    if (dump_inner) {
+        ggml_set_output(enc);
+    }
 
     // Replace lowest-res FPN feat with spatial portion of encoder output
     const int64_t feat_hw = model.hparams.n_img_embd();  // 72
@@ -11389,9 +15466,13 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
     };
 
     auto* pixel_feats = sam3_pixel_decoder(ctx, model, modified_fpn);
+    ggml_set_name(pixel_feats, "seg_pixel_decoder_out");
+    if (dump_inner) {
+        ggml_set_output(pixel_feats);
+    }
 #ifndef NDEBUG
     auto* pixel_feats_dbg = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
-    ggml_set_name(pixel_feats_dbg, "seg_pixel_decoder_out");
+    ggml_set_name(pixel_feats_dbg, "seg_pixel_decoder_out_visual");
 #endif
 
     const int64_t W = pixel_feats->ne[1];  // 288
@@ -11409,9 +15490,13 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
         pf_conv = ggml_add(ctx, pf_conv, ggml_repeat(ctx, b3d, pf_conv));
     }
     auto* pixel_embed = ggml_cont(ctx, ggml_permute(ctx, pf_conv, 1, 2, 0, 3));  // [D, W, H, B]
+    ggml_set_name(pixel_embed, "seg_instance_embed");
+    if (dump_inner) {
+        ggml_set_output(pixel_embed);
+    }
 #ifndef NDEBUG
     auto* pixel_embed_dbg = ggml_cont(ctx, ggml_permute(ctx, pixel_embed, 2, 0, 1, 3));
-    ggml_set_name(pixel_embed_dbg, "seg_instance_embed");
+    ggml_set_name(pixel_embed_dbg, "seg_instance_embed_visual");
 #endif
 
     // Mask embedding MLP
@@ -11425,6 +15510,9 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
             mask_embed = ggml_relu(ctx, mask_embed);
     }
     ggml_set_name(mask_embed, "seg_mask_embed");
+    if (dump_inner) {
+        ggml_set_output(mask_embed);
+    }
 
     // Mask prediction: einsum('bqc,bchw->bqhw')
     auto* pe_flat = ggml_reshape_3d(ctx, pixel_embed, D, W * H, B);
@@ -11612,6 +15700,83 @@ static sam3_prompt_data sam3_build_prompt_and_pos(
     return pd;
 }
 
+static sam3_prompt_data sam3_build_prompt_and_pos_refs(
+    const sam3_model& model,
+    const std::vector<const std::vector<float>*>& mem_slot_feats,
+    const std::vector<const std::vector<float>*>& mem_slot_pes,
+    const std::vector<int>& spatial_tpos,
+    const std::vector<std::vector<float>>& obj_ptrs,
+    const std::vector<int>& ptr_tpos,
+    int eff_feat_size = 0) {
+    const auto& hp = model.hparams;
+    const int MD = hp.mem_out_dim;
+    const int D = hp.neck_dim;
+    const int H = (eff_feat_size > 0) ? eff_feat_size : hp.feat_size();
+    const int HH = mem_slot_feats.empty()
+                       ? static_cast<int>(sam3_count_mul(H, H))
+                       : static_cast<int>(mem_slot_feats[0]->size() / static_cast<size_t>(MD));
+
+    sam3_prompt_data pd{};
+    sam3_ensure_prompt_pos_cpu_cache(model);
+    const auto& tpos_all = model.mem_tpos_cpu;
+
+    for (size_t s = 0; s < mem_slot_feats.size(); ++s) {
+        const auto& feats = *mem_slot_feats[s];
+        const auto& pe = *mem_slot_pes[s];
+        const int slot_tokens = static_cast<int>(feats.size() / static_cast<size_t>(MD));
+        pd.prompt.insert(pd.prompt.end(), feats.begin(), feats.end());
+
+        const size_t base = pd.prompt_pos.size();
+        pd.prompt_pos.insert(pd.prompt_pos.end(), pe.begin(), pe.end());
+        const int tpos_idx = spatial_tpos[s];
+        if (tpos_idx >= 0 && tpos_idx < hp.num_maskmem) {
+            const int enc_idx = hp.num_maskmem - tpos_idx - 1;
+            for (int n = 0; n < slot_tokens; ++n) {
+                for (int d = 0; d < MD; ++d) {
+                    pd.prompt_pos[base + static_cast<size_t>(d) + sam3_count_mul(n, MD)] +=
+                        tpos_all[static_cast<size_t>(d) + sam3_count_mul(enc_idx, MD)];
+                }
+            }
+        }
+    }
+    pd.M_spatial = static_cast<int>(mem_slot_feats.size()) * HH;
+
+    const int split = D / MD;
+    const auto& tpos_w = model.obj_ptr_tpos_w_cpu;
+    const auto& tpos_b = model.obj_ptr_tpos_b_cpu;
+
+    for (size_t p = 0; p < obj_ptrs.size(); ++p) {
+        const int rel = ptr_tpos[p];
+        if (rel < 0) {
+            continue;
+        }
+
+        std::vector<float> sine_pe(D);
+        sam3_get_1d_sine_pe(sine_pe.data(), static_cast<float>(rel) / 15.0f, D);
+
+        std::vector<float> proj_pe(MD, 0.0f);
+        for (int j = 0; j < MD; ++j) {
+            float sum = tpos_b[j];
+            for (int i = 0; i < D; ++i) {
+                sum += tpos_w[static_cast<size_t>(i) + sam3_count_mul(j, D)] * sine_pe[i];
+            }
+            proj_pe[j] = sum;
+        }
+
+        const auto& ptr = obj_ptrs[p];
+        for (int t = 0; t < split; ++t) {
+            for (int d = 0; d < MD; ++d) {
+                pd.prompt.push_back(ptr[sam3_count_mul(t, MD) + static_cast<size_t>(d)]);
+                pd.prompt_pos.push_back(proj_pe[d]);
+            }
+            pd.num_obj_ptr_tokens++;
+        }
+    }
+
+    pd.M_total = pd.M_spatial + pd.num_obj_ptr_tokens;
+    return pd;
+}
+
 /*****************************************************************************
 ** Memory attention (Phase 7, Step 7.2)
 *****************************************************************************/
@@ -11634,10 +15799,13 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
     struct ggml_tensor* prompt_pos,    // [MD, M_total, 1]
     struct ggml_tensor* rope_freqs,    // [2, D/2, N]
     struct ggml_tensor* rope_k_freqs,  // [2, D/2, M_spatial] or nullptr
-    int num_obj_ptr_tokens) {
+    int num_obj_ptr_tokens,
+    const std::vector<const sam3_memory_slot*>* precomputed_spatial_kv_slots = nullptr,
+    const std::vector<int>* precomputed_spatial_tpos = nullptr) {
     const auto& ma = model.mem_attn;
     const int D = model.hparams.neck_dim;  // 256
     const int N = static_cast<int>(curr_tokens->ne[1]);
+    const int B = static_cast<int>(curr_tokens->ne[2]);
     const int M_total = static_cast<int>(prompt->ne[1]);
     const int M_spatial = M_total - num_obj_ptr_tokens;
 
@@ -11651,25 +15819,40 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
         // ── Self-attention with RoPE ──────────────────────────────────────
         {
             auto* x_norm = sam3_layer_norm(ctx, x, ly.norm1_w, ly.norm1_b);
-            auto* q = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_q_w, x_norm), ly.sa_q_b);
-            auto* k = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_k_w, x_norm), ly.sa_k_b);
-            auto* v = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_v_w, x_norm), ly.sa_v_b);
+            ggml_tensor* q = nullptr;
+            ggml_tensor* k = nullptr;
+            ggml_tensor* v = nullptr;
+            if (ly.sa_qkv_w != nullptr && ly.sa_qkv_b != nullptr) {
+                auto* qkv = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_qkv_w, x_norm), ly.sa_qkv_b);
+                sam3_set_name(qkv, std::format("phase7_mem_attn_layer{}_sa_qkv", l));
+                const size_t offset_stride = static_cast<size_t>(D) * qkv->nb[0];
+                q = ggml_view_3d(ctx, qkv, D, N, B, qkv->nb[1], qkv->nb[2], 0);
+                k = ggml_view_3d(ctx, qkv, D, N, B, qkv->nb[1], qkv->nb[2], offset_stride);
+                v = ggml_view_3d(ctx, qkv, D, N, B, qkv->nb[1], qkv->nb[2], 2 * offset_stride);
+                q = ggml_cont(ctx, q);
+                k = ggml_cont(ctx, k);
+                v = ggml_cont(ctx, v);
+            } else {
+                q = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_q_w, x_norm), ly.sa_q_b);
+                k = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_k_w, x_norm), ly.sa_k_b);
+                v = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_v_w, x_norm), ly.sa_v_b);
+            }
 
             // Apply RoPE to Q and K (single-head, [D, N, 1])
             q = sam3_apply_rope(ctx, q, rope_freqs);
             k = sam3_apply_rope(ctx, k, rope_freqs);
 
             // Single-head attention (256-dim)
-            q = ggml_reshape_4d(ctx, q, D, 1, N, 1);
-            k = ggml_reshape_4d(ctx, k, D, 1, N, 1);
-            v = ggml_reshape_4d(ctx, v, D, 1, N, 1);
+            q = ggml_reshape_4d(ctx, q, D, 1, N, B);
+            k = ggml_reshape_4d(ctx, k, D, 1, N, B);
+            v = ggml_reshape_4d(ctx, v, D, 1, N, B);
             q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
             k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
             v = ggml_permute(ctx, v, 0, 2, 1, 3);
 
             const float scale = 1.0f / sqrtf(static_cast<float>(D));
             auto* sa_out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
-            sa_out = ggml_reshape_3d(ctx, sa_out, D, N, 1);
+            sa_out = ggml_reshape_3d(ctx, sa_out, D, N, B);
             sa_out = ggml_add(ctx, ggml_mul_mat(ctx, ly.sa_out_w, sa_out), ly.sa_out_b);
             x = ggml_add(ctx, x, sa_out);
             sam3_set_name(x, std::format("phase7_mem_attn_layer{}_after_sa", l));
@@ -11680,11 +15863,99 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
             auto* x_norm = sam3_layer_norm(ctx, x, ly.norm2_w, ly.norm2_b);
             auto* q = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_q_w, x_norm), ly.ca_q_b);
 
-            // K: project from (prompt + prompt_pos) — pos enc added before projection
-            auto* kv_with_pos = ggml_add(ctx, prompt, prompt_pos);
-            auto* k = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_k_w, kv_with_pos), ly.ca_k_b);
-            // V: project from prompt only (no pos enc)
-            auto* v = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_v_w, prompt), ly.ca_v_b);
+            ggml_tensor* k = nullptr;
+            ggml_tensor* v = nullptr;
+            const bool use_precomputed_spatial =
+                precomputed_spatial_kv_slots != nullptr && precomputed_spatial_tpos != nullptr &&
+                !precomputed_spatial_kv_slots->empty() &&
+                precomputed_spatial_kv_slots->size() == precomputed_spatial_tpos->size();
+            if (use_precomputed_spatial) {
+                ggml_tensor* k_spatial = nullptr;
+                ggml_tensor* v_spatial = nullptr;
+                for (size_t s = 0; s < precomputed_spatial_kv_slots->size(); ++s) {
+                    const auto* slot = (*precomputed_spatial_kv_slots)[s];
+                    const int tpos_idx = (*precomputed_spatial_tpos)[s];
+                    if (slot == nullptr || tpos_idx < 0 ||
+                        std::cmp_greater_equal(tpos_idx,
+                                               slot->sam3_mem_ca_k_spatial_by_tpos.size()) ||
+                        l >= slot->sam3_mem_ca_v_spatial.size() ||
+                        slot->sam3_mem_ca_k_spatial_by_tpos[static_cast<size_t>(tpos_idx)][l] ==
+                            nullptr ||
+                        slot->sam3_mem_ca_v_spatial[l] == nullptr) {
+                        k_spatial = nullptr;
+                        v_spatial = nullptr;
+                        break;
+                    }
+                    auto* slot_k = sam3_alias_tensor(
+                        ctx,
+                        slot->sam3_mem_ca_k_spatial_by_tpos[static_cast<size_t>(tpos_idx)][l],
+                        std::format("phase7_mem_attn_layer{}_slot{}_ca_k_spatial", l, s));
+                    auto* slot_v = sam3_alias_tensor(ctx,
+                                                     slot->sam3_mem_ca_v_spatial[l],
+                                                     std::format("phase7_mem_attn_layer{}_slot{}"
+                                                                 "_ca_v_spatial",
+                                                                 l,
+                                                                 s));
+                    if (slot_k == nullptr || slot_v == nullptr) {
+                        k_spatial = nullptr;
+                        v_spatial = nullptr;
+                        break;
+                    }
+                    k_spatial =
+                        k_spatial == nullptr ? slot_k : ggml_concat(ctx, k_spatial, slot_k, 1);
+                    v_spatial =
+                        v_spatial == nullptr ? slot_v : ggml_concat(ctx, v_spatial, slot_v, 1);
+                }
+                if (k_spatial == nullptr || v_spatial == nullptr || k_spatial->ne[1] != M_spatial ||
+                    v_spatial->ne[1] != M_spatial) {
+                    k_spatial = nullptr;
+                    v_spatial = nullptr;
+                }
+                if (k_spatial == nullptr || v_spatial == nullptr) {
+                    // K: project from (prompt + prompt_pos) — pos enc added before projection
+                    auto* kv_with_pos = ggml_add(ctx, prompt, prompt_pos);
+                    k = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_k_w, kv_with_pos), ly.ca_k_b);
+                    // V: project from prompt only (no pos enc)
+                    v = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_v_w, prompt), ly.ca_v_b);
+                } else if (num_obj_ptr_tokens > 0) {
+                    auto* prompt_ptr =
+                        ggml_cont(ctx,
+                                  ggml_view_3d(ctx,
+                                               prompt,
+                                               model.hparams.mem_out_dim,
+                                               num_obj_ptr_tokens,
+                                               1,
+                                               prompt->nb[1],
+                                               prompt->nb[2],
+                                               static_cast<size_t>(M_spatial) * prompt->nb[1]));
+                    auto* prompt_pos_ptr =
+                        ggml_cont(ctx,
+                                  ggml_view_3d(ctx,
+                                               prompt_pos,
+                                               model.hparams.mem_out_dim,
+                                               num_obj_ptr_tokens,
+                                               1,
+                                               prompt_pos->nb[1],
+                                               prompt_pos->nb[2],
+                                               static_cast<size_t>(M_spatial) * prompt_pos->nb[1]));
+                    auto* kv_ptr_with_pos = ggml_add(ctx, prompt_ptr, prompt_pos_ptr);
+                    auto* k_ptr =
+                        ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_k_w, kv_ptr_with_pos), ly.ca_k_b);
+                    auto* v_ptr =
+                        ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_v_w, prompt_ptr), ly.ca_v_b);
+                    k = ggml_concat(ctx, k_spatial, k_ptr, 1);
+                    v = ggml_concat(ctx, v_spatial, v_ptr, 1);
+                } else {
+                    k = k_spatial;
+                    v = v_spatial;
+                }
+            } else {
+                // K: project from (prompt + prompt_pos) — pos enc added before projection
+                auto* kv_with_pos = ggml_add(ctx, prompt, prompt_pos);
+                k = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_k_w, kv_with_pos), ly.ca_k_b);
+                // V: project from prompt only (no pos enc)
+                v = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_v_w, prompt), ly.ca_v_b);
+            }
 
             // Apply RoPE to Q
             q = sam3_apply_rope(ctx, q, rope_freqs);
@@ -11712,16 +15983,16 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
             }
 
             // Flash attention (single head)
-            q = ggml_reshape_4d(ctx, q, D, 1, N, 1);
-            k = ggml_reshape_4d(ctx, k, D, 1, M_total, 1);
-            v = ggml_reshape_4d(ctx, v, D, 1, M_total, 1);
+            q = ggml_reshape_4d(ctx, q, D, 1, N, B);
+            k = ggml_reshape_4d(ctx, k, D, 1, M_total, k->ne[2]);
+            v = ggml_reshape_4d(ctx, v, D, 1, M_total, v->ne[2]);
             q = ggml_cont(ctx, ggml_permute(ctx, q, 0, 2, 1, 3));
             k = ggml_cont(ctx, ggml_permute(ctx, k, 0, 2, 1, 3));
             v = ggml_permute(ctx, v, 0, 2, 1, 3);
 
             const float scale = 1.0f / sqrtf(static_cast<float>(D));
             auto* ca_out = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
-            ca_out = ggml_reshape_3d(ctx, ca_out, D, N, 1);
+            ca_out = ggml_reshape_3d(ctx, ca_out, D, N, B);
             ca_out = ggml_add(ctx, ggml_mul_mat(ctx, ly.ca_out_w, ca_out), ly.ca_out_b);
             x = ggml_add(ctx, x, ca_out);
             sam3_set_name(x, std::format("phase7_mem_attn_layer{}_after_ca", l));
@@ -11747,96 +16018,962 @@ static struct ggml_tensor* sam3_build_mem_attn_graph(
     return x;  // [D, N, 1]
 }
 
+static struct ggml_tensor* sam31_linear(struct ggml_context* ctx,
+                                        struct ggml_tensor* weight,
+                                        struct ggml_tensor* bias,
+                                        struct ggml_tensor* input,
+                                        ggml_type output_type = GGML_TYPE_F32) {
+    auto* out = ggml_add(ctx, ggml_mul_mat(ctx, weight, input), bias);
+    return output_type == GGML_TYPE_F32 ? out : ggml_cast(ctx, out, output_type);
+}
+
+static struct ggml_tensor* sam31_fused_qkv_linear_output(struct ggml_context* ctx,
+                                                         struct ggml_tensor* q_weight,
+                                                         struct ggml_tensor* q_bias,
+                                                         struct ggml_tensor* k_weight,
+                                                         struct ggml_tensor* k_bias,
+                                                         struct ggml_tensor* v_weight,
+                                                         struct ggml_tensor* v_bias,
+                                                         struct ggml_tensor* input,
+                                                         ggml_type output_type) {
+    auto* qk_weight = ggml_concat(ctx, q_weight, k_weight, 1);
+    auto* qkv_weight = ggml_concat(ctx, qk_weight, v_weight, 1);
+    auto* qk_bias = ggml_concat(ctx, q_bias, k_bias, 0);
+    auto* qkv_bias = ggml_concat(ctx, qk_bias, v_bias, 0);
+    return sam31_linear(ctx, qkv_weight, qkv_bias, input, output_type);
+}
+
+static std::array<ggml_tensor*, 3> sam31_split_fused_qkv_linear(struct ggml_context* ctx,
+                                                                struct ggml_tensor* q_weight,
+                                                                struct ggml_tensor* q_bias,
+                                                                struct ggml_tensor* k_weight,
+                                                                struct ggml_tensor* k_bias,
+                                                                struct ggml_tensor* v_weight,
+                                                                struct ggml_tensor* v_bias,
+                                                                struct ggml_tensor* input,
+                                                                ggml_type output_type) {
+    auto* qkv = sam31_fused_qkv_linear_output(
+        ctx, q_weight, q_bias, k_weight, k_bias, v_weight, v_bias, input, output_type);
+    const int64_t D = q_weight->ne[1];
+    const size_t offset_stride = static_cast<size_t>(D) * qkv->nb[0];
+    auto* q = ggml_view_3d(ctx, qkv, D, input->ne[1], input->ne[2], qkv->nb[1], qkv->nb[2], 0);
+    auto* k = ggml_view_3d(
+        ctx, qkv, D, input->ne[1], input->ne[2], qkv->nb[1], qkv->nb[2], offset_stride);
+    auto* v = ggml_view_3d(
+        ctx, qkv, D, input->ne[1], input->ne[2], qkv->nb[1], qkv->nb[2], 2 * offset_stride);
+
+    return {ggml_cont(ctx, q), ggml_cont(ctx, k), ggml_cont(ctx, v)};
+}
+
+static struct ggml_tensor* sam31_cast_activation(struct ggml_context* ctx,
+                                                 struct ggml_tensor* input,
+                                                 ggml_type output_type) {
+    return output_type == GGML_TYPE_F32 ? input : ggml_cast(ctx, input, output_type);
+}
+
+static struct ggml_tensor* sam31_layer_norm(struct ggml_context* ctx,
+                                            struct ggml_tensor* input,
+                                            struct ggml_tensor* weight,
+                                            struct ggml_tensor* bias) {
+    auto* f32 =
+        input->type == GGML_TYPE_F32 ? input : ggml_cont(ctx, ggml_cast(ctx, input, GGML_TYPE_F32));
+    return sam3_layer_norm(ctx, f32, weight, bias);
+}
+
+static struct ggml_tensor* sam31_apply_rope_from_packed_qkv(struct ggml_context* ctx,
+                                                            struct ggml_tensor* qkv,
+                                                            struct ggml_tensor* freqs_cis,
+                                                            int64_t packed_offset,
+                                                            int num_heads) {
+    const int64_t D = qkv->ne[0] / 3;
+    const int64_t head_dim = D / num_heads;
+    const int64_t N = qkv->ne[1];
+    const int64_t half = head_dim / 2;
+    const size_t head_stride = static_cast<size_t>(head_dim) * qkv->nb[0];
+
+    auto* x_pairs = ggml_view_4d(ctx,
+                                 qkv,
+                                 2,
+                                 half,
+                                 N,
+                                 num_heads,
+                                 2 * qkv->nb[0],
+                                 qkv->nb[1],
+                                 head_stride,
+                                 static_cast<size_t>(packed_offset) * qkv->nb[0]);
+
+    auto* fc = ggml_reshape_4d(ctx, freqs_cis, 2, half, N, 1);
+    auto* cos_f = ggml_view_4d(ctx, fc, 1, half, N, 1, fc->nb[1], fc->nb[2], fc->nb[3], 0);
+    auto* sin_f = ggml_view_4d(ctx, fc, 1, half, N, 1, fc->nb[1], fc->nb[2], fc->nb[3], fc->nb[0]);
+
+    auto* x_re = ggml_view_4d(
+        ctx, x_pairs, 1, half, N, num_heads, x_pairs->nb[1], x_pairs->nb[2], x_pairs->nb[3], 0);
+    auto* x_im = ggml_view_4d(ctx,
+                              x_pairs,
+                              1,
+                              half,
+                              N,
+                              num_heads,
+                              x_pairs->nb[1],
+                              x_pairs->nb[2],
+                              x_pairs->nb[3],
+                              x_pairs->nb[0]);
+
+    auto* out_re = ggml_sub(ctx, ggml_mul(ctx, x_re, cos_f), ggml_mul(ctx, x_im, sin_f));
+    auto* out_im = ggml_add(ctx, ggml_mul(ctx, x_re, sin_f), ggml_mul(ctx, x_im, cos_f));
+    auto* out = ggml_concat(ctx, out_re, out_im, 0);
+    return ggml_reshape_3d(ctx, ggml_cont(ctx, out), head_dim, N, num_heads);
+}
+
+static struct ggml_tensor* sam31_rope_self_attention_from_packed_qkv(struct ggml_context* ctx,
+                                                                     struct ggml_tensor* qkv,
+                                                                     struct ggml_tensor* rope,
+                                                                     int num_heads,
+                                                                     ggml_type activation_type,
+                                                                     std::string_view name) {
+    const int64_t D = qkv->ne[0] / 3;
+    const int64_t N = qkv->ne[1];
+    const int64_t head_dim = D / num_heads;
+
+    auto* Q = sam31_apply_rope_from_packed_qkv(ctx, qkv, rope, 0, num_heads);
+    Q = sam31_cast_activation(ctx, Q, activation_type);
+    Q = ggml_reshape_4d(ctx, Q, head_dim, N, num_heads, 1);
+    if (!name.empty()) {
+        sam3_set_name(Q, std::format("{}_q", name));
+    }
+
+    auto* K = sam31_apply_rope_from_packed_qkv(ctx, qkv, rope, D, num_heads);
+    K = sam31_cast_activation(ctx, K, activation_type);
+    K = ggml_reshape_4d(ctx, K, head_dim, N, num_heads, 1);
+    if (!name.empty()) {
+        sam3_set_name(K, std::format("{}_k", name));
+    }
+
+    auto* V = ggml_view_4d(ctx,
+                           qkv,
+                           head_dim,
+                           N,
+                           num_heads,
+                           1,
+                           qkv->nb[1],
+                           static_cast<size_t>(head_dim) * qkv->nb[0],
+                           qkv->nb[2],
+                           2 * static_cast<size_t>(D) * qkv->nb[0]);
+    if (!name.empty()) {
+        sam3_set_name(V, std::format("{}_v", name));
+    }
+
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+    auto* out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+    if (!name.empty()) {
+        sam3_set_name(out, name);
+    }
+    out = sam31_cast_activation(ctx, out, activation_type);
+    return ggml_reshape_3d(ctx, out, D, N, 1);
+}
+
+static struct ggml_tensor* sam31_rope_attention(struct ggml_context* ctx,
+                                                struct ggml_tensor* q,
+                                                struct ggml_tensor* k,
+                                                struct ggml_tensor* v,
+                                                struct ggml_tensor* q_rope,
+                                                struct ggml_tensor* k_rope,
+                                                int num_heads,
+                                                ggml_type activation_type = GGML_TYPE_F32,
+                                                int num_k_exclude_rope = 0,
+                                                std::string_view name = {}) {
+    const int64_t D = q->ne[0];
+    const int64_t Nq = q->ne[1];
+    const int64_t Bq = q->ne[2];
+    const int64_t Nk = k->ne[1];
+    const int64_t Bk = k->ne[2];
+    const int64_t HD = D / num_heads;
+    const bool dump_attention_snapshot =
+        !name.empty() && sam3_getenv("SAM31_PROPAGATION_DUMP_DIR").has_value();
+
+    auto* Q = ggml_reshape_4d(ctx, q, HD, num_heads, Nq, Bq);
+    Q = ggml_cont(ctx, ggml_permute(ctx, Q, 0, 2, 1, 3));
+    Q = ggml_reshape_3d(ctx, Q, HD, Nq, num_heads * Bq);
+    Q = sam3_apply_rope(ctx, Q, q_rope);
+    Q = sam31_cast_activation(ctx, Q, activation_type);
+    Q = ggml_reshape_4d(ctx, Q, HD, Nq, num_heads, Bq);
+    if (!name.empty()) {
+        sam3_set_name(Q, std::format("{}_q", name));
+    }
+    if (dump_attention_snapshot) {
+        auto* Q_dump = ggml_cont(ctx, Q);
+        sam3_set_name(Q_dump, std::format("{}_q_dump", name));
+    }
+
+    auto* K = ggml_reshape_4d(ctx, k, HD, num_heads, Nk, Bk);
+    K = ggml_cont(ctx, ggml_permute(ctx, K, 0, 2, 1, 3));
+    K = ggml_reshape_3d(ctx, K, HD, Nk, num_heads * Bk);
+    const int64_t Nk_rope = Nk - num_k_exclude_rope;
+    if (num_k_exclude_rope > 0 && Nk_rope > 0) {
+        auto* K_spatial = ggml_cont(
+            ctx, ggml_view_3d(ctx, K, HD, Nk_rope, num_heads * Bk, K->nb[1], K->nb[2], 0));
+        K_spatial = sam3_apply_rope(ctx, K_spatial, k_rope);
+        auto* K_ptr = ggml_cont(ctx,
+                                ggml_view_3d(ctx,
+                                             K,
+                                             HD,
+                                             num_k_exclude_rope,
+                                             num_heads * Bk,
+                                             K->nb[1],
+                                             K->nb[2],
+                                             static_cast<size_t>(Nk_rope) * K->nb[1]));
+        K = ggml_concat(ctx, K_spatial, K_ptr, 1);
+    } else {
+        K = sam3_apply_rope(ctx, K, k_rope);
+    }
+    K = sam31_cast_activation(ctx, K, activation_type);
+    K = ggml_reshape_4d(ctx, K, HD, Nk, num_heads, Bk);
+    if (!name.empty()) {
+        sam3_set_name(K, std::format("{}_k", name));
+    }
+    if (dump_attention_snapshot) {
+        auto* K_dump = ggml_cont(ctx, K);
+        sam3_set_name(K_dump, std::format("{}_k_dump", name));
+    }
+
+    v = sam31_cast_activation(ctx, v, activation_type);
+    auto* V = ggml_reshape_4d(ctx, v, HD, num_heads, Nk, Bk);
+    V = ggml_permute(ctx, V, 0, 2, 1, 3);
+    if (activation_type != GGML_TYPE_F32 && std::getenv("SAM31_MEM_ATTN_CONTIGUOUS_V") != nullptr) {
+        V = ggml_cont(ctx, V);
+    }
+    if (!name.empty()) {
+        sam3_set_name(V, std::format("{}_v", name));
+    }
+    if (dump_attention_snapshot) {
+        auto* V_dump = ggml_cont(ctx, V);
+        sam3_set_name(V_dump, std::format("{}_v_dump", name));
+    }
+
+    const float scale = 1.0f / sqrtf(static_cast<float>(HD));
+    auto* out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+    if (!name.empty()) {
+        sam3_set_name(out, name);
+    }
+    if (dump_attention_snapshot) {
+        auto* out_dump = ggml_cont(ctx, out);
+        sam3_set_name(out_dump, std::format("{}_dump", name));
+    }
+    out = sam31_cast_activation(ctx, out, activation_type);
+    return ggml_reshape_3d(ctx, out, D, Nq, Bq);
+}
+
+static struct ggml_tensor* sam31_build_multiplex_mem_attn_graph(
+    struct ggml_context* ctx,
+    const sam3_model& model,
+    struct ggml_tensor* image,             // [D, N, 1]
+    struct ggml_tensor* src,               // [D, N, B]
+    struct ggml_tensor* memory_image,      // [D, M, 1]
+    struct ggml_tensor* memory,            // [D, M, B]
+    struct ggml_tensor* src_pos,           // [D, N, B]
+    struct ggml_tensor* memory_image_pos,  // [D, M, 1]
+    struct ggml_tensor* q_rope,            // [2, D_head/2, N]
+    struct ggml_tensor* k_rope,            // [2, D_head/2, spatial memory tokens]
+    int num_obj_ptr_tokens = 0,
+    const std::vector<const sam3_memory_slot*>* precomputed_spatial_kv_slots = nullptr,
+    struct ggml_tensor* precomputed_spatial_k_pos_delta = nullptr) {
+    constexpr int num_heads = 8;
+    const int D = static_cast<int>(image->ne[0]);
+    const int M_spatial = k_rope != nullptr ? static_cast<int>(k_rope->ne[2]) : 0;
+    const ggml_type activation_type =
+        model.weight_type == GGML_TYPE_F16 && sam31_f16_mem_attn_activation_enabled()
+            ? GGML_TYPE_F16
+        : model.weight_type == GGML_TYPE_BF16 && sam31_bf16_mem_attn_activation_enabled()
+            ? GGML_TYPE_BF16
+            : GGML_TYPE_F32;
+    const ggml_type attention_activation_type =
+        model.weight_type == GGML_TYPE_F16 && (sam31_f16_mem_attn_activation_enabled() ||
+                                               sam31_f16_mem_attn_attention_activation_enabled())
+            ? GGML_TYPE_F16
+            : activation_type;
+    const ggml_type ffn_activation_type =
+        model.weight_type == GGML_TYPE_F16 && (sam31_f16_mem_attn_activation_enabled() ||
+                                               sam31_f16_mem_attn_ffn_activation_enabled())
+            ? GGML_TYPE_F16
+            : activation_type;
+    const bool bf16_input_boundary = model.weight_type == GGML_TYPE_BF16 &&
+                                     activation_type == GGML_TYPE_F32 &&
+                                     sam31_bf16_mem_attn_input_boundary_enabled();
+    const ggml_type input_boundary_type = bf16_input_boundary ? GGML_TYPE_BF16 : activation_type;
+    image = sam31_cast_activation(ctx, image, input_boundary_type);
+    src = sam31_cast_activation(ctx, src, input_boundary_type);
+    memory_image = sam31_cast_activation(ctx, memory_image, input_boundary_type);
+    memory = sam31_cast_activation(ctx, memory, input_boundary_type);
+    memory_image_pos = sam31_cast_activation(ctx, memory_image_pos, input_boundary_type);
+
+    auto* src_pos_scaled = ggml_scale(ctx, src_pos, 0.1f);
+    src_pos_scaled = sam31_cast_activation(ctx, src_pos_scaled, input_boundary_type);
+    auto* x = ggml_add(ctx, src, src_pos_scaled);
+    x = sam31_cast_activation(ctx, x, input_boundary_type);
+    ggml_set_name(x, "sam31_mem_attn_input");
+    const bool dump_snapshots = sam3_getenv("SAM31_PROPAGATION_DUMP_DIR").has_value();
+    auto snapshot_if_dumping = [&](std::string_view name, ggml_tensor* tensor) {
+        if (!dump_snapshots) {
+            sam3_set_name(tensor, name);
+            return;
+        }
+        auto* snapshot = ggml_cont(ctx, tensor);
+        sam3_set_name(snapshot, name);
+    };
+
+    for (size_t l = 0; l < model.mem_attn.layers.size(); ++l) {
+        const auto& ly = model.mem_attn.layers[l];
+        {
+            auto* x_norm = sam31_layer_norm(ctx, x, ly.norm1_w, ly.norm1_b);
+            snapshot_if_dumping(std::format("sam31_mem_attn_layer{}_sa_norm", l), x_norm);
+            x_norm = sam31_cast_activation(ctx, x_norm, attention_activation_type);
+            ggml_tensor* sa = nullptr;
+            if ((sam31_direct_fused_mem_attn_sa_qkv_enabled() ||
+                 sam31_materialized_fused_mem_attn_sa_qkv_enabled()) &&
+                x_norm->ne[2] == 1) {
+                auto* qkv =
+                    ly.sa_qkv_w != nullptr && ly.sa_qkv_b != nullptr
+                        ? sam31_linear(
+                              ctx, ly.sa_qkv_w, ly.sa_qkv_b, x_norm, attention_activation_type)
+                        : sam31_fused_qkv_linear_output(ctx,
+                                                        ly.sa_q_w,
+                                                        ly.sa_q_b,
+                                                        ly.sa_k_w,
+                                                        ly.sa_k_b,
+                                                        ly.sa_v_w,
+                                                        ly.sa_v_b,
+                                                        x_norm,
+                                                        attention_activation_type);
+                sam3_set_name(qkv, std::format("sam31_mem_attn_layer{}_sa_qkv", l));
+                sa = sam31_rope_self_attention_from_packed_qkv(
+                    ctx,
+                    qkv,
+                    q_rope,
+                    num_heads,
+                    attention_activation_type,
+                    std::format("sam31_mem_attn_layer{}_sa_fattn", l));
+            } else {
+                auto [q, k, v] =
+                    sam31_fused_mem_attn_sa_qkv_enabled()
+                        ? sam31_split_fused_qkv_linear(ctx,
+                                                       ly.sa_q_w,
+                                                       ly.sa_q_b,
+                                                       ly.sa_k_w,
+                                                       ly.sa_k_b,
+                                                       ly.sa_v_w,
+                                                       ly.sa_v_b,
+                                                       x_norm,
+                                                       attention_activation_type)
+                        : std::array<ggml_tensor*, 3>{
+                              sam31_linear(
+                                  ctx, ly.sa_q_w, ly.sa_q_b, x_norm, attention_activation_type),
+                              sam31_linear(
+                                  ctx, ly.sa_k_w, ly.sa_k_b, x_norm, attention_activation_type),
+                              sam31_linear(
+                                  ctx, ly.sa_v_w, ly.sa_v_b, x_norm, attention_activation_type),
+                          };
+                sam3_set_name(q, std::format("sam31_mem_attn_layer{}_sa_q", l));
+                sam3_set_name(k, std::format("sam31_mem_attn_layer{}_sa_k", l));
+                sam3_set_name(v, std::format("sam31_mem_attn_layer{}_sa_v", l));
+                sa = sam31_rope_attention(ctx,
+                                          q,
+                                          k,
+                                          v,
+                                          q_rope,
+                                          q_rope,
+                                          num_heads,
+                                          attention_activation_type,
+                                          0,
+                                          std::format("sam31_mem_attn_layer{}_sa_fattn", l));
+            }
+            sa = sam31_linear(ctx, ly.sa_out_w, ly.sa_out_b, sa, attention_activation_type);
+            sam3_set_name(sa, std::format("sam31_mem_attn_layer{}_sa_out", l));
+            x = ggml_add(ctx, x, sa);
+            x = sam31_cast_activation(ctx, x, activation_type);
+            sam3_set_name(x, std::format("sam31_mem_attn_layer{}_after_sa", l));
+        }
+
+        {
+            auto* x_norm = sam31_layer_norm(ctx, x, ly.norm2_w, ly.norm2_b);
+            sam3_set_name(x_norm, std::format("sam31_mem_attn_layer{}_ca_norm", l));
+            x_norm = sam31_cast_activation(ctx, x_norm, attention_activation_type);
+            auto* q = ggml_add(
+                ctx,
+                sam31_linear(
+                    ctx, ly.image_ca_q_w, ly.image_ca_q_b, image, attention_activation_type),
+                sam31_linear(ctx, ly.ca_q_w, ly.ca_q_b, x_norm, attention_activation_type));
+            sam3_set_name(q, std::format("sam31_mem_attn_layer{}_ca_q", l));
+            q = sam31_cast_activation(ctx, q, attention_activation_type);
+            ggml_tensor* k = nullptr;
+            ggml_tensor* v = nullptr;
+            const bool use_precomputed_spatial =
+                precomputed_spatial_kv_slots != nullptr && !precomputed_spatial_kv_slots->empty();
+            if (use_precomputed_spatial) {
+                ggml_tensor* k_spatial = nullptr;
+                ggml_tensor* v_spatial = nullptr;
+                for (size_t s = 0; s < precomputed_spatial_kv_slots->size(); ++s) {
+                    const auto* slot = (*precomputed_spatial_kv_slots)[s];
+                    if (slot == nullptr || l >= slot->sam31_mem_ca_k_spatial.size() ||
+                        l >= slot->sam31_mem_ca_v_spatial.size() ||
+                        slot->sam31_mem_ca_k_spatial[l] == nullptr ||
+                        slot->sam31_mem_ca_v_spatial[l] == nullptr ||
+                        slot->sam31_mem_kv_spatial_tokens <= 0) {
+                        k_spatial = nullptr;
+                        v_spatial = nullptr;
+                        break;
+                    }
+
+                    auto* slot_k = sam3_alias_tensor(
+                        ctx,
+                        slot->sam31_mem_ca_k_spatial[l],
+                        std::format("sam31_mem_attn_layer{}_slot{}_ca_k_spatial", l, s));
+                    auto* slot_v = sam3_alias_tensor(
+                        ctx,
+                        slot->sam31_mem_ca_v_spatial[l],
+                        std::format("sam31_mem_attn_layer{}_slot{}_ca_v_spatial", l, s));
+                    if (slot_k == nullptr || slot_v == nullptr) {
+                        k_spatial = nullptr;
+                        v_spatial = nullptr;
+                        break;
+                    }
+
+                    if (precomputed_spatial_k_pos_delta != nullptr &&
+                        std::cmp_less(s, precomputed_spatial_k_pos_delta->ne[1])) {
+                        auto* slot_delta = ggml_view_3d(ctx,
+                                                        precomputed_spatial_k_pos_delta,
+                                                        D,
+                                                        1,
+                                                        1,
+                                                        precomputed_spatial_k_pos_delta->nb[1],
+                                                        precomputed_spatial_k_pos_delta->nb[2],
+                                                        s * precomputed_spatial_k_pos_delta->nb[1]);
+                        slot_k = ggml_add(ctx, slot_k, ggml_repeat(ctx, slot_delta, slot_k));
+                    }
+
+                    k_spatial =
+                        k_spatial == nullptr ? slot_k : ggml_concat(ctx, k_spatial, slot_k, 1);
+                    v_spatial =
+                        v_spatial == nullptr ? slot_v : ggml_concat(ctx, v_spatial, slot_v, 1);
+                }
+                if (k_spatial == nullptr || v_spatial == nullptr || k_spatial->ne[1] != M_spatial ||
+                    v_spatial->ne[1] != M_spatial) {
+                    k_spatial = nullptr;
+                    v_spatial = nullptr;
+                }
+                if (k_spatial == nullptr || v_spatial == nullptr) {
+                    k = ggml_add(
+                        ctx,
+                        sam31_linear(ctx,
+                                     ly.image_ca_k_w,
+                                     ly.image_ca_k_b,
+                                     memory_image,
+                                     attention_activation_type),
+                        sam31_linear(ctx, ly.ca_k_w, ly.ca_k_b, memory, attention_activation_type));
+                    k = ggml_add(ctx, k, memory_image_pos);
+                    k = sam31_cast_activation(ctx, k, attention_activation_type);
+                    v = sam31_linear(ctx, ly.ca_v_w, ly.ca_v_b, memory, attention_activation_type);
+                } else if (num_obj_ptr_tokens > 0) {
+                    auto* k_ptr = ggml_add(
+                        ctx,
+                        sam31_linear(ctx,
+                                     ly.image_ca_k_w,
+                                     ly.image_ca_k_b,
+                                     memory_image,
+                                     attention_activation_type),
+                        sam31_linear(ctx, ly.ca_k_w, ly.ca_k_b, memory, attention_activation_type));
+                    k_ptr = ggml_add(ctx, k_ptr, memory_image_pos);
+                    k_ptr = sam31_cast_activation(ctx, k_ptr, attention_activation_type);
+                    k = ggml_concat(ctx, k_spatial, k_ptr, 1);
+                    auto* v_ptr =
+                        sam31_linear(ctx, ly.ca_v_w, ly.ca_v_b, memory, attention_activation_type);
+                    v = ggml_concat(ctx, v_spatial, v_ptr, 1);
+                } else {
+                    k = k_spatial;
+                    v = v_spatial;
+                }
+            } else {
+                k = ggml_add(
+                    ctx,
+                    sam31_linear(ctx,
+                                 ly.image_ca_k_w,
+                                 ly.image_ca_k_b,
+                                 memory_image,
+                                 attention_activation_type),
+                    sam31_linear(ctx, ly.ca_k_w, ly.ca_k_b, memory, attention_activation_type));
+                k = ggml_add(ctx, k, memory_image_pos);
+                k = sam31_cast_activation(ctx, k, attention_activation_type);
+                v = sam31_linear(ctx, ly.ca_v_w, ly.ca_v_b, memory, attention_activation_type);
+            }
+            sam3_set_name(k, std::format("sam31_mem_attn_layer{}_ca_k", l));
+            sam3_set_name(v, std::format("sam31_mem_attn_layer{}_ca_v", l));
+            auto* ca = sam31_rope_attention(ctx,
+                                            q,
+                                            k,
+                                            v,
+                                            q_rope,
+                                            k_rope,
+                                            num_heads,
+                                            attention_activation_type,
+                                            num_obj_ptr_tokens,
+                                            std::format("sam31_mem_attn_layer{}_ca_fattn", l));
+            ca = sam31_linear(ctx, ly.ca_out_w, ly.ca_out_b, ca, attention_activation_type);
+            sam3_set_name(ca, std::format("sam31_mem_attn_layer{}_ca_out", l));
+            x = ggml_add(ctx, x, ca);
+            x = sam31_cast_activation(ctx, x, activation_type);
+            sam3_set_name(x, std::format("sam31_mem_attn_layer{}_after_ca", l));
+        }
+
+        {
+            auto* x_norm = sam31_layer_norm(ctx, x, ly.norm3_w, ly.norm3_b);
+            snapshot_if_dumping(std::format("sam31_mem_attn_layer{}_ffn_norm", l), x_norm);
+            x_norm = sam31_cast_activation(ctx, x_norm, ffn_activation_type);
+            auto* ffn = sam31_linear(ctx, ly.ffn_fc1_w, ly.ffn_fc1_b, x_norm, ffn_activation_type);
+            sam3_set_name(ffn, std::format("sam31_mem_attn_layer{}_ffn_fc1", l));
+            ffn = ggml_gelu_erf(ctx, ffn);
+            sam3_set_name(ffn, std::format("sam31_mem_attn_layer{}_ffn_gelu", l));
+            ffn = sam31_cast_activation(ctx, ffn, ffn_activation_type);
+            ffn = sam31_linear(ctx, ly.ffn_fc2_w, ly.ffn_fc2_b, ffn, ffn_activation_type);
+            sam3_set_name(ffn, std::format("sam31_mem_attn_layer{}_ffn_fc2", l));
+            x = ggml_add(ctx, x, ffn);
+            x = sam31_cast_activation(ctx, x, activation_type);
+            sam3_set_name(x, std::format("sam31_mem_attn_layer{}_after_ffn", l));
+        }
+    }
+
+    x = sam31_layer_norm(ctx, x, model.mem_attn_norm_w, model.mem_attn_norm_b);
+    ggml_set_name(x, "sam31_mem_attn_output");
+    return x;
+}
+
+static bool sam3_precompute_memory_slot_kv(
+    const sam3_model& model, sam3_memory_slot& slot, int channels, int height, int width) {
+    if (!sam3_static_mem_ca_kv_cache_enabled()) {
+        return false;
+    }
+    const bool multi_slot_cache = sam3_multi_slot_mem_ca_kv_cache_enabled();
+    if (!multi_slot_cache && !slot.is_cond_frame) {
+        return false;
+    }
+    const auto& hp = model.hparams;
+    const int MD = hp.mem_out_dim;
+    const int D = hp.neck_dim;
+    if (hp.has_perceiver || channels != MD || height <= 0 || width <= 0 ||
+        model.mem_attn.layers.size() > slot.sam3_mem_ca_k_spatial.size()) {
+        return false;
+    }
+    const int N = height * width;
+    const int T = multi_slot_cache ? hp.num_maskmem : 1;
+    if (T <= 0) {
+        return false;
+    }
+    const size_t memory_count = sam3_count_mul(MD, N);
+    if (slot.spatial_feats_cpu.size() != memory_count ||
+        slot.spatial_pe_cpu.size() != memory_count) {
+        return false;
+    }
+
+    sam3_ensure_prompt_pos_cpu_cache(model);
+    if (sam3_count_mul(T, MD) > model.mem_tpos_cpu.size()) {
+        return false;
+    }
+    std::vector<float> memory_with_pos(sam3_count_mul(memory_count, T));
+    for (int tpos_idx = 0; tpos_idx < T; ++tpos_idx) {
+        const int enc_idx = hp.num_maskmem - tpos_idx - 1;
+        const float* tpos = model.mem_tpos_cpu.data() + sam3_count_mul(enc_idx, MD);
+        float* dst = memory_with_pos.data() + sam3_count_mul(tpos_idx, MD, N);
+        for (int n = 0; n < N; ++n) {
+            for (int d = 0; d < MD; ++d) {
+                const size_t idx = static_cast<size_t>(d) + sam3_count_mul(n, MD);
+                dst[idx] = slot.spatial_feats_cpu[idx] + slot.spatial_pe_cpu[idx] + tpos[d];
+            }
+        }
+    }
+
+    ggml_init_params params = {
+        .mem_size = (ggml_tensor_overhead() * 4096) + (ggml_graph_overhead() * 2),
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        return false;
+    }
+
+    auto* memory = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, MD, N, 1);
+    ggml_set_name(memory, "sam3_slot_memory");
+    ggml_set_input(memory);
+    auto* memory_pos = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, MD, N, T);
+    ggml_set_name(memory_pos, "sam3_slot_memory_with_pos");
+    ggml_set_input(memory_pos);
+
+    std::array<ggml_tensor*, 4> k_outputs = {};
+    std::array<ggml_tensor*, 4> v_outputs = {};
+    std::vector<std::array<ggml_tensor*, 4>> k_outputs_by_tpos(static_cast<size_t>(T));
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        const auto& ly = model.mem_attn.layers[i];
+        auto* k_all =
+            ggml_add(ctx.get(), ggml_mul_mat(ctx.get(), ly.ca_k_w, memory_pos), ly.ca_k_b);
+        sam3_set_name(k_all, std::format("sam3_slot_layer{}_ca_k_spatial_all_tpos", i));
+        for (int tpos_idx = 0; tpos_idx < T; ++tpos_idx) {
+            auto* k = ggml_view_3d(ctx.get(),
+                                   k_all,
+                                   D,
+                                   N,
+                                   1,
+                                   k_all->nb[1],
+                                   k_all->nb[2],
+                                   static_cast<size_t>(tpos_idx) * k_all->nb[2]);
+            sam3_set_name(k, std::format("sam3_slot_layer{}_ca_k_spatial_tpos{}", i, tpos_idx));
+            ggml_set_output(k);
+            k_outputs_by_tpos[static_cast<size_t>(tpos_idx)][i] = k;
+        }
+        k_outputs[i] = k_outputs_by_tpos[0][i];
+
+        auto* v = ggml_add(ctx.get(), ggml_mul_mat(ctx.get(), ly.ca_v_w, memory), ly.ca_v_b);
+        sam3_set_name(v, std::format("sam3_slot_layer{}_ca_v_spatial", i));
+        ggml_set_output(v);
+        v_outputs[i] = v;
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx.get(), 4096, false);
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        for (int tpos_idx = 0; tpos_idx < T; ++tpos_idx) {
+            ggml_build_forward_expand(graph, k_outputs_by_tpos[static_cast<size_t>(tpos_idx)][i]);
+        }
+        ggml_build_forward_expand(graph, v_outputs[i]);
+    }
+
+    GgmlBackendBufferHandle buffer{ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend)};
+    if (!buffer) {
+        return false;
+    }
+    ggml_backend_tensor_set(
+        memory, slot.spatial_feats_cpu.data(), 0, slot.spatial_feats_cpu.size() * sizeof(float));
+    ggml_backend_tensor_set(
+        memory_pos, memory_with_pos.data(), 0, memory_with_pos.size() * sizeof(float));
+    if (!sam3_graph_compute(model.backend, graph, 4, "sam3_mem_ca_kv_precompute")) {
+        return false;
+    }
+
+    slot.sam3_mem_kv_ctx = std::move(ctx);
+    slot.sam3_mem_kv_buf = std::move(buffer);
+    slot.sam3_mem_ca_k_spatial = k_outputs;
+    slot.sam3_mem_ca_v_spatial = v_outputs;
+    slot.sam3_mem_ca_k_spatial_by_tpos = std::move(k_outputs_by_tpos);
+    slot.sam3_mem_kv_spatial_tokens = N;
+    return true;
+}
+
+static bool sam31_precompute_memory_slot_kv(
+    const sam3_model& model, sam3_memory_slot& slot, int channels, int height, int width) {
+    if (!sam31_experimental_static_mem_ca_kv_cache_enabled()) {
+        return false;
+    }
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    if (channels != D || height <= 0 || width <= 0 || model.mem_attn.layers.size() > 4) {
+        return false;
+    }
+    const int N = height * width;
+    const size_t count = sam3_count_mul(D, N);
+    if (slot.spatial_feats_cpu.size() != count || slot.image_feats_cpu.size() != count ||
+        slot.image_pe_cpu.size() != count) {
+        return false;
+    }
+    const auto& memory_pos = slot.image_pe_cpu;
+
+    const ggml_type activation_type =
+        model.weight_type == GGML_TYPE_F16 && sam31_f16_mem_attn_activation_enabled()
+            ? GGML_TYPE_F16
+        : model.weight_type == GGML_TYPE_BF16 && sam31_bf16_mem_attn_activation_enabled()
+            ? GGML_TYPE_BF16
+            : GGML_TYPE_F32;
+    const ggml_type attention_activation_type =
+        model.weight_type == GGML_TYPE_F16 && (sam31_f16_mem_attn_activation_enabled() ||
+                                               sam31_f16_mem_attn_attention_activation_enabled())
+            ? GGML_TYPE_F16
+            : activation_type;
+
+    ggml_init_params params = {
+        .mem_size = (ggml_tensor_overhead() * 8192) + (ggml_graph_overhead() * 2),
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        return false;
+    }
+
+    auto* memory_image = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N, 1);
+    ggml_set_name(memory_image, "sam31_slot_memory_image");
+    ggml_set_input(memory_image);
+    auto* memory = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N, 1);
+    ggml_set_name(memory, "sam31_slot_memory");
+    ggml_set_input(memory);
+    auto* memory_image_pos = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N, 1);
+    ggml_set_name(memory_image_pos, "sam31_slot_memory_image_pos");
+    ggml_set_input(memory_image_pos);
+
+    auto* memory_image_act =
+        sam31_cast_activation(ctx.get(), memory_image, attention_activation_type);
+    auto* memory_act = sam31_cast_activation(ctx.get(), memory, attention_activation_type);
+    auto* memory_image_pos_act =
+        sam31_cast_activation(ctx.get(), memory_image_pos, attention_activation_type);
+
+    std::array<ggml_tensor*, 4> k_outputs = {};
+    std::array<ggml_tensor*, 4> v_outputs = {};
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        const auto& ly = model.mem_attn.layers[i];
+        auto* k = ggml_add(
+            ctx.get(),
+            sam31_linear(ctx.get(),
+                         ly.image_ca_k_w,
+                         ly.image_ca_k_b,
+                         memory_image_act,
+                         attention_activation_type),
+            sam31_linear(ctx.get(), ly.ca_k_w, ly.ca_k_b, memory_act, attention_activation_type));
+        k = ggml_add(ctx.get(), k, memory_image_pos_act);
+        k = sam31_cast_activation(ctx.get(), k, attention_activation_type);
+        sam3_set_name(k, std::format("sam31_slot_layer{}_ca_k_spatial", i));
+        ggml_set_output(k);
+
+        auto* v =
+            sam31_linear(ctx.get(), ly.ca_v_w, ly.ca_v_b, memory_act, attention_activation_type);
+        sam3_set_name(v, std::format("sam31_slot_layer{}_ca_v_spatial", i));
+        ggml_set_output(v);
+        k_outputs[i] = k;
+        v_outputs[i] = v;
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx.get(), 8192, false);
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        ggml_build_forward_expand(graph, k_outputs[i]);
+        ggml_build_forward_expand(graph, v_outputs[i]);
+    }
+
+    GgmlBackendBufferHandle buffer{ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend)};
+    if (!buffer) {
+        return false;
+    }
+    ggml_backend_tensor_set(
+        memory_image, slot.image_feats_cpu.data(), 0, slot.image_feats_cpu.size() * sizeof(float));
+    ggml_backend_tensor_set(
+        memory, slot.spatial_feats_cpu.data(), 0, slot.spatial_feats_cpu.size() * sizeof(float));
+    ggml_backend_tensor_set(
+        memory_image_pos, memory_pos.data(), 0, memory_pos.size() * sizeof(float));
+    if (!sam3_graph_compute(model.backend, graph, 4, "sam31_mem_ca_kv_precompute")) {
+        return false;
+    }
+
+    slot.sam31_mem_kv_ctx = std::move(ctx);
+    slot.sam31_mem_kv_buf = std::move(buffer);
+    slot.sam31_mem_ca_k_spatial = k_outputs;
+    slot.sam31_mem_ca_v_spatial = v_outputs;
+    slot.sam31_mem_kv_spatial_tokens = N;
+    return true;
+}
+
+static bool sam31_precompute_memory_slot_kv_backend(const sam3_model& model,
+                                                    sam3_memory_slot& slot,
+                                                    ggml_tensor* memory_image_src,
+                                                    ggml_tensor* memory_src,
+                                                    ggml_tensor* memory_image_pos_src,
+                                                    int channels,
+                                                    int height,
+                                                    int width,
+                                                    float obj_score) {
+    if (!sam31_experimental_static_mem_ca_kv_cache_enabled()) {
+        return false;
+    }
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    if (channels != D || height <= 0 || width <= 0 || height != width ||
+        model.mem_attn.layers.size() > 4 || memory_image_src == nullptr || memory_src == nullptr ||
+        memory_image_pos_src == nullptr) {
+        return false;
+    }
+    const int N = height * width;
+    const auto has_4d_layout = [&](const ggml_tensor* tensor) {
+        return tensor->type == GGML_TYPE_F32 && tensor->ne[0] == D && tensor->ne[1] == width &&
+               tensor->ne[2] == height && tensor->ne[3] == 1;
+    };
+    if (!has_4d_layout(memory_image_src) || !has_4d_layout(memory_src) ||
+        memory_image_pos_src->type != GGML_TYPE_F32 || memory_image_pos_src->ne[0] != D ||
+        memory_image_pos_src->ne[1] != N || memory_image_pos_src->ne[2] != 1) {
+        return false;
+    }
+
+    const ggml_type activation_type =
+        model.weight_type == GGML_TYPE_F16 && sam31_f16_mem_attn_activation_enabled()
+            ? GGML_TYPE_F16
+        : model.weight_type == GGML_TYPE_BF16 && sam31_bf16_mem_attn_activation_enabled()
+            ? GGML_TYPE_BF16
+            : GGML_TYPE_F32;
+    const ggml_type attention_activation_type =
+        model.weight_type == GGML_TYPE_F16 && (sam31_f16_mem_attn_activation_enabled() ||
+                                               sam31_f16_mem_attn_attention_activation_enabled())
+            ? GGML_TYPE_F16
+            : activation_type;
+
+    ggml_init_params params = {
+        .mem_size = (ggml_tensor_overhead() * 8192) + (ggml_graph_overhead() * 2),
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        return false;
+    }
+
+    auto* memory_image_4d = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, width, height, 1);
+    ggml_set_name(memory_image_4d, "sam31_slot_memory_image_backend");
+    ggml_set_input(memory_image_4d);
+    auto* memory_4d = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, width, height, 1);
+    ggml_set_name(memory_4d, "sam31_slot_memory_backend");
+    ggml_set_input(memory_4d);
+    auto* memory_image = ggml_reshape_3d(ctx.get(), memory_image_4d, D, N, 1);
+    auto* memory_base = ggml_reshape_3d(ctx.get(), memory_4d, D, N, 1);
+    auto* memory = memory_base;
+    ggml_tensor* no_obj_sum_t = nullptr;
+    if (model.no_obj_embed_spatial) {
+        no_obj_sum_t = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, 1, 1);
+        ggml_set_name(no_obj_sum_t, "sam31_slot_no_obj_sum");
+        ggml_set_input(no_obj_sum_t);
+        memory = ggml_add(ctx.get(), memory_base, no_obj_sum_t);
+    }
+
+    auto* memory_image_pos = memory_image_pos_src;
+    auto* memory_image_act =
+        sam31_cast_activation(ctx.get(), memory_image, attention_activation_type);
+    auto* memory_act = sam31_cast_activation(ctx.get(), memory, attention_activation_type);
+    auto* memory_image_pos_act =
+        sam31_cast_activation(ctx.get(), memory_image_pos, attention_activation_type);
+
+    std::array<ggml_tensor*, 4> k_outputs = {};
+    std::array<ggml_tensor*, 4> v_outputs = {};
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        const auto& ly = model.mem_attn.layers[i];
+        auto* k = ggml_add(
+            ctx.get(),
+            sam31_linear(ctx.get(),
+                         ly.image_ca_k_w,
+                         ly.image_ca_k_b,
+                         memory_image_act,
+                         attention_activation_type),
+            sam31_linear(ctx.get(), ly.ca_k_w, ly.ca_k_b, memory_act, attention_activation_type));
+        k = ggml_add(ctx.get(), k, memory_image_pos_act);
+        k = sam31_cast_activation(ctx.get(), k, attention_activation_type);
+        sam3_set_name(k, std::format("sam31_slot_layer{}_ca_k_spatial", i));
+        ggml_set_output(k);
+
+        auto* v =
+            sam31_linear(ctx.get(), ly.ca_v_w, ly.ca_v_b, memory_act, attention_activation_type);
+        sam3_set_name(v, std::format("sam31_slot_layer{}_ca_v_spatial", i));
+        ggml_set_output(v);
+        k_outputs[i] = k;
+        v_outputs[i] = v;
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx.get(), 8192, false);
+    for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+        ggml_build_forward_expand(graph, k_outputs[i]);
+        ggml_build_forward_expand(graph, v_outputs[i]);
+    }
+
+    GgmlBackendBufferHandle buffer{ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend)};
+    if (!buffer) {
+        return false;
+    }
+    ggml_backend_tensor_copy_async(model.backend, model.backend, memory_image_src, memory_image_4d);
+    ggml_backend_tensor_copy_async(model.backend, model.backend, memory_src, memory_4d);
+    if (no_obj_sum_t != nullptr) {
+        constexpr int M = sam3::sam31::multiplex_count;
+        constexpr int valid_slot = 0;
+        std::vector<float> no_obj(sam3_count_mul(D, M));
+        sam3_read_f32(
+            model.no_obj_embed_spatial, no_obj.data(), static_cast<int64_t>(no_obj.size()));
+        std::vector<float> no_obj_sum(static_cast<size_t>(D), 0.0f);
+        for (int slot_idx = 0; slot_idx < M; ++slot_idx) {
+            if (slot_idx == valid_slot && obj_score > 0.0f) {
+                continue;
+            }
+            for (int d = 0; d < D; ++d) {
+                no_obj_sum[static_cast<size_t>(d)] +=
+                    no_obj[static_cast<size_t>(d) + sam3_count_mul(slot_idx, D)];
+            }
+        }
+        ggml_backend_tensor_set(
+            no_obj_sum_t, no_obj_sum.data(), 0, no_obj_sum.size() * sizeof(float));
+    }
+    if (!sam3_graph_compute(model.backend, graph, 4, "sam31_mem_ca_kv_precompute_backend")) {
+        return false;
+    }
+
+    slot.sam31_mem_kv_ctx = std::move(ctx);
+    slot.sam31_mem_kv_buf = std::move(buffer);
+    slot.sam31_mem_ca_k_spatial = k_outputs;
+    slot.sam31_mem_ca_v_spatial = v_outputs;
+    slot.sam31_mem_kv_spatial_tokens = N;
+    return true;
+}
+
 /*****************************************************************************
 ** Object pointer extraction (Phase 7, Step 7.3)
 *****************************************************************************/
 
-// Extract object pointer from SAM output token via 3-layer MLP (CPU-side).
-static bool sam3_ensure_obj_ptr_cpu_cache(const sam3_model& model) {
-    if (model.obj_ptr_cpu_cache_valid)
+static bool sam3_ensure_obj_ptr_cpu_cache(const sam3_model& model, bool interactive = false) {
+    auto& cache_valid =
+        interactive ? model.interactive_obj_ptr_cpu_cache_valid : model.obj_ptr_cpu_cache_valid;
+    auto* const(&proj_w)[3] = interactive ? model.interactive_obj_ptr_proj_w : model.obj_ptr_proj_w;
+    auto* const(&proj_b)[3] = interactive ? model.interactive_obj_ptr_proj_b : model.obj_ptr_proj_b;
+    auto& proj_w_cpu =
+        interactive ? model.interactive_obj_ptr_proj_w_cpu : model.obj_ptr_proj_w_cpu;
+    auto& proj_b_cpu =
+        interactive ? model.interactive_obj_ptr_proj_b_cpu : model.obj_ptr_proj_b_cpu;
+
+    if (cache_valid)
         return true;
 
     const int D = model.hparams.neck_dim;
-    if (!model.no_obj_ptr)
-        return false;
-
-    model.no_obj_ptr_cpu.resize(D);
-    sam3_read_f32(model.no_obj_ptr, model.no_obj_ptr_cpu.data(), D);
+    if (!interactive && model.no_obj_ptr && model.no_obj_ptr_cpu.empty()) {
+        model.no_obj_ptr_cpu.resize(D);
+        sam3_read_f32(model.no_obj_ptr, model.no_obj_ptr_cpu.data(), D);
+    }
 
     for (int j = 0; j < 3; ++j) {
-        auto* w = model.obj_ptr_proj_w[j];
-        auto* b = model.obj_ptr_proj_b[j];
+        auto* w = proj_w[j];
+        auto* b = proj_b[j];
         if (!w || !b)
             return false;
 
         const int nel_w = static_cast<int>(w->ne[0] * w->ne[1]);
-        model.obj_ptr_proj_w_cpu[j].resize(nel_w);
-        model.obj_ptr_proj_b_cpu[j].resize(D);
-        sam3_read_f32(w, model.obj_ptr_proj_w_cpu[j].data(), nel_w);
-        sam3_read_f32(b, model.obj_ptr_proj_b_cpu[j].data(), D);
+        proj_w_cpu[j].resize(nel_w);
+        proj_b_cpu[j].resize(D);
+        sam3_read_f32(w, proj_w_cpu[j].data(), nel_w);
+        sam3_read_f32(b, proj_b_cpu[j].data(), D);
     }
 
-    model.obj_ptr_cpu_cache_valid = true;
+    cache_valid = true;
     return true;
 }
 
-static void sam3_extract_obj_ptr_cpu(const sam3_model& model,
-                                     const float* sam_token_data,  // [D]
-                                     float obj_score,
-                                     float* out_ptr)  // [D]
-{
-    const auto& hp = model.hparams;
-    const int D = hp.neck_dim;
-    if (!sam3_ensure_obj_ptr_cpu_cache(model)) {
-        std::fill(out_ptr, out_ptr + D, 0.0f);
-        return;
-    }
-
-    // SAM2/EdgeTAM with fixed_no_obj_ptr: blend projected ptr with no_obj_ptr
-    // based on presence score λ.
-    // SAM3 / SAM2 without fixed_no_obj_ptr: binary threshold.
-    if ((hp.is_sam2() || hp.is_edgetam()) && hp.fixed_no_obj_ptr) {
-        // λ = (obj_score > 0) ? 1.0 : 0.0  (hard threshold, not sigmoid)
-        const float lambda = (obj_score > 0.0f) ? 1.0f : 0.0f;
-
-        // Project token through MLP
-        std::vector<float> h(D);
-        std::vector<float> tmp(D);
-        std::copy(sam_token_data, sam_token_data + D, h.data());
-        for (int j = 0; j < 3; ++j) {
-            const auto& w_data = model.obj_ptr_proj_w_cpu[j];
-            const auto& b_data = model.obj_ptr_proj_b_cpu[j];
-            for (int o = 0; o < D; ++o) {
-                float sum = b_data[o];
-                for (int i = 0; i < D; ++i) {
-                    sum += w_data[sam3_count_mul(o, D) + static_cast<size_t>(i)] * h[i];
-                }
-                tmp[o] = (j < 2) ? std::max(0.0f, sum) : sum;
-            }
-            std::swap(h, tmp);
-        }
-
-        // Blend: obj_ptr = λ * projected + (1-λ) * no_obj_ptr
-        const auto& no_ptr = model.no_obj_ptr_cpu;
-        for (int i = 0; i < D; ++i) {
-            out_ptr[i] = (lambda * h[i]) + ((1.0f - lambda) * no_ptr[i]);
-        }
-        return;
-    }
-
-    // SAM3 / default path: binary threshold
-    if (obj_score <= 0.0f) {
-        std::ranges::copy(model.no_obj_ptr_cpu, out_ptr);
-        return;
-    }
+static void sam3_project_obj_ptr_cpu(const sam3_model& model,
+                                     const float* sam_token_data,
+                                     float* out_ptr,
+                                     bool interactive) {
+    const int D = model.hparams.neck_dim;
+    const auto& proj_w_cpu =
+        interactive ? model.interactive_obj_ptr_proj_w_cpu : model.obj_ptr_proj_w_cpu;
+    const auto& proj_b_cpu =
+        interactive ? model.interactive_obj_ptr_proj_b_cpu : model.obj_ptr_proj_b_cpu;
 
     std::vector<float> h(D);
     std::vector<float> tmp(D);
     std::copy(sam_token_data, sam_token_data + D, h.data());
 
     for (int j = 0; j < 3; ++j) {
-        const auto& w_data = model.obj_ptr_proj_w_cpu[j];
-        const auto& b_data = model.obj_ptr_proj_b_cpu[j];
+        const auto& w_data = proj_w_cpu[j];
+        const auto& b_data = proj_b_cpu[j];
 
         for (int o = 0; o < D; ++o) {
             float sum = b_data[o];
@@ -11848,6 +16985,50 @@ static void sam3_extract_obj_ptr_cpu(const sam3_model& model,
         std::swap(h, tmp);
     }
     std::ranges::copy(h, out_ptr);
+}
+
+// Extract object pointer from SAM output token via 3-layer MLP (CPU-side).
+static void sam3_extract_obj_ptr_cpu(const sam3_model& model,
+                                     const float* sam_token_data,  // [D]
+                                     float obj_score,
+                                     float* out_ptr,  // [D]
+                                     bool interactive = false) {
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    if (!sam3_ensure_obj_ptr_cpu_cache(model, interactive)) {
+        std::fill(out_ptr, out_ptr + D, 0.0f);
+        return;
+    }
+
+    // SAM2/EdgeTAM with fixed_no_obj_ptr: blend projected ptr with no_obj_ptr
+    // based on presence score λ.
+    // SAM3 / SAM2 without fixed_no_obj_ptr: binary threshold.
+    if ((hp.is_sam2() || hp.is_edgetam()) && hp.fixed_no_obj_ptr) {
+        // λ = (obj_score > 0) ? 1.0 : 0.0  (hard threshold, not sigmoid)
+        const float lambda = (obj_score > 0.0f) ? 1.0f : 0.0f;
+
+        std::vector<float> projected(D);
+        sam3_project_obj_ptr_cpu(model, sam_token_data, projected.data(), interactive);
+
+        // Blend: obj_ptr = λ * projected + (1-λ) * no_obj_ptr
+        const auto& no_ptr = model.no_obj_ptr_cpu;
+        for (int i = 0; i < D; ++i) {
+            out_ptr[i] = (lambda * projected[i]) + ((1.0f - lambda) * no_ptr[i]);
+        }
+        return;
+    }
+
+    // SAM3 / default path: binary threshold
+    if (obj_score <= 0.0f) {
+        if (!model.no_obj_ptr_cpu.empty()) {
+            std::ranges::copy(model.no_obj_ptr_cpu, out_ptr);
+        } else {
+            std::fill(out_ptr, out_ptr + D, 0.0f);
+        }
+        return;
+    }
+
+    sam3_project_obj_ptr_cpu(model, sam_token_data, out_ptr, interactive);
 }
 
 /*****************************************************************************
@@ -12244,6 +17425,99 @@ static std::vector<float> sam3_bilinear_interpolate(
     return dst;
 }
 
+static void sam3_prepare_bilinear_axis_map(sam3_bilinear_axis_map& cache, int src, int dst) {
+    if (cache.src == src && cache.dst == dst) {
+        return;
+    }
+    cache.src = src;
+    cache.dst = dst;
+    cache.lo.resize(static_cast<size_t>(dst));
+    cache.hi.resize(static_cast<size_t>(dst));
+    cache.w.resize(static_cast<size_t>(dst));
+
+    if (src <= 1) {
+        std::ranges::fill(cache.lo, 0);
+        std::ranges::fill(cache.hi, 0);
+        std::ranges::fill(cache.w, 0.0f);
+        return;
+    }
+
+    const double scale = static_cast<double>(src) / static_cast<double>(dst);
+    for (int out = 0; out < dst; ++out) {
+        double f = ((static_cast<double>(out) + 0.5) * scale) - 0.5;
+        f = std::max(0.0, std::min(f, static_cast<double>(src - 1)));
+        const int lo = std::min(static_cast<int>(f), src - 2);
+        cache.lo[static_cast<size_t>(out)] = lo;
+        cache.hi[static_cast<size_t>(out)] = lo + 1;
+        cache.w[static_cast<size_t>(out)] = static_cast<float>(f - lo);
+    }
+}
+
+static void sam3_bilinear_interpolate_mask_cached(const sam3_mask& src,
+                                                  const sam3_bilinear_axis_map& x_axis,
+                                                  const sam3_bilinear_axis_map& y_axis,
+                                                  std::vector<float>& dst,
+                                                  int n_threads) {
+    const int dst_w = x_axis.dst;
+    const int dst_h = y_axis.dst;
+    dst.resize(sam3_count_mul(dst_w, dst_h));
+    const auto src_value = [&](int row, int col) {
+        return src.data[sam3_count_mul(row, src.width) + static_cast<size_t>(col)] > 127 ? 1.0f
+                                                                                         : 0.0f;
+    };
+    sam3_parallel_rows(dst_h, n_threads, [&](int y_begin, int y_end) {
+        for (int y = y_begin; y < y_end; ++y) {
+            const auto yi = static_cast<size_t>(y);
+            const int y0 = y_axis.lo[yi];
+            const int y1 = y_axis.hi[yi];
+            const float wy = y_axis.w[yi];
+            for (int x = 0; x < dst_w; ++x) {
+                const auto xi = static_cast<size_t>(x);
+                const int x0 = x_axis.lo[xi];
+                const int x1 = x_axis.hi[xi];
+                const float wx = x_axis.w[xi];
+                const float v =
+                    ((1.0f - wy) * (((1.0f - wx) * src_value(y0, x0)) + (wx * src_value(y0, x1)))) +
+                    (wy * (((1.0f - wx) * src_value(y1, x0)) + (wx * src_value(y1, x1))));
+                dst[sam3_count_mul(y, dst_w) + xi] = v;
+            }
+        }
+    });
+}
+
+static void sam3_bilinear_interpolate_cached(const float* src,
+                                             int src_w,
+                                             const sam3_bilinear_axis_map& x_axis,
+                                             const sam3_bilinear_axis_map& y_axis,
+                                             std::vector<float>& dst,
+                                             int n_threads) {
+    const int dst_w = x_axis.dst;
+    const int dst_h = y_axis.dst;
+    dst.resize(sam3_count_mul(dst_w, dst_h));
+    const auto src_index = [src_w](int row, int col) {
+        return sam3_count_mul(row, src_w) + static_cast<size_t>(col);
+    };
+    sam3_parallel_rows(dst_h, n_threads, [&](int y_begin, int y_end) {
+        for (int y = y_begin; y < y_end; ++y) {
+            const auto yi = static_cast<size_t>(y);
+            const int y0 = y_axis.lo[yi];
+            const int y1 = y_axis.hi[yi];
+            const float wy = y_axis.w[yi];
+            for (int x = 0; x < dst_w; ++x) {
+                const auto xi = static_cast<size_t>(x);
+                const int x0 = x_axis.lo[xi];
+                const int x1 = x_axis.hi[xi];
+                const float wx = x_axis.w[xi];
+                const float v =
+                    ((1.0f - wy) *
+                     (((1.0f - wx) * src[src_index(y0, x0)]) + (wx * src[src_index(y0, x1)]))) +
+                    (wy * (((1.0f - wx) * src[src_index(y1, x0)]) + (wx * src[src_index(y1, x1)])));
+                dst[sam3_count_mul(y, dst_w) + xi] = v;
+            }
+        }
+    });
+}
+
 static bool sam3_bbox_from_logits(const std::vector<float>& logits,
                                   int mask_w,
                                   int mask_h,
@@ -12416,6 +17690,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const int NQ = hp.ddec_num_queries;                            // 200
     const int N_spatial = static_cast<int>(sam3_count_mul(H, H));  // 5184
     sam3_result result{};
+    const auto pcs_dump_dir = sam3_getenv("SAM3_PCS_DUMP_DIR");
 
     // ── Check that image has been encoded ────────────────────────────────
     if (!state.neck_det[0]) {
@@ -12446,6 +17721,31 @@ sam3_result sam3_segment_pcs(sam3_state& state,
 
     SAM3_LOG(
         2, "%s: text='%s', %zu tokens\n", __func__, params.text_prompt.c_str(), token_ids.size());
+    if (pcs_dump_dir) {
+        const std::array<int64_t, 1> shape = {static_cast<int64_t>(token_ids.size())};
+        (void) sam3_dump_debug_i32(*pcs_dump_dir, "token_ids", token_ids, shape);
+        auto dump_model_tensor = [&](ggml_tensor* tensor, std::string_view name) {
+            if (!tensor || !tensor->buffer) {
+                return;
+            }
+            const std::string name_owned{name};
+            (void) sam3_dump_tensor_to_path(
+                tensor, name_owned, std::format("{}/{}", *pcs_dump_dir, name_owned));
+        };
+        dump_model_tensor(model.ddec.query_embed, "ddec_query_embed");
+        dump_model_tensor(model.ddec.presence_token, "ddec_presence_token");
+        if (auto it = model.tensors.find("ddec.reference_points.weight");
+            it != model.tensors.end()) {
+            dump_model_tensor(it->second, "ddec_reference_points");
+        }
+        if (!model.ddec.layers.empty()) {
+            const auto& layer0 = model.ddec.layers.front();
+            dump_model_tensor(layer0.sa_in_proj_w, "ddec_layer0_sa_in_proj_weight");
+            dump_model_tensor(layer0.sa_in_proj_b, "ddec_layer0_sa_in_proj_bias");
+            dump_model_tensor(layer0.norm2_w, "ddec_layer0_norm2_weight");
+            dump_model_tensor(layer0.norm2_b, "ddec_layer0_norm2_bias");
+        }
+    }
 
     // ── Helper: run a sub-graph with its own context and allocator ──────
     // Each stage below follows this exact pattern:
@@ -12462,14 +17762,82 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const int N_geo = n_boxes + 1;  // +1 for CLS
     const int T = L + N_geo;        // total prompt tokens (text + geometry)
 
-    // Read image features and PE from state into CPU buffers (used by multiple stages)
-    SAM3_PROFILE_CPU_START(pcs_encoder_feature_read);
     const size_t image_feature_count = sam3_count_mul(D, N_spatial);
     const size_t image_feature_bytes = image_feature_count * sizeof(float);
-    std::vector<float> img_feats_cpu(image_feature_count);
-    std::vector<float> img_pe_cpu(image_feature_count);
-    ggml_backend_tensor_get(state.neck_det[2], img_feats_cpu.data(), 0, image_feature_bytes);
-    ggml_backend_tensor_get(state.neck_det_pe[2], img_pe_cpu.data(), 0, image_feature_bytes);
+    const auto image_features_ref = sam3_getenv("SAM3_PCS_IMAGE_FEATURES_REF");
+    const auto image_pos_embed_ref = sam3_getenv("SAM3_PCS_IMAGE_POS_EMBED_REF");
+    const bool use_pcs_image_gpu_copy = !image_features_ref && !image_pos_embed_ref &&
+                                        !sam3_getenv("SAM3_DISABLE_PCS_IMAGE_GPU_COPY");
+    std::vector<float> img_feats_cpu;
+    std::vector<float> img_pe_cpu;
+    if (image_features_ref) {
+        img_feats_cpu.resize(image_feature_count);
+        const std::array<int64_t, 4> expected_shape = {D, H, H, 1};
+        if (!sam3_load_debug_f32(*image_features_ref, img_feats_cpu, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: replaced PCS image_features from %.*s.{bin,shape}\n",
+                 __func__,
+                 static_cast<int>(image_features_ref->size()),
+                 image_features_ref->data());
+    }
+    if (image_pos_embed_ref) {
+        img_pe_cpu.resize(image_feature_count);
+        const std::array<int64_t, 4> expected_shape = {D, H, H, 1};
+        if (!sam3_load_debug_f32(*image_pos_embed_ref, img_pe_cpu, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: replaced PCS image_pos_embed from %.*s.{bin,shape}\n",
+                 __func__,
+                 static_cast<int>(image_pos_embed_ref->size()),
+                 image_pos_embed_ref->data());
+    }
+    auto ensure_img_feats_cpu = [&]() {
+        if (img_feats_cpu.empty()) {
+            img_feats_cpu.resize(image_feature_count);
+            ggml_backend_tensor_get(
+                state.neck_det[2], img_feats_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+    auto ensure_img_pe_cpu = [&]() {
+        if (img_pe_cpu.empty()) {
+            img_pe_cpu.resize(image_feature_count);
+            ggml_backend_tensor_get(
+                state.neck_det_pe[2], img_pe_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+    auto upload_img_feats = [&](ggml_tensor* dst) {
+        if (!dst->buffer) {
+            return;
+        }
+        if (use_pcs_image_gpu_copy) {
+            sam3_backend_tensor_copy_async(model.backend, state.neck_det[2], dst);
+        } else {
+            ensure_img_feats_cpu();
+            ggml_backend_tensor_set(dst, img_feats_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+    auto upload_img_pe = [&](ggml_tensor* dst) {
+        if (!dst->buffer) {
+            return;
+        }
+        if (use_pcs_image_gpu_copy) {
+            sam3_backend_tensor_copy_async(model.backend, state.neck_det_pe[2], dst);
+        } else {
+            ensure_img_pe_cpu();
+            ggml_backend_tensor_set(dst, img_pe_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+
+    SAM3_PROFILE_CPU_START(pcs_encoder_feature_read);
+    if (!use_pcs_image_gpu_copy || n_boxes > 0) {
+        ensure_img_feats_cpu();
+    }
+    if (!use_pcs_image_gpu_copy) {
+        ensure_img_pe_cpu();
+    }
     SAM3_PROFILE_CPU_END(pcs_encoder_feature_read);
 
     // Pre-compute constant input vectors
@@ -12497,7 +17865,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     n_valid_tokens += N_geo;
     if (n_valid_tokens == 0)
         n_valid_tokens = 1;
-    float tvm_scale = static_cast<float>(T) / static_cast<float>(n_valid_tokens);
+    float tvm_scale = 1.0f / static_cast<float>(n_valid_tokens);
     std::vector<float> text_valid_mask_cpu(T);
     for (int i = 0; i < L; ++i)
         text_valid_mask_cpu[i] = (token_ids[i] != 0) ? tvm_scale : 0.0f;
@@ -12563,6 +17931,21 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         state.pcs_text_cache_token_ids = token_ids;
         state.pcs_text_cache_features = text_feats_cpu;
     }
+    if (const auto text_features_ref = sam3_getenv("SAM3_PCS_TEXT_FEATURES_REF")) {
+        const std::array<int64_t, 2> expected_shape = {D, L};
+        if (!sam3_load_debug_f32(*text_features_ref, text_feats_cpu, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: replaced PCS text_features from %.*s.{bin,shape}\n",
+                 __func__,
+                 static_cast<int>(text_features_ref->size()),
+                 text_features_ref->data());
+    }
+    if (pcs_dump_dir) {
+        const std::array<int64_t, 2> shape = {D, L};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "text_features", text_feats_cpu, shape);
+    }
 
     SAM3_LOG(2, "%s: text encoder done\n", __func__);
 
@@ -12583,12 +17966,14 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        auto* g_img = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(g_img, "geo_img");
-        ggml_set_input(g_img);
-        auto* g_pe = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(g_pe, "geo_pe");
-        ggml_set_input(g_pe);
+        auto* g_img_raw = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(g_img_raw, "geo_img");
+        ggml_set_input(g_img_raw);
+        auto* g_img = ggml_reshape_3d(ctx.get(), g_img_raw, D, N_spatial, 1);
+        auto* g_pe_raw = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(g_pe_raw, "geo_pe");
+        ggml_set_input(g_pe_raw);
+        auto* g_pe = ggml_reshape_3d(ctx.get(), g_pe_raw, D, N_spatial, 1);
 
         auto gr = sam3_build_geom_enc_graph(ctx.get(), model, params, g_img, g_pe);
         ggml_set_output(gr.geo_feats);
@@ -12602,8 +17987,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        ggml_backend_tensor_set(g_img, img_feats_cpu.data(), 0, image_feature_bytes);
-        ggml_backend_tensor_set(g_pe, img_pe_cpu.data(), 0, image_feature_bytes);
+        upload_img_feats(g_img_raw);
+        upload_img_pe(g_pe_raw);
 
         // Pre-transformer input (CLS + optional box embeddings)
         {
@@ -12620,6 +18005,15 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_backend_tensor_get(
             gr.geo_feats, geo_feats_cpu.data(), 0, geo_feats_cpu.size() * sizeof(float));
     }
+    if (pcs_dump_dir) {
+        ensure_img_feats_cpu();
+        ensure_img_pe_cpu();
+        const std::array<int64_t, 4> image_shape = {D, H, H, 1};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "image_features", img_feats_cpu, image_shape);
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "image_pos_embed", img_pe_cpu, image_shape);
+        const std::array<int64_t, 2> geo_shape = {D, N_geo};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "geo_features", geo_feats_cpu, geo_shape);
+    }
 
     SAM3_LOG(2, "%s: geometry encoder done\n", __func__);
 
@@ -12629,52 +18023,120 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     std::copy_n(geo_feats_cpu.data(),
                 geo_feats_cpu.size(),
                 combined_prompt_cpu.data() + static_cast<ptrdiff_t>(text_feats_cpu.size()));
+    if (const auto combined_prompt_ref = sam3_getenv("SAM3_PCS_COMBINED_PROMPT_REF")) {
+        const std::array<int64_t, 2> expected_shape = {D, T};
+        if (!sam3_load_debug_f32(*combined_prompt_ref, combined_prompt_cpu, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: replaced PCS combined_prompt from %.*s.{bin,shape}\n",
+                 __func__,
+                 static_cast<int>(combined_prompt_ref->size()),
+                 combined_prompt_ref->data());
+        std::copy_n(combined_prompt_cpu.data(), text_feats_cpu.size(), text_feats_cpu.data());
+        std::copy_n(combined_prompt_cpu.data() + static_cast<ptrdiff_t>(text_feats_cpu.size()),
+                    geo_feats_cpu.size(),
+                    geo_feats_cpu.data());
+    }
+    if (pcs_dump_dir) {
+        const std::array<int64_t, 2> prompt_shape = {D, T};
+        const std::array<int64_t, 1> bias_shape = {T};
+        (void) sam3_dump_debug_f32(
+            *pcs_dump_dir, "combined_prompt", combined_prompt_cpu, prompt_shape);
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "combined_bias", combined_bias_cpu, bias_shape);
+        (void) sam3_dump_debug_f32(
+            *pcs_dump_dir, "text_valid_mask", text_valid_mask_cpu, bias_shape);
+    }
 
     SAM3_LOG(2, "%s: starting fusion encoder\n", __func__);
     /*
     ** ── SUB-GRAPH 3: Fusion Encoder ──────────────────────────────────
     */
-    std::vector<float> fenc_output_cpu(image_feature_count);
-    {
+    const bool use_pcs_fenc_ddec_gpu_copy =
+        sam3_getenv("SAM3_ENABLE_PCS_FENC_DDEC_GPU_COPY").has_value();
+    const bool use_pcs_fenc_seg_gpu_copy =
+        sam3_getenv("SAM3_ENABLE_PCS_FENC_SEG_GPU_COPY").has_value();
+    std::vector<float> fenc_output_cpu;
+    if (const auto fenc_output_ref = sam3_getenv("SAM3_PCS_FENC_OUTPUT_REF")) {
+        fenc_output_cpu.resize(image_feature_count);
+        const std::array<int64_t, 4> expected_shape = {D, H, H, 1};
+        if (!sam3_load_debug_f32(*fenc_output_ref, fenc_output_cpu, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: replaced PCS fenc_output from %.*s.{bin,shape}\n",
+                 __func__,
+                 static_cast<int>(fenc_output_ref->size()),
+                 fenc_output_ref->data());
+    }
+    GgmlContextHandle fenc_ctx;
+    GgmlGallocrHandle fenc_alloc;
+    ggml_tensor* fenc_output_tensor = nullptr;
+    auto ensure_fenc_output_cpu = [&]() {
+        if (fenc_output_cpu.empty()) {
+            fenc_output_cpu.resize(image_feature_count);
+            ggml_backend_tensor_get(
+                fenc_output_tensor, fenc_output_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+    auto release_fenc_backend = [&]() {
+        fenc_output_tensor = nullptr;
+        fenc_alloc.reset();
+        fenc_ctx.reset();
+    };
+    auto upload_fenc_output = [&](ggml_tensor* dst, bool use_gpu_copy) {
+        if (!dst->buffer) {
+            return;
+        }
+        if (use_gpu_copy && fenc_output_tensor) {
+            sam3_backend_tensor_copy_async(model.backend, fenc_output_tensor, dst);
+        } else {
+            ensure_fenc_output_cpu();
+            ggml_backend_tensor_set(dst, fenc_output_cpu.data(), 0, image_feature_bytes);
+        }
+    };
+    if (fenc_output_cpu.empty()) {
         const size_t sz = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
         ggml_init_params gp = {
             .mem_size = sz,
             .mem_buffer = nullptr,
             .no_alloc = true,
         };
-        auto ctx = make_ggml_context(gp);
-        if (!ctx) {
+        fenc_ctx = make_ggml_context(gp);
+        if (!fenc_ctx) {
             fprintf(stderr, "%s: fusion encoder context init failed\n", __func__);
             return result;
         }
 
-        auto* img = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(img, "fenc_img");
-        ggml_set_input(img);
-        auto* pe = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(pe, "fenc_pe");
-        ggml_set_input(pe);
-        auto* prompt = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, T, 1);
+        auto* img_raw = ggml_new_tensor_4d(fenc_ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(img_raw, "fenc_img");
+        ggml_set_input(img_raw);
+        auto* img = ggml_reshape_3d(fenc_ctx.get(), img_raw, D, N_spatial, 1);
+        auto* pe_raw = ggml_new_tensor_4d(fenc_ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(pe_raw, "fenc_pe");
+        ggml_set_input(pe_raw);
+        auto* pe = ggml_reshape_3d(fenc_ctx.get(), pe_raw, D, N_spatial, 1);
+        auto* prompt = ggml_new_tensor_3d(fenc_ctx.get(), GGML_TYPE_F32, D, T, 1);
         ggml_set_name(prompt, "fenc_prompt");
         ggml_set_input(prompt);
-        auto* bias = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, T, 1, 1);
+        auto* bias = ggml_new_tensor_3d(fenc_ctx.get(), GGML_TYPE_F32, T, 1, 1);
         ggml_set_name(bias, "fenc_bias");
         ggml_set_input(bias);
 
-        auto* out = sam3_build_fenc_graph(ctx.get(), model, img, prompt, pe, bias);
-        ggml_set_output(out);
+        fenc_output_tensor = sam3_build_fenc_graph(fenc_ctx.get(), model, img, prompt, pe, bias);
+        ggml_set_output(fenc_output_tensor);
 
-        auto* graph = ggml_new_graph_custom(ctx.get(), 16384, false);
-        ggml_build_forward_expand(graph, out);
+        auto* graph = ggml_new_graph_custom(fenc_ctx.get(), 16384, false);
+        ggml_build_forward_expand(graph, fenc_output_tensor);
 
-        auto alloc = make_ggml_gallocr(model.backend);
-        if (!reserve_and_alloc_graph(alloc.get(), graph)) {
+        fenc_alloc = make_ggml_gallocr(model.backend);
+        if (!reserve_and_alloc_graph(fenc_alloc.get(), graph)) {
             fprintf(stderr, "%s: fusion encoder alloc failed\n", __func__);
             return result;
         }
 
-        ggml_backend_tensor_set(img, img_feats_cpu.data(), 0, image_feature_bytes);
-        ggml_backend_tensor_set(pe, img_pe_cpu.data(), 0, image_feature_bytes);
+        upload_img_feats(img_raw);
+        upload_img_pe(pe_raw);
         ggml_backend_tensor_set(
             prompt, combined_prompt_cpu.data(), 0, combined_prompt_cpu.size() * sizeof(float));
         ggml_backend_tensor_set(
@@ -12683,17 +18145,68 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         if (!sam3_graph_compute(model.backend, graph, state.n_threads, "pcs_fusion_encoder")) {
             return result;
         }
-        ggml_backend_tensor_get(
-            out, fenc_output_cpu.data(), 0, fenc_output_cpu.size() * sizeof(float));
 
-        SAM3_LOG(2,
-                 "%s: fenc_out[0..4] = [%.6f, %.6f, %.6f, %.6f, %.6f]\n",
-                 __func__,
-                 fenc_output_cpu[0],
-                 fenc_output_cpu[1],
-                 fenc_output_cpu[2],
-                 fenc_output_cpu[3],
-                 fenc_output_cpu[4]);
+        if (sam3_should_log(2)) {
+            ensure_fenc_output_cpu();
+            SAM3_LOG(2,
+                     "%s: fenc_out[0..4] = [%.6f, %.6f, %.6f, %.6f, %.6f]\n",
+                     __func__,
+                     fenc_output_cpu[0],
+                     fenc_output_cpu[1],
+                     fenc_output_cpu[2],
+                     fenc_output_cpu[3],
+                     fenc_output_cpu[4]);
+        }
+        if (pcs_dump_dir) {
+            for (int i = 0; i < hp.fenc_layers; ++i) {
+                for (const auto& name : {
+                         std::format("fenc_layer{}_sa_q_proj", i),
+                         std::format("fenc_layer{}_sa_k_proj", i),
+                         std::format("fenc_layer{}_sa_v_proj", i),
+                         std::format("fenc_layer{}_sa_q_packed", i),
+                         std::format("fenc_layer{}_sa_k_packed", i),
+                         std::format("fenc_layer{}_sa_v_packed", i),
+                         std::format("fenc_layer{}_sa_raw", i),
+                         std::format("fenc_layer{}_sa_core", i),
+                         std::format("fenc_layer{}_sa_core_cont", i),
+                         std::format("fenc_layer{}_sa_out", i),
+                         std::format("fenc_layer{}_after_sa", i),
+                         std::format("fenc_layer{}_ca_q_proj", i),
+                         std::format("fenc_layer{}_ca_k_proj", i),
+                         std::format("fenc_layer{}_ca_v_proj", i),
+                         std::format("fenc_layer{}_ca_raw", i),
+                         std::format("fenc_layer{}_ca_core", i),
+                         std::format("fenc_layer{}_ca_core_cont", i),
+                         std::format("fenc_layer{}_ca_out", i),
+                         std::format("fenc_layer{}_after_ca", i),
+                         std::format("fenc_layer{}_ffn_out", i),
+                         std::format("fenc_layer{}_out", i),
+                     }) {
+                    if (auto* layer_out = ggml_get_tensor(fenc_ctx.get(), name.c_str())) {
+                        (void) sam3_dump_tensor_to_path(
+                            layer_out, name, std::format("{}/{}", *pcs_dump_dir, name));
+                    }
+                }
+                const auto& layer = model.fenc.layers[static_cast<size_t>(i)];
+                (void) sam3_dump_tensor_to_path(
+                    layer.sa_out_proj_w,
+                    std::format("fenc_layer{}_sa_out_proj_weight", i),
+                    std::format("{}/fenc_layer{}_sa_out_proj_weight", *pcs_dump_dir, i));
+                (void) sam3_dump_tensor_to_path(
+                    layer.sa_out_proj_b,
+                    std::format("fenc_layer{}_sa_out_proj_bias", i),
+                    std::format("{}/fenc_layer{}_sa_out_proj_bias", *pcs_dump_dir, i));
+            }
+        }
+    }
+    if (pcs_dump_dir) {
+        ensure_fenc_output_cpu();
+        const std::array<int64_t, 4> shape = {D, H, H, 1};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "fenc_output", fenc_output_cpu, shape);
+    }
+    if (!use_pcs_fenc_ddec_gpu_copy && !use_pcs_fenc_seg_gpu_copy) {
+        ensure_fenc_output_cpu();
+        release_fenc_backend();
     }
 
     SAM3_LOG(2, "%s: fusion encoder done\n", __func__);
@@ -12720,9 +18233,10 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         auto* enc = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
         ggml_set_name(enc, "ddec_enc");
         ggml_set_input(enc);
-        auto* pe = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(pe, "ddec_pe");
-        ggml_set_input(pe);
+        auto* pe_raw = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(pe_raw, "ddec_pe");
+        ggml_set_input(pe_raw);
+        auto* pe = ggml_reshape_3d(ctx.get(), pe_raw, D, N_spatial, 1);
         auto* txt = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, T, 1);
         ggml_set_name(txt, "ddec_text");
         ggml_set_input(txt);
@@ -12757,9 +18271,12 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        ggml_backend_tensor_set(
-            enc, fenc_output_cpu.data(), 0, fenc_output_cpu.size() * sizeof(float));
-        ggml_backend_tensor_set(pe, img_pe_cpu.data(), 0, image_feature_bytes);
+        upload_fenc_output(enc, use_pcs_fenc_ddec_gpu_copy);
+        if (!use_pcs_fenc_seg_gpu_copy) {
+            ensure_fenc_output_cpu();
+            release_fenc_backend();
+        }
+        upload_img_pe(pe_raw);
         ggml_backend_tensor_set(
             txt, combined_prompt_cpu.data(), 0, combined_prompt_cpu.size() * sizeof(float));
         ggml_backend_tensor_set(sdt, sine_dim_t_cpu.data(), 0, 64 * sizeof(float));
@@ -12775,13 +18292,6 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             std::vector<float> z(D, 0.0f);
             ggml_backend_tensor_set(qpos, z.data(), 0, D * sizeof(float));
         }
-        auto* rpbz = ggml_get_tensor(ctx.get(), "rpb_pres_zeros");
-        if (rpbz) {
-            const int n = static_cast<int>(rpbz->ne[0] * rpbz->ne[1] * rpbz->ne[2] * rpbz->ne[3]);
-            std::vector<float> z(n, 0.0f);
-            ggml_backend_tensor_set(rpbz, z.data(), 0, z.size() * sizeof(float));
-        }
-
         if (!sam3_graph_compute(model.backend, graph, state.n_threads, "pcs_detr_decoder")) {
             return result;
         }
@@ -12793,6 +18303,90 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_backend_tensor_get(dout.presence_score, &presence_logit, 0, sizeof(float));
         ggml_backend_tensor_get(
             dout.queries, queries_data.data(), 0, queries_data.size() * sizeof(float));
+
+        if (pcs_dump_dir) {
+            auto dump_ddec_tensor = [&](std::string_view name) {
+                const std::string name_owned{name};
+                if (auto* tensor = ggml_get_tensor(ctx.get(), name_owned.c_str());
+                    tensor && tensor->buffer) {
+                    (void) sam3_dump_tensor_to_path(
+                        tensor, name_owned, std::format("{}/{}", *pcs_dump_dir, name_owned));
+                }
+            };
+            for (const auto& name : {
+                     "ddec_rpb_cw_rep_0",
+                     "ddec_rpb_x0_rep_0",
+                     "ddec_rpb_x1_rep_0",
+                     "ddec_rpb_y0_rep_0",
+                     "ddec_rpb_y1_rep_0",
+                     "ddec_rpb_dx0_raw_0",
+                     "ddec_rpb_dx1_raw_0",
+                     "ddec_rpb_dy0_raw_0",
+                     "ddec_rpb_dy1_raw_0",
+                 }) {
+                dump_ddec_tensor(name);
+            }
+            for (int i = 0; i < hp.ddec_layers; ++i) {
+                for (const auto& name : {
+                         std::format("ddec_rpb_deltas_x_{}", i),
+                         std::format("ddec_rpb_deltas_y_{}", i),
+                         std::format("ddec_rpb_x_{}", i),
+                         std::format("ddec_rpb_y_{}", i),
+                         std::format("ddec_rpb_mask_obj_{}", i),
+                         std::format("ddec_layer{}_sa_q_in", i),
+                         std::format("ddec_layer{}_sa_q_proj", i),
+                         std::format("ddec_layer{}_sa_k_proj", i),
+                         std::format("ddec_layer{}_sa_v_proj", i),
+                         std::format("ddec_layer{}_sa_core", i),
+                         std::format("ddec_layer{}_sa_out", i),
+                         std::format("ddec_layer{}_sa_pre_norm", i),
+                         std::format("ddec_layer{}_after_sa", i),
+                         std::format("ddec_layer{}_img_ca_q_in", i),
+                         std::format("ddec_layer{}_img_ca_k_in", i),
+                         std::format("ddec_layer{}_img_ca_q_proj", i),
+                         std::format("ddec_layer{}_img_ca_k_proj", i),
+                         std::format("ddec_layer{}_img_ca_v_proj", i),
+                         std::format("ddec_layer{}_img_ca_out", i),
+                         std::format("ddec_layer{}_img_ca_pre_norm", i),
+                         std::format("ddec_layer{}_after_text_ca", i),
+                         std::format("ddec_layer{}_after_img_ca", i),
+                         std::format("ddec_layer{}_full_out", i),
+                         std::format("ddec_layer{}_out", i),
+                         std::format("ddec_layer{}_refboxes", i),
+                     }) {
+                    dump_ddec_tensor(name);
+                }
+            }
+            dump_ddec_tensor("ddec_normed_output");
+            dump_ddec_tensor("ddec_layer0_presence");
+        }
+    }
+    if (pcs_dump_dir) {
+        const std::array<int64_t, 1> scores_shape = {NQ};
+        const std::array<int64_t, 2> boxes_shape = {4, NQ};
+        const std::array<int64_t, 2> queries_shape = {D, NQ + 1};
+        const std::array<int64_t, 1> presence_shape = {1};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "ddec_class_scores", scores_data, scores_shape);
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "ddec_pred_boxes", boxes_data, boxes_shape);
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "ddec_queries", queries_data, queries_shape);
+        (void) sam3_dump_debug_f32(*pcs_dump_dir,
+                                   "ddec_presence_logit",
+                                   std::span<const float>(&presence_logit, 1),
+                                   presence_shape);
+    }
+
+    if (const auto seg_queries_ref = sam3_getenv("SAM3_PCS_SEG_QUERIES_REF")) {
+        const std::array<int64_t, 3> expected_shape = {D, NQ, 1};
+        std::span<float> object_queries(queries_data.data() + static_cast<ptrdiff_t>(D),
+                                        sam3_count_mul(D, NQ));
+        if (!sam3_load_debug_f32(*seg_queries_ref, object_queries, expected_shape)) {
+            return result;
+        }
+        SAM3_LOG(1,
+                 "%s: loaded SAM3_PCS_SEG_QUERIES_REF from %.*s\n",
+                 __func__,
+                 static_cast<int>(seg_queries_ref->size()),
+                 seg_queries_ref->data());
     }
 
     float presence_prob = 1.0f / (1.0f + expf(-presence_logit));
@@ -12860,26 +18454,30 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        ggml_backend_tensor_set(
-            enc_h, fenc_output_cpu.data(), 0, fenc_output_cpu.size() * sizeof(float));
+        upload_fenc_output(enc_h, use_pcs_fenc_seg_gpu_copy);
 
-        // Copy FPN features from state
-        {
-            const size_t s0 = sam3_count_mul(D, H0, H0) * sizeof(float);
-            const size_t s1 = sam3_count_mul(D, H1, H1) * sizeof(float);
-            const size_t s2 = sam3_count_mul(D, H, H) * sizeof(float);
-            std::vector<float> b0(sam3_count_mul(D, H0, H0));
-            std::vector<float> b1(sam3_count_mul(D, H1, H1));
-            std::vector<float> b2(sam3_count_mul(D, H, H));
-            ggml_backend_tensor_get(state.neck_det[0], b0.data(), 0, s0);
-            if (fpn0->buffer)
-                ggml_backend_tensor_set(fpn0, b0.data(), 0, s0);
-            ggml_backend_tensor_get(state.neck_det[1], b1.data(), 0, s1);
-            if (fpn1->buffer)
-                ggml_backend_tensor_set(fpn1, b1.data(), 0, s1);
-            ggml_backend_tensor_get(state.neck_det[2], b2.data(), 0, s2);
-            if (fpn2->buffer)
-                ggml_backend_tensor_set(fpn2, b2.data(), 0, s2);
+        const auto upload_fpn_cpu = [](ggml_tensor* src, ggml_tensor* dst, size_t bytes) {
+            if (!dst->buffer) {
+                return;
+            }
+            std::vector<std::byte> buffer(bytes);
+            ggml_backend_tensor_get(src, buffer.data(), 0, bytes);
+            ggml_backend_tensor_set(dst, buffer.data(), 0, bytes);
+        };
+        if (sam3_getenv("SAM3_DISABLE_PCS_FPN_GPU_COPY")) {
+            upload_fpn_cpu(state.neck_det[0], fpn0, sam3_count_mul(D, H0, H0) * sizeof(float));
+            upload_fpn_cpu(state.neck_det[1], fpn1, sam3_count_mul(D, H1, H1) * sizeof(float));
+            upload_fpn_cpu(state.neck_det[2], fpn2, sam3_count_mul(D, H, H) * sizeof(float));
+        } else {
+            if (fpn0->buffer) {
+                sam3_backend_tensor_copy_async(model.backend, state.neck_det[0], fpn0);
+            }
+            if (fpn1->buffer) {
+                sam3_backend_tensor_copy_async(model.backend, state.neck_det[1], fpn1);
+            }
+            if (fpn2->buffer) {
+                sam3_backend_tensor_copy_async(model.backend, state.neck_det[2], fpn2);
+            }
         }
 
         // Object queries: extract from DETR queries (skip presence token at slot 0)
@@ -12889,6 +18487,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                                 queries_data.data() + static_cast<ptrdiff_t>(D),
                                 0,
                                 sam3_count_mul(D, NQ) * sizeof(float));
+        release_fenc_backend();
 
         ggml_backend_tensor_set(
             txt, combined_prompt_cpu.data(), 0, combined_prompt_cpu.size() * sizeof(float));
@@ -12898,7 +18497,29 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         if (!sam3_graph_compute(model.backend, graph, state.n_threads, "pcs_segmentation_head")) {
             return result;
         }
+        if (pcs_dump_dir) {
+            for (std::string_view name : {
+                     "seg_ca_norm",
+                     "seg_ca_out",
+                     "seg_enc_after_ca",
+                     "seg_pixel_dec_stage0",
+                     "seg_pixel_dec_stage1",
+                     "seg_pixel_decoder_out",
+                     "seg_instance_embed",
+                     "seg_mask_embed",
+                 }) {
+                const std::string name_owned{name};
+                if (auto* tensor = ggml_get_tensor(ctx.get(), name_owned.c_str())) {
+                    (void) sam3_dump_tensor_to_path(
+                        tensor, name_owned, std::format("{}/{}", *pcs_dump_dir, name));
+                }
+            }
+        }
         ggml_backend_tensor_get(out, all_masks.data(), 0, all_masks.size() * sizeof(float));
+    }
+    if (pcs_dump_dir) {
+        const std::array<int64_t, 3> masks_shape = {mask_hw, mask_hw, NQ};
+        (void) sam3_dump_debug_f32(*pcs_dump_dir, "seg_mask_logits", all_masks, masks_shape);
     }
 
     /*
@@ -12921,6 +18542,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
 
         det.box = sam3_cxcywh_to_xyxy(cx, cy, bw, bh, state.orig_width, state.orig_height);
         det.score = score;
+        det.iou_score = score;
 
         const float* mask_ptr =
             all_masks.data() + static_cast<ptrdiff_t>(sam3_count_mul(q, mask_hw, mask_hw));
@@ -12933,6 +18555,9 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             det.mask.data[i] = (mask_resized[i] > 0.0f) ? 255 : 0;
         }
         det.mask.iou_score = score;
+        det.raw_mask_logits.assign(mask_ptr, mask_ptr + sam3_count_mul(mask_hw, mask_hw));
+        det.raw_mask_width = mask_hw;
+        det.raw_mask_height = mask_hw;
 
         dets.push_back(std::move(det));
     }
@@ -12971,7 +18596,9 @@ static struct ggml_tensor* sam3_sam_attention(struct ggml_context* ctx,
                                               struct ggml_tensor* k_in,  // [D, N_kv, B]
                                               struct ggml_tensor* v_in,  // [D, N_kv, B]
                                               const sam3_sam_attn& attn,
-                                              int n_heads) {
+                                              int n_heads,
+                                              std::string_view debug_prefix = {},
+                                              bool expose_debug_outputs = true) {
     const int64_t N_q = q_in->ne[1];
     const int64_t B = q_in->ne[2];
     const int64_t N_kv = k_in->ne[1];
@@ -12980,6 +18607,16 @@ static struct ggml_tensor* sam3_sam_attention(struct ggml_context* ctx,
     auto* Q = ggml_add(ctx, ggml_mul_mat(ctx, attn.q_w, q_in), attn.q_b);
     auto* K = ggml_add(ctx, ggml_mul_mat(ctx, attn.k_w, k_in), attn.k_b);
     auto* V = ggml_add(ctx, ggml_mul_mat(ctx, attn.v_w, v_in), attn.v_b);
+    if (!debug_prefix.empty()) {
+        sam3_set_name(Q, std::format("{}_q_proj", debug_prefix));
+        sam3_set_name(K, std::format("{}_k_proj", debug_prefix));
+        sam3_set_name(V, std::format("{}_v_proj", debug_prefix));
+        if (expose_debug_outputs) {
+            ggml_set_output(Q);
+            ggml_set_output(K);
+            ggml_set_output(V);
+        }
+    }
 
     // Debug: mark projections for the first SA call (N_q=8 tokens, block 0)
     static int _sa_call_count = 0;
@@ -13008,10 +18645,19 @@ static struct ggml_tensor* sam3_sam_attention(struct ggml_context* ctx,
     // Attention
     float scale = 1.0f / sqrtf(static_cast<float>(HD));
     auto* out = ggml_flash_attn_ext(ctx, Q, K, V, nullptr, scale, 0.0f, 0.0f);
+    if (!debug_prefix.empty()) {
+        sam3_set_name(out, std::format("{}_fattn", debug_prefix));
+    }
     // out: [HD, NH, N_q, B] (flash_attn_ext swaps dims 1,2 vs input)
 
     // Merge heads: [ID=HD*NH, N_q, B]
     auto* merged = ggml_reshape_3d(ctx, out, ID, N_q, B);
+    if (!debug_prefix.empty()) {
+        sam3_set_name(merged, std::format("{}_core", debug_prefix));
+        if (expose_debug_outputs) {
+            ggml_set_output(merged);
+        }
+    }
 
     // Debug: mark merged attention output for first SA call
     static int _sa_merge_count = 0;
@@ -13052,13 +18698,198 @@ static void sam3_pe_encode_coord(
 // Read SAM prompt encoder weights from GPU and cache them in state.
 // Also pre-computes the dense PE grid and no-mask tiled embedding.
 // These never change between PVS calls for the same model.
-static void sam3_populate_pe_cache(sam3_state& state, const sam3_model& model) {
-    if (state.pe_cache_valid)
-        return;
-    sam3_clear_prompt_backend_cache(state);
+static bool sam3_model_prompt_pe_cache_matches(const sam3_model& model, int D, int H) {
+    return model.prompt_pe_cache_valid && model.prompt_pe_cache_d == D &&
+           model.prompt_pe_cache_h == H;
+}
 
+static bool sam3_model_prompt_pe_cache_enabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("SAM3_DISABLE_MODEL_PROMPT_PE_CACHE");
+        return env == nullptr || env[0] == '0';
+    }();
+    return enabled;
+}
+
+static void sam3_clear_model_prompt_pe_cache(const sam3_model& model) {
+    model.prompt_pe_buffer.reset();
+    model.prompt_pe_ctx.reset();
+    model.prompt_dense_pe_tensor = nullptr;
+    model.prompt_dense_nomask_tensor = nullptr;
+    model.prompt_not_a_point_tensor = nullptr;
+    model.prompt_pe_cache_valid = false;
+}
+
+static bool sam3_ensure_model_prompt_pe_cache(const sam3_model& model, int D, int H) {
+    if (sam3_model_prompt_pe_cache_matches(model, D, H)) {
+        return true;
+    }
+    if (model.prompt_pe_cache_valid &&
+        (model.prompt_pe_cache_d != D || model.prompt_pe_cache_h != H)) {
+        return false;
+    }
+
+    sam3_clear_model_prompt_pe_cache(model);
+
+    const int num_pos_feats = D / 2;       // 128
+    const int pe_nel = 2 * num_pos_feats;  // 256
+    const auto& pe = model.sam_pe;
+
+    model.prompt_pe_gauss_cache.resize(pe_nel);
+    if (pe.pe_gaussian->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(pe_nel);
+        ggml_backend_tensor_get(pe.pe_gaussian, tmp.data(), 0, pe_nel * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(tmp.data(), model.prompt_pe_gauss_cache.data(), pe_nel);
+    } else {
+        ggml_backend_tensor_get(
+            pe.pe_gaussian, model.prompt_pe_gauss_cache.data(), 0, pe_nel * sizeof(float));
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        if (pe.point_embed[i]->type == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> tmp(D);
+            ggml_backend_tensor_get(pe.point_embed[i], tmp.data(), 0, D * sizeof(ggml_fp16_t));
+            ggml_fp16_to_fp32_row(
+                tmp.data(), model.prompt_point_emb_cache[static_cast<size_t>(i)].data(), D);
+        } else {
+            ggml_backend_tensor_get(pe.point_embed[i],
+                                    model.prompt_point_emb_cache[static_cast<size_t>(i)].data(),
+                                    0,
+                                    D * sizeof(float));
+        }
+    }
+    if (pe.not_a_point_embed->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(D);
+        ggml_backend_tensor_get(pe.not_a_point_embed, tmp.data(), 0, D * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(tmp.data(), model.prompt_not_a_point_cache.data(), D);
+    } else {
+        ggml_backend_tensor_get(
+            pe.not_a_point_embed, model.prompt_not_a_point_cache.data(), 0, D * sizeof(float));
+    }
+    if (pe.no_mask_embed->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(D);
+        ggml_backend_tensor_get(pe.no_mask_embed, tmp.data(), 0, D * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(tmp.data(), model.prompt_no_mask_emb_cache.data(), D);
+    } else {
+        ggml_backend_tensor_get(
+            pe.no_mask_embed, model.prompt_no_mask_emb_cache.data(), 0, D * sizeof(float));
+    }
+
+    const size_t dense_cache_count = sam3_count_mul(D, H, H);
+    model.prompt_dense_pe_cache.resize(dense_cache_count);
+    for (int row = 0; row < H; ++row) {
+        for (int col = 0; col < H; ++col) {
+            const float x_norm = (static_cast<float>(col) + 0.5f) / static_cast<float>(H);
+            const float y_norm = (static_cast<float>(row) + 0.5f) / static_cast<float>(H);
+            std::array<float, 256> pe_vec{};
+            sam3_pe_encode_coord(
+                pe_vec.data(), x_norm, y_norm, model.prompt_pe_gauss_cache.data(), num_pos_feats);
+            for (int d = 0; d < D; ++d) {
+                model.prompt_dense_pe_cache[static_cast<size_t>(d) + sam3_count_mul(col, D) +
+                                            sam3_count_mul(row, D, H)] = pe_vec[d];
+            }
+        }
+    }
+
+    model.prompt_dense_nomask_cache.resize(dense_cache_count);
+    for (int row = 0; row < H; ++row) {
+        for (int col = 0; col < H; ++col) {
+            for (int d = 0; d < D; ++d) {
+                model.prompt_dense_nomask_cache[static_cast<size_t>(d) + sam3_count_mul(col, D) +
+                                                sam3_count_mul(row, D, H)] =
+                    model.prompt_no_mask_emb_cache[static_cast<size_t>(d)];
+            }
+        }
+    }
+
+    ggml_init_params cparams = {
+        .mem_size = ggml_tensor_overhead() * 8,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    model.prompt_pe_ctx = make_ggml_context(cparams);
+    if (model.prompt_pe_ctx) {
+        model.prompt_dense_pe_tensor =
+            ggml_new_tensor_4d(model.prompt_pe_ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(model.prompt_dense_pe_tensor, "model_prompt_dense_pe_cache");
+        model.prompt_dense_nomask_tensor =
+            ggml_new_tensor_4d(model.prompt_pe_ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(model.prompt_dense_nomask_tensor, "model_prompt_dense_nomask_cache");
+        model.prompt_not_a_point_tensor =
+            ggml_new_tensor_2d(model.prompt_pe_ctx.get(), GGML_TYPE_F32, D, 1);
+        ggml_set_name(model.prompt_not_a_point_tensor, "model_prompt_not_a_point_cache");
+
+        model.prompt_pe_buffer = GgmlBackendBufferHandle{
+            ggml_backend_alloc_ctx_tensors(model.prompt_pe_ctx.get(), model.backend)};
+        if (model.prompt_pe_buffer) {
+            ggml_backend_tensor_set(model.prompt_dense_pe_tensor,
+                                    model.prompt_dense_pe_cache.data(),
+                                    0,
+                                    model.prompt_dense_pe_cache.size() * sizeof(float));
+            ggml_backend_tensor_set(model.prompt_dense_nomask_tensor,
+                                    model.prompt_dense_nomask_cache.data(),
+                                    0,
+                                    model.prompt_dense_nomask_cache.size() * sizeof(float));
+            ggml_backend_tensor_set(model.prompt_not_a_point_tensor,
+                                    model.prompt_not_a_point_cache.data(),
+                                    0,
+                                    static_cast<size_t>(D) * sizeof(float));
+        } else {
+            model.prompt_dense_pe_tensor = nullptr;
+            model.prompt_dense_nomask_tensor = nullptr;
+            model.prompt_not_a_point_tensor = nullptr;
+            model.prompt_pe_ctx.reset();
+        }
+    }
+
+    model.prompt_pe_cache_d = D;
+    model.prompt_pe_cache_h = H;
+    model.prompt_pe_cache_valid = true;
+    SAM3_LOG(2,
+             "%s: model PE cache populated (%d embeddings, %.1f KB dense grids)\n",
+             __func__,
+             pe_nel,
+             2.0f * static_cast<float>(dense_cache_count * sizeof(float)) / 1024.0f);
+    return true;
+}
+
+static void sam3_use_model_prompt_pe_cache(sam3_state& state, const sam3_model& model) {
+    sam3_clear_prompt_backend_cache(state);
+    state.pe_gauss_cache = model.prompt_pe_gauss_cache;
+    for (int i = 0; i < 4; ++i) {
+        std::copy_n(model.prompt_point_emb_cache[static_cast<size_t>(i)].data(),
+                    256,
+                    state.point_emb_cache[i]);
+    }
+    std::copy_n(model.prompt_not_a_point_cache.data(), 256, state.not_a_point_cache);
+    std::copy_n(model.prompt_no_mask_emb_cache.data(), 256, state.no_mask_emb_cache);
+    state.dense_pe_tensor = model.prompt_dense_pe_tensor;
+    state.dense_nomask_tensor = model.prompt_dense_nomask_tensor;
+    state.not_a_point_tensor = model.prompt_not_a_point_tensor;
+    if (state.dense_pe_tensor == nullptr || state.dense_nomask_tensor == nullptr) {
+        state.dense_pe_cache = model.prompt_dense_pe_cache;
+        state.dense_nomask_cache = model.prompt_dense_nomask_cache;
+    } else {
+        state.dense_pe_cache.clear();
+        state.dense_nomask_cache.clear();
+    }
+    state.pe_cache_valid = true;
+}
+
+static void sam3_populate_pe_cache(sam3_state& state, const sam3_model& model) {
     const int D = model.hparams.sam_embed_dim;  // 256
     const int H = sam3_eff_feat_size(state, model.hparams);
+    if (state.pe_cache_valid && state.dense_pe_tensor != nullptr &&
+        state.dense_pe_tensor->ne[0] == D && state.dense_pe_tensor->ne[1] == H &&
+        state.dense_pe_tensor->ne[2] == H) {
+        return;
+    }
+    if (sam3_model_prompt_pe_cache_enabled() && sam3_ensure_model_prompt_pe_cache(model, D, H)) {
+        sam3_use_model_prompt_pe_cache(state, model);
+        return;
+    }
+    sam3_clear_prompt_backend_cache(state);
+
     const int num_pos_feats = D / 2;       // 128
     const int pe_nel = 2 * num_pos_feats;  // 256
     const auto& pe = model.sam_pe;
@@ -13250,6 +19081,33 @@ static sam3_pe_result sam3_build_sam_pe(struct ggml_context* ctx,
     };
 }
 
+static ggml_tensor* sam31_build_mask_dense_embedding_graph(struct ggml_context* ctx,
+                                                           const sam3_sam_prompt_enc& pe,
+                                                           ggml_tensor* mask_prompt) {
+    auto add_bias = [&](ggml_tensor* conv_out, ggml_tensor* bias) -> ggml_tensor* {
+        auto* b3d = ggml_reshape_3d(ctx, bias, 1, 1, bias->ne[0]);
+        return ggml_add(ctx, conv_out, ggml_repeat(ctx, b3d, conv_out));
+    };
+
+    auto* ds = mask_prompt;
+    for (int stage = 0; stage < 2; ++stage) {
+        const int out_ch = static_cast<int>(pe.mask_ds_conv_w[stage]->ne[3]);
+        ds = ggml_conv_2d(ctx, pe.mask_ds_conv_w[stage], ds, 2, 2, 0, 0, 1, 1);
+        ds = add_bias(ds, pe.mask_ds_conv_b[stage]);
+        ds = ggml_cont(ctx, ggml_permute(ctx, ds, 1, 2, 0, 3));
+        ds = sam3_layer_norm_2d(ctx, ds, pe.mask_ds_norm_w[stage], pe.mask_ds_norm_b[stage]);
+        ds = ggml_gelu_erf(ctx, ds);
+        ds = ggml_cont(ctx, ggml_permute(ctx, ds, 2, 0, 1, 3));
+        GGML_ASSERT(ds->ne[2] == out_ch);
+    }
+
+    ds = ggml_conv_2d(ctx, pe.mask_ds_conv_w[2], ds, 1, 1, 0, 0, 1, 1);
+    ds = add_bias(ds, pe.mask_ds_conv_b[2]);
+    ds = ggml_cont(ctx, ggml_permute(ctx, ds, 1, 2, 0, 3));
+    ggml_set_name(ds, "sam31_interactive_dense_mask_emb");
+    return ds;
+}
+
 /*****************************************************************************
 ** SAM mask decoder — graph building (Phase 6, Step 6.2)
 *****************************************************************************/
@@ -13263,18 +19121,46 @@ static void sam3_twoway_block_forward(
     struct ggml_tensor* key_pe,    // [D, N_kv, B]
     const sam3_twoway_block& blk,
     int n_heads,
-    bool skip_first_layer_pe) {
+    bool skip_first_layer_pe,
+    int debug_block_index = -1) {
+    auto snapshot = [&](std::string_view suffix, ggml_tensor* tensor) {
+        if (debug_block_index < 0) {
+            return;
+        }
+        auto* out = ggml_cont(ctx, tensor);
+        sam3_set_name(out, std::format("sam31_mux_block{}_{}", debug_block_index, suffix));
+        ggml_set_output(out);
+    };
+
     // 1. Self-attention on queries
+    const auto self_attn_prefix =
+        debug_block_index >= 0 ? std::format("sam31_mux_block{}_self_attn", debug_block_index)
+                               : std::string{};
     if (skip_first_layer_pe) {
         // Python: queries = self.self_attn(q=queries, k=queries, v=queries)
         // No residual connection when skipping first layer PE
-        queries = sam3_sam_attention(ctx, queries, queries, queries, blk.self_attn, n_heads);
+        queries = sam3_sam_attention(ctx,
+                                     queries,
+                                     queries,
+                                     queries,
+                                     blk.self_attn,
+                                     n_heads,
+                                     self_attn_prefix,
+                                     /*expose_debug_outputs=*/false);
     } else {
         auto* q = ggml_add(ctx, queries, query_pe);
-        auto* attn_out = sam3_sam_attention(ctx, q, q, queries, blk.self_attn, n_heads);
+        auto* attn_out = sam3_sam_attention(ctx,
+                                            q,
+                                            q,
+                                            queries,
+                                            blk.self_attn,
+                                            n_heads,
+                                            self_attn_prefix,
+                                            /*expose_debug_outputs=*/false);
         queries = ggml_add(ctx, queries, attn_out);
     }
     queries = sam3_layer_norm(ctx, queries, blk.norm1_w, blk.norm1_b);
+    snapshot("after_sa", queries);
     if (skip_first_layer_pe) {
         ggml_set_name(queries, "dbg_twoway_skip_sa_norm");
         ggml_set_output(queries);
@@ -13284,10 +19170,22 @@ static void sam3_twoway_block_forward(
     {
         auto* q = ggml_add(ctx, queries, query_pe);
         auto* k = ggml_add(ctx, keys, key_pe);
-        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, blk.ca_tok2img, n_heads);
+        const auto debug_prefix =
+            debug_block_index >= 0
+                ? std::format("sam31_mux_block{}_tok2img_attn", debug_block_index)
+                : std::string{};
+        auto* attn_out = sam3_sam_attention(ctx,
+                                            q,
+                                            k,
+                                            keys,
+                                            blk.ca_tok2img,
+                                            n_heads,
+                                            debug_prefix,
+                                            /*expose_debug_outputs=*/false);
         queries = ggml_add(ctx, queries, attn_out);
         queries = sam3_layer_norm(ctx, queries, blk.norm2_w, blk.norm2_b);
     }
+    snapshot("after_token_to_image", queries);
     if (skip_first_layer_pe) {
         ggml_set_name(queries, "dbg_twoway_skip_ca_tok2img");
         ggml_set_output(queries);
@@ -13303,6 +19201,7 @@ static void sam3_twoway_block_forward(
         queries = ggml_add(ctx, queries, mlp);
         queries = sam3_layer_norm(ctx, queries, blk.norm3_w, blk.norm3_b);
     }
+    snapshot("after_mlp", queries);
     if (skip_first_layer_pe) {
         ggml_set_name(queries, "dbg_twoway_skip_mlp");
         ggml_set_output(queries);
@@ -13312,11 +19211,17 @@ static void sam3_twoway_block_forward(
     {
         auto* q = ggml_add(ctx, queries, query_pe);
         auto* k = ggml_add(ctx, keys, key_pe);
+        const auto debug_prefix =
+            debug_block_index >= 0
+                ? std::format("sam31_mux_block{}_img2tok_attn", debug_block_index)
+                : std::string{};
         // Note: q and k are swapped — image (k) attends to tokens (q)
-        auto* attn_out = sam3_sam_attention(ctx, k, q, queries, blk.ca_img2tok, n_heads);
+        auto* attn_out =
+            sam3_sam_attention(ctx, k, q, queries, blk.ca_img2tok, n_heads, debug_prefix);
         keys = ggml_add(ctx, keys, attn_out);
         keys = sam3_layer_norm(ctx, keys, blk.norm4_w, blk.norm4_b);
     }
+    snapshot("after_image_to_token", keys);
     if (skip_first_layer_pe) {
         ggml_set_name(keys, "dbg_twoway_skip_img2tok");
         ggml_set_output(keys);
@@ -13367,6 +19272,55 @@ struct sam31_mux_dec_result {
     struct ggml_tensor* mask_tokens;  // [D, 48, B]
 };
 
+[[nodiscard]] static bool sam3_should_use_sam_dec_1x1_mulmat(ggml_backend_t backend) {
+    if (sam3_getenv("SAM3_DISABLE_SAM_DEC_1X1_MULMAT").has_value()) {
+        return false;
+    }
+    if (sam3_getenv("SAM3_ENABLE_SAM_DEC_1X1_MULMAT").has_value()) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    return ggml_backend_is_cuda(backend);
+#else
+    GGML_UNUSED(backend);
+    return false;
+#endif
+}
+
+[[nodiscard]] static bool sam3_should_alias_prop_inputs(ggml_backend_t backend,
+                                                        std::string_view enable_env,
+                                                        std::string_view disable_env) {
+    if (sam3_getenv(disable_env).has_value()) {
+        return false;
+    }
+    if (sam3_getenv(enable_env).has_value()) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    return ggml_backend_is_cuda(backend);
+#else
+    GGML_UNUSED(backend);
+    return false;
+#endif
+}
+
+[[nodiscard]] static ggml_tensor* sam3_sam_dec_1x1_project_whcb(struct ggml_context* ctx,
+                                                                ggml_tensor* feat_cwhb,
+                                                                ggml_tensor* weight,
+                                                                ggml_tensor* bias) {
+    const int64_t channels_in = feat_cwhb->ne[0];
+    const int64_t width = feat_cwhb->ne[1];
+    const int64_t height = feat_cwhb->ne[2];
+    const int64_t channels_out = weight->ne[3];
+
+    auto* input_2d = ggml_reshape_2d(ctx, feat_cwhb, channels_in, width * height);
+    auto* weight_2d = ggml_reshape_2d(ctx, weight, channels_in, channels_out);
+    auto* projected = ggml_mul_mat(ctx, weight_2d, input_2d);
+    projected = ggml_add(ctx, projected, bias);
+    projected = ggml_reshape_4d(ctx, projected, channels_out, width, height, 1);
+    return ggml_cont(ctx, ggml_permute(ctx, projected, 2, 0, 1, 3));
+}
+
 static sam3_dec_result sam3_build_sam_dec_graph(
     struct ggml_context* ctx,
     const sam3_model& model,
@@ -13376,13 +19330,17 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     struct ggml_tensor* dense_emb,    // [D, H, H, 1]
     struct ggml_tensor* feat_s0,      // [D, H*4, H*4, 1] high-res
     struct ggml_tensor* feat_s1,      // [D, H*2, H*2, 1] mid-res
-    int eff_feat_size = 0) {
-    const auto& dec = model.sam_dec;
+    int eff_feat_size = 0,
+    const sam3_sam_mask_dec* decoder_override = nullptr,
+    int decoder_depth_override = -1) {
+    const auto& dec = decoder_override ? *decoder_override : model.sam_dec;
     const auto& hp = model.hparams;
     const int D = hp.sam_embed_dim;  // 256
     const int H = (eff_feat_size > 0) ? eff_feat_size : hp.feat_size();
     const int n_heads = 8;                               // SAM uses 8 heads
     const int num_mask_tokens = hp.sam_n_multimask + 1;  // 4
+    const int decoder_depth =
+        decoder_depth_override > 0 ? decoder_depth_override : hp.sam_dec_depth;
 
     // ── Concatenate output tokens ────────────────────────────────────────
     // When pred_obj_scores=True:  [obj_score(1,D), iou(1,D), masks(4,D)] = 6 tokens
@@ -13411,7 +19369,7 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     auto* query_pe = tokens;  // query PE = initial point embedding
     auto* key_pe = pos_src;
 
-    for (int i = 0; i < hp.sam_dec_depth; ++i) {
+    for (int i = 0; i < decoder_depth; ++i) {
         sam3_twoway_block_forward(ctx,
                                   queries,
                                   keys,
@@ -13487,9 +19445,16 @@ static sam3_dec_result sam3_build_sam_dec_graph(
         ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up1_w), src_img, 2);
     up1 = ggml_add(ctx, up1, ggml_reshape_4d(ctx, dec.up1_b, 1, 1, ggml_nelements(dec.up1_b), 1));
 
-    auto* fs1 = ggml_cont(ctx, ggml_permute(ctx, feat_s1, 2, 0, 1, 3));
-    auto* hs1 = ggml_conv_2d_sk_p0(ctx, dec.conv_s1_w, fs1);  // [W, H, 64, B]
-    hs1 = ggml_add(ctx, hs1, ggml_reshape_4d(ctx, dec.conv_s1_b, 1, 1, 64, 1));
+    const bool use_1x1_mulmat = sam3_should_use_sam_dec_1x1_mulmat(model.backend);
+
+    auto* hs1 = [&] {
+        if (use_1x1_mulmat) {
+            return sam3_sam_dec_1x1_project_whcb(ctx, feat_s1, dec.conv_s1_w, dec.conv_s1_b);
+        }
+        auto* fs1 = ggml_cont(ctx, ggml_permute(ctx, feat_s1, 2, 0, 1, 3));
+        auto* out = ggml_conv_2d_sk_p0(ctx, dec.conv_s1_w, fs1);  // [W, H, 64, B]
+        return ggml_add(ctx, out, ggml_reshape_4d(ctx, dec.conv_s1_b, 1, 1, 64, 1));
+    }();
     ggml_set_name(hs1, "sam_dec_feat_s1_proj");
 
     // Python: act1(ln1(dc1(src) + feat_s1)) — add before LayerNorm
@@ -13506,10 +19471,15 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     auto* up2 = ggml_conv_transpose_2d_p0(ctx, sam3_conv_transpose_weight(ctx, dec.up2_w), up1, 2);
     up2 = ggml_add(ctx, up2, ggml_reshape_4d(ctx, dec.up2_b, 1, 1, ggml_nelements(dec.up2_b), 1));
 
-    // conv_s0: 1x1 conv on feat_s0 (256→32). feat_s0 is [C, W, H, B] — permute for conv.
-    auto* fs0 = ggml_cont(ctx, ggml_permute(ctx, feat_s0, 2, 0, 1, 3));  // [W, H, C, B]
-    auto* hs0 = ggml_conv_2d_sk_p0(ctx, dec.conv_s0_w, fs0);             // [W, H, 32, B]
-    hs0 = ggml_add(ctx, hs0, ggml_reshape_4d(ctx, dec.conv_s0_b, 1, 1, 32, 1));
+    // conv_s0: 1x1 conv on feat_s0 (256->32). feat_s0 is [C, W, H, B].
+    auto* hs0 = [&] {
+        if (use_1x1_mulmat) {
+            return sam3_sam_dec_1x1_project_whcb(ctx, feat_s0, dec.conv_s0_w, dec.conv_s0_b);
+        }
+        auto* fs0 = ggml_cont(ctx, ggml_permute(ctx, feat_s0, 2, 0, 1, 3));  // [W, H, C, B]
+        auto* out = ggml_conv_2d_sk_p0(ctx, dec.conv_s0_w, fs0);             // [W, H, 32, B]
+        return ggml_add(ctx, out, ggml_reshape_4d(ctx, dec.conv_s0_b, 1, 1, 32, 1));
+    }();
     ggml_set_name(hs0, "sam_dec_feat_s0_proj");
 
     // Python: act2(dc2(upscaled_embedding) + feat_s0) — no LayerNorm here
@@ -13597,6 +19567,498 @@ static sam3_dec_result sam3_build_sam_dec_graph(
     };
 }
 
+static std::vector<float> sam31_compute_dense_pe_cpu(ggml_tensor* pe_gaussian,
+                                                     int embed_dim,
+                                                     int feat_size) {
+    const int D = embed_dim;
+    const int H = feat_size;
+    const int num_pos_feats = D / 2;
+    std::vector<float> pe_gauss(static_cast<size_t>(2 * num_pos_feats));
+    sam3_read_f32(pe_gaussian, pe_gauss.data(), static_cast<int64_t>(pe_gauss.size()));
+
+    std::vector<float> dense(sam3_count_mul(D, H, H));
+    for (int row = 0; row < H; ++row) {
+        for (int col = 0; col < H; ++col) {
+            const float x_norm = (static_cast<float>(col) + 0.5f) / static_cast<float>(H);
+            const float y_norm = (static_cast<float>(row) + 0.5f) / static_cast<float>(H);
+            std::array<float, 256> pe_vec{};
+            sam3_pe_encode_coord(pe_vec.data(), x_norm, y_norm, pe_gauss.data(), num_pos_feats);
+            for (int d = 0; d < D; ++d) {
+                dense[static_cast<size_t>(d) + sam3_count_mul(col, D) + sam3_count_mul(row, D, H)] =
+                    pe_vec[static_cast<size_t>(d)];
+            }
+        }
+    }
+    return dense;
+}
+
+static std::vector<float> sam31_compute_dense_pe_cpu(const sam3_sam_prompt_enc& pe,
+                                                     int embed_dim,
+                                                     int feat_size) {
+    if (pe.pe_gaussian == nullptr) {
+        return {};
+    }
+    return sam31_compute_dense_pe_cpu(pe.pe_gaussian, embed_dim, feat_size);
+}
+
+static bool sam31_prop_dense_pe_cache_matches(const sam3_model& model, int D, int H) {
+    return model.sam31_prop_pe_cache_valid && model.sam31_prop_pe_cache_d == D &&
+           model.sam31_prop_pe_cache_h == H && model.sam31_prop_dense_pe_tensor != nullptr;
+}
+
+static bool sam31_ensure_prop_dense_pe_cache(const sam3_model& model, int D, int H) {
+    if (sam31_prop_dense_pe_cache_matches(model, D, H)) {
+        return true;
+    }
+    if (model.sam31_prop_pe_cache_valid &&
+        (model.sam31_prop_pe_cache_d != D || model.sam31_prop_pe_cache_h != H)) {
+        model.sam31_prop_pe_buffer.reset();
+        model.sam31_prop_pe_ctx.reset();
+        model.sam31_prop_dense_pe_tensor = nullptr;
+        model.sam31_prop_dense_pe_cache.clear();
+        model.sam31_prop_pe_cache_valid = false;
+    }
+    if (model.sam31_propagation_pe_gaussian == nullptr) {
+        std::println(
+            stderr, "{}: missing SAM3.1 propagation image_pe_layer gaussian tensor", __func__);
+        return false;
+    }
+
+    model.sam31_prop_dense_pe_cache =
+        sam31_compute_dense_pe_cpu(model.sam31_propagation_pe_gaussian, D, H);
+    if (model.sam31_prop_dense_pe_cache.empty()) {
+        return false;
+    }
+
+    ggml_init_params params = {
+        .mem_size = ggml_tensor_overhead() * 2,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    model.sam31_prop_pe_ctx = make_ggml_context(params);
+    if (!model.sam31_prop_pe_ctx) {
+        return false;
+    }
+    model.sam31_prop_dense_pe_tensor =
+        ggml_new_tensor_4d(model.sam31_prop_pe_ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+    ggml_set_name(model.sam31_prop_dense_pe_tensor, "sam31_prop_dense_pe_cache");
+    model.sam31_prop_pe_buffer = GgmlBackendBufferHandle{
+        ggml_backend_alloc_ctx_tensors(model.sam31_prop_pe_ctx.get(), model.backend)};
+    if (!model.sam31_prop_pe_buffer) {
+        model.sam31_prop_dense_pe_tensor = nullptr;
+        model.sam31_prop_pe_ctx.reset();
+        model.sam31_prop_dense_pe_cache.clear();
+        return false;
+    }
+    ggml_backend_tensor_set(model.sam31_prop_dense_pe_tensor,
+                            model.sam31_prop_dense_pe_cache.data(),
+                            0,
+                            model.sam31_prop_dense_pe_cache.size() * sizeof(float));
+    model.sam31_prop_pe_cache_d = D;
+    model.sam31_prop_pe_cache_h = H;
+    model.sam31_prop_pe_cache_valid = true;
+    return true;
+}
+
+static std::span<const float> sam31_prepare_interactive_mask_prompt(
+    const sam3_model& model,
+    const sam3_detection& det,
+    int image_size,
+    int mask_prompt_size,
+    int n_threads,
+    sam31_interactive_obj_ptr_graph_cache& cache) {
+    if (det.mask.width <= 0 || det.mask.height <= 0 || det.mask.data.empty()) {
+        return {};
+    }
+    constexpr int kernel = 4;
+    constexpr int stride = 4;
+    const int conv_size = ((image_size - kernel) / stride) + 1;
+    if (!cache.mask_prompt_weights_valid) {
+        sam3_read_f32(model.sam31_interactive_mask_downsample_w,
+                      cache.mask_prompt_downsample_w.data(),
+                      static_cast<int64_t>(cache.mask_prompt_downsample_w.size()));
+        sam3_read_f32(
+            model.sam31_interactive_mask_downsample_b, &cache.mask_prompt_downsample_b, 1);
+        cache.mask_prompt_weights_valid = true;
+    }
+
+    sam3_prepare_bilinear_axis_map(cache.mask_to_image_x, det.mask.width, image_size);
+    sam3_prepare_bilinear_axis_map(cache.mask_to_image_y, det.mask.height, image_size);
+    sam3_prepare_bilinear_axis_map(cache.conv_to_prompt_x, conv_size, mask_prompt_size);
+    sam3_prepare_bilinear_axis_map(cache.conv_to_prompt_y, conv_size, mask_prompt_size);
+    sam3_bilinear_interpolate_mask_cached(
+        det.mask, cache.mask_to_image_x, cache.mask_to_image_y, cache.mask_prompt_image, n_threads);
+
+    const auto* w = cache.mask_prompt_downsample_w.data();
+    const float b = cache.mask_prompt_downsample_b;
+    cache.mask_prompt_conv.resize(sam3_count_mul(conv_size, conv_size));
+    sam3_parallel_rows(conv_size, n_threads, [&](int y_begin, int y_end) {
+        for (int oy = y_begin; oy < y_end; ++oy) {
+            for (int ox = 0; ox < conv_size; ++ox) {
+                float sum = b;
+                for (int ky = 0; ky < kernel; ++ky) {
+                    for (int kx = 0; kx < kernel; ++kx) {
+                        const int ix = (ox * stride) + kx;
+                        const int iy = (oy * stride) + ky;
+                        sum += w[static_cast<size_t>(kx) + sam3_count_mul(ky, kernel)] *
+                               cache.mask_prompt_image[sam3_count_mul(iy, image_size) +
+                                                       static_cast<size_t>(ix)];
+                    }
+                }
+                cache.mask_prompt_conv[sam3_count_mul(oy, conv_size) + static_cast<size_t>(ox)] =
+                    sum;
+            }
+        }
+    });
+
+    sam3_bilinear_interpolate_cached(cache.mask_prompt_conv.data(),
+                                     conv_size,
+                                     cache.conv_to_prompt_x,
+                                     cache.conv_to_prompt_y,
+                                     cache.mask_prompt_cpu,
+                                     n_threads);
+    return std::span<const float>{cache.mask_prompt_cpu};
+}
+
+static std::vector<float> sam31_prepare_interactive_mask_prompt(const sam3_model& model,
+                                                                const sam3_detection& det,
+                                                                int image_size,
+                                                                int mask_prompt_size) {
+    sam31_interactive_obj_ptr_graph_cache cache;
+    const auto prompt =
+        sam31_prepare_interactive_mask_prompt(model, det, image_size, mask_prompt_size, 1, cache);
+    return std::vector<float>{prompt.begin(), prompt.end()};
+}
+
+static bool sam31_stage_tensor_to_f32_input(ggml_backend_t backend,
+                                            ggml_tensor* src,
+                                            ggml_tensor* dst) {
+    if (!src || !dst) {
+        std::println(stderr,
+                     "{}: null tensor src={} dst={}",
+                     __func__,
+                     static_cast<void*>(src),
+                     static_cast<void*>(dst));
+        return false;
+    }
+    const int64_t src_numel = ggml_nelements(src);
+    const int64_t dst_numel = ggml_nelements(dst);
+    if (src_numel != dst_numel || dst->type != GGML_TYPE_F32) {
+        std::println(stderr,
+                     "{}: incompatible tensor copy src={} type={} numel={} dst={} type={} numel={}",
+                     __func__,
+                     ggml_get_name(src),
+                     ggml_type_name(src->type),
+                     src_numel,
+                     ggml_get_name(dst),
+                     ggml_type_name(dst->type),
+                     dst_numel);
+        return false;
+    }
+
+    if (src->type == GGML_TYPE_F32) {
+        sam3_backend_tensor_copy_async(backend, src, dst);
+        return true;
+    }
+
+    std::vector<float> data(static_cast<size_t>(dst_numel));
+    if (src->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(static_cast<size_t>(src_numel));
+        ggml_backend_tensor_get(src, tmp.data(), 0, tmp.size() * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(tmp.data(), data.data(), static_cast<int64_t>(tmp.size()));
+    } else if (src->type == GGML_TYPE_BF16) {
+        std::vector<ggml_bf16_t> tmp(static_cast<size_t>(src_numel));
+        ggml_backend_tensor_get(src, tmp.data(), 0, tmp.size() * sizeof(ggml_bf16_t));
+        ggml_bf16_to_fp32_row(tmp.data(), data.data(), static_cast<int64_t>(tmp.size()));
+    } else {
+        std::println(stderr,
+                     "{}: unsupported source tensor type {} for {}",
+                     __func__,
+                     ggml_type_name(src->type),
+                     ggml_get_name(src));
+        return false;
+    }
+    ggml_backend_tensor_set(dst, data.data(), 0, data.size() * sizeof(float));
+    return true;
+}
+
+static bool sam31_stage_tensor_to_f32_input(ggml_tensor* src, ggml_tensor* dst) {
+    if (!src || !dst) {
+        std::println(stderr,
+                     "{}: null tensor src={} dst={}",
+                     __func__,
+                     static_cast<void*>(src),
+                     static_cast<void*>(dst));
+        return false;
+    }
+    const int64_t src_numel = ggml_nelements(src);
+    const int64_t dst_numel = ggml_nelements(dst);
+    if (src_numel != dst_numel || dst->type != GGML_TYPE_F32) {
+        std::println(stderr,
+                     "{}: incompatible tensor copy src={} type={} numel={} dst={} type={} numel={}",
+                     __func__,
+                     ggml_get_name(src),
+                     ggml_type_name(src->type),
+                     src_numel,
+                     ggml_get_name(dst),
+                     ggml_type_name(dst->type),
+                     dst_numel);
+        return false;
+    }
+
+    std::vector<float> data(static_cast<size_t>(dst_numel));
+    if (src->type == GGML_TYPE_F32) {
+        ggml_backend_tensor_get(src, data.data(), 0, data.size() * sizeof(float));
+    } else if (src->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> tmp(static_cast<size_t>(src_numel));
+        ggml_backend_tensor_get(src, tmp.data(), 0, tmp.size() * sizeof(ggml_fp16_t));
+        ggml_fp16_to_fp32_row(tmp.data(), data.data(), static_cast<int64_t>(tmp.size()));
+    } else if (src->type == GGML_TYPE_BF16) {
+        std::vector<ggml_bf16_t> tmp(static_cast<size_t>(src_numel));
+        ggml_backend_tensor_get(src, tmp.data(), 0, tmp.size() * sizeof(ggml_bf16_t));
+        ggml_bf16_to_fp32_row(tmp.data(), data.data(), static_cast<int64_t>(tmp.size()));
+    } else {
+        std::println(stderr,
+                     "{}: unsupported source tensor type {} for {}",
+                     __func__,
+                     ggml_type_name(src->type),
+                     ggml_get_name(src));
+        return false;
+    }
+    ggml_backend_tensor_set(dst, data.data(), 0, data.size() * sizeof(float));
+    return true;
+}
+
+static bool sam31_compute_interactive_mask_obj_ptr(sam3_state& state,
+                                                   const sam3_model& model,
+                                                   const sam3_detection& det,
+                                                   std::vector<float>& out_ptr) {
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    const int H = sam3_eff_feat_size(state, hp);
+    const int H4 = H * 4;
+    const int H2 = H * 2;
+    const int image_size = sam3_eff_img_size(state, hp);
+    if (!state.neck_det[0] || !state.neck_det[1] || !state.neck_det[2]) {
+        return false;
+    }
+    if (!model.sam31_interactivity_no_mem_embed || !model.sam31_interactive_mask_downsample_w ||
+        !model.sam31_interactive_mask_downsample_b) {
+        return false;
+    }
+
+    auto& cache = model.sam31_interactive_obj_ptr_cache;
+    if (!cache.matches(D, H, image_size, model.backend)) {
+        SAM3_PROFILE_CPU_START(sam31_interactive_graph_cache_build);
+        sam31_interactive_obj_ptr_graph_cache next;
+        next.D = D;
+        next.H = H;
+        next.image_size = image_size;
+        next.backend = model.backend;
+
+        const size_t buf_size = (ggml_tensor_overhead() * 32768) + (ggml_graph_overhead() * 2);
+        ggml_init_params params = {
+            .mem_size = buf_size,
+            .mem_buffer = nullptr,
+            .no_alloc = true,
+        };
+        next.ctx = make_ggml_context(params);
+        if (!next.ctx) {
+            return false;
+        }
+
+        next.image_raw = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(next.image_raw, "sam31_interactive_image_raw");
+        ggml_set_input(next.image_raw);
+        auto* no_mem =
+            ggml_reshape_4d(next.ctx.get(), model.sam31_interactivity_no_mem_embed, D, 1, 1, 1);
+        auto* image_feats = ggml_add(next.ctx.get(), next.image_raw, no_mem);
+        ggml_set_name(image_feats, "sam31_interactive_image_feats");
+
+        next.feat_s0 = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H4, H4, 1);
+        ggml_set_name(next.feat_s0, "sam31_interactive_feat_s0");
+        ggml_set_input(next.feat_s0);
+        next.feat_s1 = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H2, H2, 1);
+        ggml_set_name(next.feat_s1, "sam31_interactive_feat_s1");
+        ggml_set_input(next.feat_s1);
+
+        next.sparse = ggml_new_tensor_3d(next.ctx.get(), GGML_TYPE_F32, D, 1, 1);
+        ggml_set_name(next.sparse, "sam31_interactive_sparse");
+        ggml_set_input(next.sparse);
+        next.image_pe = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(next.image_pe, "sam31_interactive_image_pe");
+        ggml_set_input(next.image_pe);
+        next.mask_prompt = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, H4, H4, 1, 1);
+        ggml_set_name(next.mask_prompt, "sam31_interactive_mask_prompt");
+        ggml_set_input(next.mask_prompt);
+        auto* dense = sam31_build_mask_dense_embedding_graph(
+            next.ctx.get(), model.sam31_interactive_sam_pe, next.mask_prompt);
+
+        auto dec = sam3_build_sam_dec_graph(next.ctx.get(),
+                                            model,
+                                            image_feats,
+                                            next.image_pe,
+                                            next.sparse,
+                                            dense,
+                                            next.feat_s0,
+                                            next.feat_s1,
+                                            H,
+                                            &model.sam31_interactive_sam_dec,
+                                            2);
+        ggml_set_output(dec.sam_token);
+        ggml_set_output(dec.obj_score);
+        next.sam_token = dec.sam_token;
+        next.obj_score = dec.obj_score;
+
+        next.graph = ggml_new_graph_custom(next.ctx.get(), 32768, false);
+        ggml_build_forward_expand(next.graph, dec.sam_token);
+        ggml_build_forward_expand(next.graph, dec.obj_score);
+
+        next.buffer =
+            GgmlBackendBufferHandle{ggml_backend_alloc_ctx_tensors(next.ctx.get(), model.backend)};
+        if (!next.buffer) {
+            return false;
+        }
+        SAM3_PROFILE_CPU_END(sam31_interactive_graph_cache_build);
+
+        SAM3_PROFILE_CPU_START(sam31_interactive_const_upload);
+        std::vector<float> sparse_data(D);
+        sam3_read_f32(model.sam31_interactive_sam_pe.not_a_point_embed,
+                      sparse_data.data(),
+                      static_cast<int64_t>(sparse_data.size()));
+        auto dense_pe = sam31_compute_dense_pe_cpu(model.sam31_interactive_sam_pe, D, H);
+        ggml_backend_tensor_set(
+            next.sparse, sparse_data.data(), 0, sparse_data.size() * sizeof(float));
+        ggml_backend_tensor_set(next.image_pe, dense_pe.data(), 0, dense_pe.size() * sizeof(float));
+        SAM3_PROFILE_CPU_END(sam31_interactive_const_upload);
+        cache = std::move(next);
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_interactive_mask_prompt_prepare);
+    const auto mask_prompt_data =
+        sam31_prepare_interactive_mask_prompt(model, det, image_size, H4, state.n_threads, cache);
+    SAM3_PROFILE_CPU_END(sam31_interactive_mask_prompt_prepare);
+    if (mask_prompt_data.empty()) {
+        return false;
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_interactive_input_upload);
+    ggml_backend_tensor_set(
+        cache.mask_prompt, mask_prompt_data.data(), 0, mask_prompt_data.size() * sizeof(float));
+    if (!sam31_stage_tensor_to_f32_input(model.backend, state.neck_det[2], cache.image_raw) ||
+        !sam31_stage_tensor_to_f32_input(model.backend, state.neck_det[0], cache.feat_s0) ||
+        !sam31_stage_tensor_to_f32_input(model.backend, state.neck_det[1], cache.feat_s1)) {
+        SAM3_PROFILE_CPU_END(sam31_interactive_input_upload);
+        return false;
+    }
+    SAM3_PROFILE_CPU_END(sam31_interactive_input_upload);
+
+    SAM3_PROFILE_CPU_START(sam31_interactive_graph_compute_total);
+    if (!sam3_graph_compute(
+            model.backend, cache.graph, state.n_threads, "sam31_interactive_mask_head")) {
+        SAM3_PROFILE_CPU_END(sam31_interactive_graph_compute_total);
+        return false;
+    }
+    SAM3_PROFILE_CPU_END(sam31_interactive_graph_compute_total);
+
+    SAM3_PROFILE_CPU_START(sam31_interactive_output_read);
+    std::vector<float> sam_token(D);
+    ggml_backend_tensor_get(cache.sam_token, sam_token.data(), 0, sam_token.size() * sizeof(float));
+    float obj_logit = 0.0f;
+    ggml_backend_tensor_get(cache.obj_score, &obj_logit, 0, sizeof(float));
+    SAM3_PROFILE_CPU_END(sam31_interactive_output_read);
+    out_ptr.assign(static_cast<size_t>(D), 0.0f);
+    sam3_extract_obj_ptr_cpu(model, sam_token.data(), obj_logit, out_ptr.data(), true);
+    return true;
+}
+
+static ggml_tensor* sam31_build_warmup_projection(struct ggml_context* ctx,
+                                                  ggml_tensor* input,
+                                                  ggml_tensor* weight,
+                                                  ggml_tensor* bias) {
+    auto* out = ggml_mul_mat(ctx, weight, input);
+    return ggml_add(ctx, out, bias);
+}
+
+static bool sam31_warmup_interactive_mask_head(const sam3_model& model, int n_threads) {
+    if (!model.hparams.is_sam3_1() || sam3_getenv("SAM31_DISABLE_INTERACTIVE_WARMUP")) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    if (!ggml_backend_is_cuda(model.backend)) {
+        return true;
+    }
+#else
+    return true;
+#endif
+
+    if (model.sam31_interactive_warmup_done) {
+        return true;
+    }
+    std::lock_guard warmup_lock(model.sam31_interactive_warmup_mutex);
+    if (model.sam31_interactive_warmup_done) {
+        return true;
+    }
+
+    const auto& dec = model.sam31_interactive_sam_dec;
+    if (dec.twoway_blocks.empty()) {
+        model.sam31_interactive_warmup_done = true;
+        return true;
+    }
+    const auto& ca_tok2img = dec.twoway_blocks.front().ca_tok2img;
+    if (!ca_tok2img.q_w || !ca_tok2img.q_b || !dec.obj_head_w[0] || !dec.obj_head_b[0]) {
+        model.sam31_interactive_warmup_done = true;
+        return true;
+    }
+
+    const size_t buf_size = (ggml_tensor_overhead() * 128) + ggml_graph_overhead();
+    ggml_init_params params = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx = make_ggml_context(params);
+    if (!ctx) {
+        return false;
+    }
+
+    constexpr int warmup_tokens = 7;  // SAM3.1 interactive decoder: 6 output tokens + 1 prompt.
+    auto* token_input =
+        ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, ca_tok2img.q_w->ne[0], warmup_tokens, 1);
+    ggml_set_name(token_input, "sam31_interactive_warmup_tokens");
+    ggml_set_input(token_input);
+
+    auto* ca_q =
+        sam31_build_warmup_projection(ctx.get(), token_input, ca_tok2img.q_w, ca_tok2img.q_b);
+    ggml_set_name(ca_q, "sam31_interactive_warmup_ca_q");
+
+    auto* obj_input = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, dec.obj_head_w[0]->ne[0], 1, 1);
+    ggml_set_name(obj_input, "sam31_interactive_warmup_obj_input");
+    ggml_set_input(obj_input);
+    auto* obj = sam3_mlp_forward(ctx.get(), obj_input, dec.obj_head_w, dec.obj_head_b, 3);
+    ggml_set_name(obj, "sam31_interactive_warmup_obj");
+
+    auto* graph = ggml_new_graph_custom(ctx.get(), 128, false);
+    ggml_build_forward_expand(graph, ca_q);
+    ggml_build_forward_expand(graph, obj);
+
+    GgmlBackendBufferHandle graph_buffer{ggml_backend_alloc_ctx_tensors(ctx.get(), model.backend)};
+    if (!graph_buffer) {
+        return false;
+    }
+
+    const std::vector<float> token_data(static_cast<size_t>(ggml_nelements(token_input)), 0.0f);
+    const std::vector<float> obj_data(static_cast<size_t>(ggml_nelements(obj_input)), 0.0f);
+    ggml_backend_tensor_set(token_input, token_data.data(), 0, token_data.size() * sizeof(float));
+    ggml_backend_tensor_set(obj_input, obj_data.data(), 0, obj_data.size() * sizeof(float));
+
+    const bool ok = sam3_graph_compute(model.backend, graph, n_threads, "sam31_interactive_warmup");
+    if (ok) {
+        model.sam31_interactive_warmup_done = true;
+    }
+    return ok;
+}
+
 // SAM3.1 Object Multiplex propagation decoder graph.
 // Inputs use the official propagation contract:
 //   image_feats:                 [D, H, H, B]
@@ -13645,15 +20107,16 @@ static sam31_mux_dec_result sam31_build_mux_mask_dec_graph(
 
     auto* tokens = ggml_concat(ctx, attr_tokens, mask_tokens, 1);
     tokens = ggml_reshape_3d(ctx, tokens, D, output_token_count, B);
-    ggml_set_name(tokens, "sam31_mux_tokens_initial");
-    ggml_set_output(tokens);
+    auto* tokens_initial = ggml_cont(ctx, tokens);
+    ggml_set_name(tokens_initial, "sam31_mux_tokens_initial");
+    ggml_set_output(tokens_initial);
 
     auto* keys = ggml_reshape_3d(ctx, image_feats, D, sam3_dim_mul(H, H), B);
     auto* pos_src = ggml_reshape_3d(ctx, image_pe, D, sam3_dim_mul(H, H), 1);
     pos_src = ggml_repeat(ctx, pos_src, keys);
 
-    auto* queries = tokens;
-    auto* query_pe = tokens;
+    auto* queries = tokens_initial;
+    auto* query_pe = tokens_initial;
     auto* key_pe = pos_src;
     for (int i = 0; i < contract.twoway_depth; ++i) {
         sam3_twoway_block_forward(ctx,
@@ -13663,7 +20126,8 @@ static sam31_mux_dec_result sam31_build_mux_mask_dec_graph(
                                   key_pe,
                                   dec.twoway_blocks[static_cast<size_t>(i)],
                                   n_heads,
-                                  /*skip_first_layer_pe=*/(i == 0));
+                                  /*skip_first_layer_pe=*/(i == 0),
+                                  i);
         sam3_set_name(queries, std::format("sam31_mux_block{}_queries", i));
         ggml_set_output(queries);
         sam3_set_name(keys, std::format("sam31_mux_block{}_keys", i));
@@ -13673,11 +20137,29 @@ static sam31_mux_dec_result sam31_build_mux_mask_dec_graph(
     {
         auto* q = ggml_add(ctx, queries, query_pe);
         auto* k = ggml_add(ctx, keys, key_pe);
-        auto* attn_out = sam3_sam_attention(ctx, q, k, keys, dec.final_attn, n_heads);
+        auto* q_snapshot = ggml_cont(ctx, q);
+        ggml_set_name(q_snapshot, "sam31_mux_final_q");
+        ggml_set_output(q_snapshot);
+        auto* k_snapshot = ggml_cont(ctx, k);
+        ggml_set_name(k_snapshot, "sam31_mux_final_k");
+        ggml_set_output(k_snapshot);
+        auto* attn_out =
+            sam3_sam_attention(ctx, q, k, keys, dec.final_attn, n_heads, "sam31_mux_final_attn");
+        auto* attn_snapshot = ggml_cont(ctx, attn_out);
+        ggml_set_name(attn_snapshot, "sam31_mux_final_attn_out");
+        ggml_set_output(attn_snapshot);
         queries = ggml_add(ctx, queries, attn_out);
+        auto* pre_norm_snapshot = ggml_cont(ctx, queries);
+        ggml_set_name(pre_norm_snapshot, "sam31_mux_final_pre_norm");
+        ggml_set_output(pre_norm_snapshot);
         queries = sam3_layer_norm(ctx, queries, dec.final_norm_w, dec.final_norm_b);
-        ggml_set_name(queries, "sam31_mux_final_queries");
-        ggml_set_output(queries);
+        auto* queries_snapshot =
+            sam31_mux_direct_final_queries_enabled() && ggml_is_contiguous(queries)
+                ? queries
+                : ggml_cont(ctx, queries);
+        ggml_set_name(queries_snapshot, "sam31_mux_final_queries");
+        ggml_set_output(queries_snapshot);
+        queries = queries_snapshot;
     }
 
     auto* iou_token_out = ggml_view_3d(ctx,
@@ -13729,30 +20211,35 @@ static sam31_mux_dec_result sam31_build_mux_mask_dec_graph(
 
     const int H4 = H * 4;
     auto* up_flat = ggml_reshape_3d(ctx, up2, 32, sam3_dim_mul(H4, H4), B);
-    std::array<ggml_tensor*, contract.mask_token_count> mask_list = {};
-    for (int token = 0; token < mask_token_count; ++token) {
+    std::array<ggml_tensor*, contract.masks_per_object> mask_groups = {};
+    for (int mask_index = 0; mask_index < K; ++mask_index) {
         auto* tok = ggml_view_3d(ctx,
                                  mask_tokens_out,
                                  D,
-                                 1,
+                                 M,
                                  B,
-                                 mask_tokens_out->nb[1],
+                                 mask_tokens_out->nb[1] * static_cast<size_t>(K),
                                  mask_tokens_out->nb[2],
-                                 static_cast<size_t>(token) * mask_tokens_out->nb[1]);
+                                 static_cast<size_t>(mask_index) * mask_tokens_out->nb[1]);
         tok = ggml_cont(ctx, tok);
-        const int mask_index = token % K;
         auto* hyper = sam3_mlp_forward(ctx,
                                        tok,
                                        dec.hyper_w[static_cast<size_t>(mask_index)].data(),
                                        dec.hyper_b[static_cast<size_t>(mask_index)].data(),
                                        3);
-        mask_list[static_cast<size_t>(token)] = ggml_mul_mat(ctx, up_flat, hyper);
+        sam3_set_name(hyper, std::format("sam31_mux_hyper_{}", mask_index));
+        ggml_set_output(hyper);
+        auto* group = ggml_mul_mat(ctx, up_flat, hyper);
+        mask_groups[static_cast<size_t>(mask_index)] =
+            ggml_reshape_4d(ctx, group, sam3_dim_mul(H4, H4), 1, M, B);
     }
 
-    auto* masks = mask_list[0];
-    for (int token = 1; token < mask_token_count; ++token) {
-        masks = ggml_concat(ctx, masks, mask_list[static_cast<size_t>(token)], 1);
+    auto* masks_grouped = mask_groups[0];
+    for (int mask_index = 1; mask_index < K; ++mask_index) {
+        masks_grouped =
+            ggml_concat(ctx, masks_grouped, mask_groups[static_cast<size_t>(mask_index)], 1);
     }
+    auto* masks = ggml_reshape_3d(ctx, masks_grouped, sam3_dim_mul(H4, H4), mask_token_count, B);
     ggml_set_name(masks, "sam31_mux_masks");
     ggml_set_output(masks);
 
@@ -13956,15 +20443,18 @@ sam3_result sam3_segment_pvs(sam3_state& state,
             }
         }
 
-        // Dense PE grid and no-mask embedding — use backend caches when available.
-        if (state.dense_pe_tensor && state.dense_nomask_tensor) {
+        // Dense PE grid and optional mask/no-mask embedding.
+        if (state.dense_pe_tensor) {
             sam3_backend_tensor_copy_async(model.backend, state.dense_pe_tensor, pe_out.image_pe);
-            sam3_backend_tensor_copy_async(model.backend, state.dense_nomask_tensor, pe_out.dense);
         } else {
             ggml_backend_tensor_set(pe_out.image_pe,
                                     state.dense_pe_cache.data(),
                                     0,
                                     state.dense_pe_cache.size() * sizeof(float));
+        }
+        if (state.dense_nomask_tensor) {
+            sam3_backend_tensor_copy_async(model.backend, state.dense_nomask_tensor, pe_out.dense);
+        } else {
             ggml_backend_tensor_set(pe_out.dense,
                                     state.dense_nomask_cache.data(),
                                     0,
@@ -14225,6 +20715,23 @@ static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
         }
     }
 
+    constexpr int sam31_num_heads = 8;
+    const int head_d = D / sam31_num_heads;
+    const int half_head_d = head_d / 2;
+    std::vector<float> rope_head_raw(sam3_count_mul(N, head_d));
+    sam3_compute_axial_cis(rope_head_raw.data(), head_d, H, H, 10000.0f, 1.0f);
+    tracker.cached_axial_cis_head_reord.resize(sam3_count_mul(2, half_head_d, N));
+    for (int n = 0; n < N; ++n) {
+        for (int i = 0; i < half_head_d; ++i) {
+            tracker.cached_axial_cis_head_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, head_d)] =
+                rope_head_raw[sam3_count_mul(n, head_d) + sam3_count_mul(i, 2)];
+            tracker.cached_axial_cis_head_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                                                sam3_count_mul(n, head_d)] =
+                rope_head_raw[sam3_count_mul(n, head_d) + sam3_count_mul(i, 2) +
+                              static_cast<size_t>(1)];
+        }
+    }
+
     // EdgeTAM: compute 16x16 RoPE for cross-attention K (perceiver 2D latents)
     if (hp.has_perceiver) {
         const int K16 = 16;                                         // perceiver 2D grid size
@@ -14262,7 +20769,7 @@ static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
              "%s: tracker PE caches populated (%.1f KB)\n",
              __func__,
              (tracker.cached_sinpe_256.size() + tracker.cached_sinpe_64.size() +
-              tracker.cached_axial_cis_reord.size()) *
+              tracker.cached_axial_cis_reord.size() + tracker.cached_axial_cis_head_reord.size()) *
                  sizeof(float) / 1024.0f);
 }
 
@@ -14271,14 +20778,27 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
                                                   int eff_feat_size = 0) {
     const auto& hp = model.hparams;
     const int H = (eff_feat_size > 0) ? eff_feat_size : hp.feat_size();
+    const int N = static_cast<int>(sam3_count_mul(H, H));
+    const bool rope_k_backend_cache_enabled = sam3_prop_rope_k_backend_cache_enabled();
+    const int rope_k_tokens_per_slot =
+        hp.has_perceiver ? (hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d) : N;
+    const int rope_k_slots = std::max(1, hp.num_maskmem);
+
     if (tracker.pe_backend_ctx && tracker.pe_backend_buf && tracker.cached_src_pos_tensor &&
-        tracker.cached_rope_q_tensor && tracker.cached_pe_backend_feat_size == H) {
+        tracker.cached_rope_q_tensor && tracker.cached_rope_head_q_tensor &&
+        tracker.cached_pe_backend_feat_size == H &&
+        (!rope_k_backend_cache_enabled ||
+         (tracker.cached_rope_k_tensor &&
+          tracker.cached_rope_k_tokens_per_slot == rope_k_tokens_per_slot &&
+          tracker.cached_rope_k_slots == rope_k_slots))) {
         return;
     }
 
     const int D = hp.neck_dim;
-    const int N = static_cast<int>(sam3_count_mul(H, H));
     const int half_d = D / 2;
+    constexpr int sam31_num_heads = 8;
+    const int head_d = D / sam31_num_heads;
+    const int half_head_d = head_d / 2;
 
     sam3_ensure_tracker_pe_caches(tracker, hp, H);
 
@@ -14286,10 +20806,14 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     sam3_reset_context(tracker.pe_backend_ctx);
     tracker.cached_src_pos_tensor = nullptr;
     tracker.cached_rope_q_tensor = nullptr;
+    tracker.cached_rope_head_q_tensor = nullptr;
+    tracker.cached_rope_k_tensor = nullptr;
     tracker.cached_pe_backend_feat_size = 0;
+    tracker.cached_rope_k_tokens_per_slot = 0;
+    tracker.cached_rope_k_slots = 0;
 
     ggml_init_params params = {
-        .mem_size = ggml_tensor_overhead() * 8,
+        .mem_size = ggml_tensor_overhead() * 32,
         .mem_buffer = nullptr,
         .no_alloc = true,
     };
@@ -14303,12 +20827,54 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     tracker.cached_rope_q_tensor =
         ggml_new_tensor_3d(tracker.pe_backend_ctx, GGML_TYPE_F32, 2, half_d, N);
     ggml_set_name(tracker.cached_rope_q_tensor, "tracker_rope_q_cache");
+    tracker.cached_rope_head_q_tensor =
+        ggml_new_tensor_3d(tracker.pe_backend_ctx, GGML_TYPE_F32, 2, half_head_d, N);
+    ggml_set_name(tracker.cached_rope_head_q_tensor, "tracker_rope_head_q_cache");
+    if (rope_k_backend_cache_enabled) {
+        tracker.cached_rope_k_tensor = ggml_new_tensor_3d(tracker.pe_backend_ctx,
+                                                          GGML_TYPE_F32,
+                                                          2,
+                                                          half_d,
+                                                          rope_k_tokens_per_slot * rope_k_slots);
+        ggml_set_name(tracker.cached_rope_k_tensor, "tracker_rope_k_cache");
+    }
 
     tracker.pe_backend_buf = ggml_backend_alloc_ctx_tensors(tracker.pe_backend_ctx, model.backend);
     if (!tracker.pe_backend_buf) {
         tracker.cached_src_pos_tensor = nullptr;
         tracker.cached_rope_q_tensor = nullptr;
+        tracker.cached_rope_head_q_tensor = nullptr;
+        tracker.cached_rope_k_tensor = nullptr;
         return;
+    }
+
+    std::vector<float> rope_k_cache;
+    if (rope_k_backend_cache_enabled) {
+        rope_k_cache.resize(sam3_count_mul(2, half_d, rope_k_tokens_per_slot, rope_k_slots));
+        if (hp.has_perceiver) {
+            const int N_1d = hp.perceiver_n_latents_1d;
+            const int N_2d = hp.perceiver_n_latents_2d;
+            const auto& rope_k16 = tracker.cached_axial_cis_k16_reord;
+            for (int s = 0; s < rope_k_slots; ++s) {
+                float* dst = rope_k_cache.data() +
+                             static_cast<ptrdiff_t>(sam3_count_mul(s, D, rope_k_tokens_per_slot));
+                for (int n = 0; n < N_1d; ++n) {
+                    for (int i = 0; i < half_d; ++i) {
+                        dst[sam3_count_mul(i, 2) + sam3_count_mul(n, D)] = 1.0f;
+                        dst[static_cast<size_t>(1) + sam3_count_mul(i, 2) + sam3_count_mul(n, D)] =
+                            0.0f;
+                    }
+                }
+                float* dst_2d = dst + static_cast<ptrdiff_t>(sam3_count_mul(D, N_1d));
+                std::copy_n(rope_k16.data(), sam3_count_mul(D, N_2d), dst_2d);
+            }
+        } else {
+            for (int s = 0; s < rope_k_slots; ++s) {
+                std::copy_n(tracker.cached_axial_cis_reord.data(),
+                            sam3_count_mul(D, N),
+                            rope_k_cache.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, D, N)));
+            }
+        }
     }
 
     ggml_backend_tensor_set(tracker.cached_src_pos_tensor,
@@ -14319,7 +20885,1001 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
                             tracker.cached_axial_cis_reord.data(),
                             0,
                             tracker.cached_axial_cis_reord.size() * sizeof(float));
+    ggml_backend_tensor_set(tracker.cached_rope_head_q_tensor,
+                            tracker.cached_axial_cis_head_reord.data(),
+                            0,
+                            tracker.cached_axial_cis_head_reord.size() * sizeof(float));
+    if (rope_k_backend_cache_enabled && tracker.cached_rope_k_tensor != nullptr) {
+        ggml_backend_tensor_set(tracker.cached_rope_k_tensor,
+                                rope_k_cache.data(),
+                                0,
+                                rope_k_cache.size() * sizeof(float));
+    }
     tracker.cached_pe_backend_feat_size = H;
+    if (rope_k_backend_cache_enabled) {
+        tracker.cached_rope_k_tokens_per_slot = rope_k_tokens_per_slot;
+        tracker.cached_rope_k_slots = rope_k_slots;
+    }
+}
+
+static std::vector<float> sam31_extra_per_object_embeddings_cpu(const sam3_model& model) {
+    constexpr auto contract = sam3::sam31::propagation_mask_decoder;
+    const int D = model.hparams.neck_dim;
+    const int M = contract.multiplex_count;
+    std::vector<float> embeddings(sam3_count_mul(D, M), 0.0f);
+    if (!model.sam31_output_valid_embed || !model.sam31_output_invalid_embed) {
+        return embeddings;
+    }
+
+    std::vector<float> valid(sam3_count_mul(D, M));
+    std::vector<float> invalid(sam3_count_mul(D, M));
+    sam3_read_f32(model.sam31_output_valid_embed, valid.data(), static_cast<int64_t>(valid.size()));
+    sam3_read_f32(
+        model.sam31_output_invalid_embed, invalid.data(), static_cast<int64_t>(invalid.size()));
+    for (int slot = 0; slot < M; ++slot) {
+        const auto& src = (slot == 0) ? valid : invalid;
+        std::copy_n(src.data() + static_cast<ptrdiff_t>(sam3_count_mul(slot, D)),
+                    D,
+                    embeddings.data() + static_cast<ptrdiff_t>(sam3_count_mul(slot, D)));
+    }
+    return embeddings;
+}
+
+static bool sam31_add_temporal_pos_to_slot(const sam3_model& model,
+                                           std::span<float> pos,
+                                           int token_count,
+                                           int temporal_position) {
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    if (pos.size() != sam3_count_mul(D, token_count)) {
+        return false;
+    }
+    if (temporal_position < 0 || temporal_position >= hp.num_maskmem) {
+        return true;
+    }
+    sam3_ensure_prompt_pos_cpu_cache(model);
+    const int enc_idx = hp.num_maskmem - temporal_position - 1;
+    for (int n = 0; n < token_count; ++n) {
+        for (int d = 0; d < D; ++d) {
+            pos[static_cast<size_t>(d) + sam3_count_mul(n, D)] +=
+                model.mem_tpos_cpu[static_cast<size_t>(d) + sam3_count_mul(enc_idx, D)];
+        }
+    }
+    return true;
+}
+
+static int sam31_maskmem_tpos_v2(const sam3_model& model,
+                                 const sam3_tracker& tracker,
+                                 const sam3_memory_slot& slot,
+                                 int fallback_tpos) {
+    const int num_maskmem = model.hparams.num_maskmem;
+    if (num_maskmem <= 1) {
+        return 0;
+    }
+    const auto normalize = [num_maskmem](int tpos) {
+        return (tpos <= 0 || tpos >= num_maskmem) ? 0 : tpos;
+    };
+    if (slot.frame_index >= 0) {
+        return normalize(tracker.frame_index - slot.frame_index);
+    }
+    return normalize(fallback_tpos);
+}
+
+static sam3_prop_output sam31_propagate_single(
+    sam3_tracker& tracker,
+    sam3_state& state,
+    const sam3_model& model,
+    const std::vector<sam3_memory_slot>& mem_bank,
+    const std::vector<std::pair<int, struct ggml_tensor*>>& ptr_bank) {
+    sam3_increment_propagate_single_calls();
+    sam3_prop_output output = {};
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    const int H = sam3_eff_feat_size(state, hp);
+    const int N = static_cast<int>(sam3_count_mul(H, H));
+    constexpr auto contract = sam3::sam31::propagation_mask_decoder;
+    constexpr int M = contract.multiplex_count;
+    constexpr int K = contract.masks_per_object;
+    constexpr int num_heads = 8;
+    const int head_dim = D / num_heads;
+    const int half_head = head_dim / 2;
+
+    auto sel = sam3_select_memory_frames(mem_bank, hp.num_maskmem);
+    if (sel.empty() || !state.neck_trk[2] || !state.neck_trk[0] || !state.neck_trk[1]) {
+        return output;
+    }
+    if (state.neck_trk[2]->ne[0] != D || state.neck_trk[2]->ne[1] != H ||
+        state.neck_trk[2]->ne[2] != H || state.neck_trk[0]->ne[0] != 32 ||
+        state.neck_trk[1]->ne[0] != 64) {
+        std::println(stderr,
+                     "{}: SAM3.1 propagation requires current tracker features "
+                     "[D,H,H], projected s0[32,4H,4H], and projected s1[64,2H,2H]",
+                     __func__);
+        return output;
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_prop_prepare_caches);
+    const int64_t sam31_prop_prepare_caches_t0 = ggml_time_us();
+    sam3_ensure_tracker_pe_caches(tracker, hp, H);
+    sam3_ensure_tracker_pe_backend_caches(tracker, model, H);
+    const bool prop_dense_pe_ready = sam31_ensure_prop_dense_pe_cache(model, D, H);
+    SAM3_PROFILE_CPU_END(sam31_prop_prepare_caches);
+    sam3_add_propagate_timing(&sam3_propagate_timing::prepare_caches_ms,
+                              sam31_prop_prepare_caches_t0);
+    if (!tracker.cached_src_pos_tensor || !tracker.cached_rope_head_q_tensor) {
+        std::println(stderr, "{}: SAM3.1 backend PE cache is unavailable", __func__);
+        return output;
+    }
+    if (!prop_dense_pe_ready) {
+        std::println(stderr, "{}: SAM3.1 propagation dense PE cache is unavailable", __func__);
+        return output;
+    }
+    const int n_sel = static_cast<int>(sel.size());
+    const int spatial_memory_tokens = N * n_sel;
+    std::vector<std::pair<int, std::vector<float>>> ptr_inputs;
+    ptr_inputs.reserve(
+        static_cast<size_t>(std::min(static_cast<int>(ptr_bank.size()), hp.max_obj_ptrs)));
+    SAM3_PROFILE_CPU_START(sam31_prop_ptr_read);
+    const int64_t sam31_prop_ptr_read_t0 = ggml_time_us();
+    for (int p = 0; p < static_cast<int>(ptr_bank.size()) && p < hp.max_obj_ptrs; ++p) {
+        std::vector<float> ptr(D);
+        ggml_backend_tensor_get(
+            ptr_bank[p].second, ptr.data(), 0, static_cast<size_t>(D) * sizeof(float));
+        if (std::ranges::any_of(ptr, [](float value) { return std::abs(value) > 1.0e-8f; })) {
+            ptr_inputs.emplace_back(ptr_bank[p].first, std::move(ptr));
+        }
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_ptr_read);
+    sam3_add_propagate_timing(&sam3_propagate_timing::obj_ptr_read_ms, sam31_prop_ptr_read_t0);
+    const int P = static_cast<int>(ptr_inputs.size());
+    const int ptr_tokens = P * M;
+    std::vector<const sam3_memory_slot*> precomputed_spatial_kv_slots;
+    if (ptr_tokens > 0 && sam31_experimental_static_mem_ca_kv_cache_enabled()) {
+        precomputed_spatial_kv_slots.reserve(static_cast<size_t>(n_sel));
+        bool can_use_all_selected_slots = true;
+        for (int s = 0; s < n_sel && can_use_all_selected_slots; ++s) {
+            const auto& slot = mem_bank[sel[s]];
+            const bool layer_count_ok =
+                model.mem_attn.layers.size() <= slot.sam31_mem_ca_k_spatial.size() &&
+                model.mem_attn.layers.size() <= slot.sam31_mem_ca_v_spatial.size();
+            const bool has_all_layer_kv =
+                layer_count_ok &&
+                std::all_of(slot.sam31_mem_ca_k_spatial.begin(),
+                            slot.sam31_mem_ca_k_spatial.begin() +
+                                static_cast<ptrdiff_t>(model.mem_attn.layers.size()),
+                            [](const ggml_tensor* tensor) { return tensor != nullptr; }) &&
+                std::all_of(slot.sam31_mem_ca_v_spatial.begin(),
+                            slot.sam31_mem_ca_v_spatial.begin() +
+                                static_cast<ptrdiff_t>(model.mem_attn.layers.size()),
+                            [](const ggml_tensor* tensor) { return tensor != nullptr; });
+            can_use_all_selected_slots = slot.sam31_mem_kv_spatial_tokens == N && has_all_layer_kv;
+            if (can_use_all_selected_slots) {
+                precomputed_spatial_kv_slots.push_back(&slot);
+            }
+        }
+        if (!can_use_all_selected_slots ||
+            static_cast<int>(precomputed_spatial_kv_slots.size()) != n_sel) {
+            precomputed_spatial_kv_slots.clear();
+        }
+    }
+    const bool use_precomputed_spatial_kv = !precomputed_spatial_kv_slots.empty();
+    const int memory_tokens =
+        use_precomputed_spatial_kv ? ptr_tokens : spatial_memory_tokens + ptr_tokens;
+    std::vector<float> memory_image(sam3_count_mul(D, memory_tokens), 0.0f);
+    std::vector<float> memory(sam3_count_mul(D, memory_tokens), 0.0f);
+    std::vector<float> memory_image_pos(sam3_count_mul(D, memory_tokens), 0.0f);
+    std::vector<float> precomputed_spatial_k_pos_delta(
+        static_cast<size_t>(D) * precomputed_spatial_kv_slots.size(), 0.0f);
+
+    const auto& rope_q_data = tracker.cached_axial_cis_head_reord;
+    if (rope_q_data.size() != sam3_count_mul(2, half_head, N)) {
+        std::println(stderr, "{}: SAM3.1 per-head RoPE cache has unexpected size", __func__);
+        return output;
+    }
+
+    std::vector<float> rope_k_data(sam3_count_mul(2, half_head, spatial_memory_tokens));
+    SAM3_PROFILE_CPU_START(sam31_prop_memory_prepare);
+    const int64_t sam31_prop_memory_prepare_t0 = ggml_time_us();
+    if (use_precomputed_spatial_kv) {
+        sam3_ensure_prompt_pos_cpu_cache(model);
+        for (int s = 0; s < n_sel; ++s) {
+            std::copy_n(
+                rope_q_data.data(),
+                rope_q_data.size(),
+                rope_k_data.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, head_dim, N)));
+            const auto& slot = *precomputed_spatial_kv_slots[static_cast<size_t>(s)];
+            const int temporal_position = sam31_maskmem_tpos_v2(model, tracker, slot, n_sel - s);
+            const int enc_idx = hp.num_maskmem - temporal_position - 1;
+            float* dst = precomputed_spatial_k_pos_delta.data() +
+                         static_cast<ptrdiff_t>(sam3_count_mul(s, D));
+            for (int d = 0; d < D; ++d) {
+                dst[d] = model.mem_tpos_cpu[static_cast<size_t>(d) + sam3_count_mul(enc_idx, D)];
+            }
+        }
+    } else {
+        for (int s = 0; s < n_sel; ++s) {
+            const auto& slot = mem_bank[sel[s]];
+            const size_t slot_count = sam3_count_mul(D, N);
+            if (slot.spatial_feats_cpu.size() != slot_count ||
+                slot.image_feats_cpu.size() != slot_count) {
+                std::println(stderr,
+                             "{}: SAM3.1 memory slot does not contain saved image features",
+                             __func__);
+                return output;
+            }
+            const auto& slot_pos = slot.image_pe_cpu.size() == slot_count
+                                       ? slot.image_pe_cpu
+                                       : tracker.cached_sinpe_256;
+            const size_t dst = sam3_count_mul(s, D, N);
+            std::copy_n(slot.image_feats_cpu.data(), slot_count, memory_image.data() + dst);
+            std::copy_n(slot.spatial_feats_cpu.data(), slot_count, memory.data() + dst);
+            std::copy_n(slot_pos.data(), slot_count, memory_image_pos.data() + dst);
+            const int temporal_position = sam31_maskmem_tpos_v2(model, tracker, slot, n_sel - s);
+            if (!sam31_add_temporal_pos_to_slot(
+                    model,
+                    std::span<float>{memory_image_pos.data() + dst, slot_count},
+                    N,
+                    temporal_position)) {
+                return output;
+            }
+            std::copy_n(
+                rope_q_data.data(),
+                rope_q_data.size(),
+                rope_k_data.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, head_dim, N)));
+        }
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_memory_prepare);
+    sam3_add_propagate_timing(&sam3_propagate_timing::memory_prepare_ms,
+                              sam31_prop_memory_prepare_t0);
+
+    SAM3_PROFILE_CPU_START(sam31_prop_ptr_prepare);
+    const int64_t sam31_prop_ptr_prepare_t0 = ggml_time_us();
+    if (ptr_tokens > 0) {
+        sam3_ensure_prompt_pos_cpu_cache(model);
+        const bool has_ptr_tpos_proj = model.obj_ptr_tpos_w_cpu.size() == sam3_count_mul(D, D) &&
+                                       model.obj_ptr_tpos_b_cpu.size() == static_cast<size_t>(D);
+        const int cur_frame = tracker.frame_index;
+        const int max_obj_ptrs_in_encoder = std::min(std::max(cur_frame + 1, 1), hp.max_obj_ptrs);
+        const float ptr_tpos_denominator =
+            static_cast<float>(std::max(max_obj_ptrs_in_encoder - 1, 1));
+        std::vector<float> sine_pe(D);
+        std::vector<float> ptr_pos(D);
+        for (int p = 0; p < P; ++p) {
+            const auto& [ptr_frame, ptr] = ptr_inputs[static_cast<size_t>(p)];
+            const int rel = std::max(std::abs(cur_frame - ptr_frame), 1);
+            sam3_get_1d_sine_pe(sine_pe.data(), static_cast<float>(rel) / ptr_tpos_denominator, D);
+            if (has_ptr_tpos_proj) {
+                for (int o = 0; o < D; ++o) {
+                    float sum = model.obj_ptr_tpos_b_cpu[static_cast<size_t>(o)];
+                    for (int i = 0; i < D; ++i) {
+                        sum +=
+                            model
+                                .obj_ptr_tpos_w_cpu[static_cast<size_t>(i) + sam3_count_mul(o, D)] *
+                            sine_pe[static_cast<size_t>(i)];
+                    }
+                    ptr_pos[static_cast<size_t>(o)] = sum;
+                }
+            } else {
+                ptr_pos = sine_pe;
+            }
+
+            const int ptr_base_token =
+                (use_precomputed_spatial_kv ? 0 : spatial_memory_tokens) + (p * M);
+            const size_t ptr_dst = sam3_count_mul(ptr_base_token, D);
+            std::copy_n(ptr.data(), D, memory.data() + ptr_dst);
+            for (int m = 0; m < M; ++m) {
+                const size_t pos_dst = sam3_count_mul(ptr_base_token + m, D);
+                std::copy_n(ptr_pos.data(), D, memory_image_pos.data() + pos_dst);
+            }
+        }
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_ptr_prepare);
+    sam3_add_propagate_timing(&sam3_propagate_timing::ptr_prepare_ms, sam31_prop_ptr_prepare_t0);
+
+    const auto propagation_dump_dir_for_cache = sam3_getenv("SAM31_PROPAGATION_DUMP_DIR");
+    const bool alias_prop_features_for_cache =
+        sam3_getenv("SAM31_ENABLE_PROP_ALIAS_FEATURE_INPUTS").has_value() ||
+        sam3_getenv("SAM3_ENABLE_PROP_ALIAS_FEATURE_INPUTS").has_value();
+    const bool use_graph_cache = sam31_prop_graph_cache_enabled() &&
+                                 !alias_prop_features_for_cache &&
+                                 !propagation_dump_dir_for_cache.has_value();
+    const bool use_single_precomputed_k_rope =
+        use_precomputed_spatial_kv && precomputed_spatial_kv_slots.size() == 1;
+    const bool upload_k_rope_input = !use_single_precomputed_k_rope;
+    if (use_graph_cache) {
+        sam3_mark_propagate_graph_cache_used();
+        auto& cache = tracker.sam31_prop_graph_cache;
+        sam31_propagation_graph_key key{
+            .D = D,
+            .H = H,
+            .memory_tokens = memory_tokens,
+            .spatial_memory_tokens = spatial_memory_tokens,
+            .ptr_tokens = ptr_tokens,
+            .weight_type = model.weight_type,
+            .bf16_mem_attn_activation = sam31_bf16_mem_attn_activation_enabled(),
+            .bf16_mem_attn_input_boundary = sam31_bf16_mem_attn_input_boundary_enabled(),
+            .f16_mem_attn_activation = sam31_f16_mem_attn_activation_enabled(),
+            .f16_mem_attn_attention_activation = sam31_f16_mem_attn_attention_activation_enabled(),
+            .f16_mem_attn_ffn_activation = sam31_f16_mem_attn_ffn_activation_enabled(),
+            .cached_src_pos_tensor = tracker.cached_src_pos_tensor,
+            .sam31_prop_dense_pe_tensor = model.sam31_prop_dense_pe_tensor,
+            .cached_rope_head_q_tensor = tracker.cached_rope_head_q_tensor,
+        };
+        if (use_precomputed_spatial_kv) {
+            key.precomputed_spatial_k.reserve(precomputed_spatial_kv_slots.size() *
+                                              model.mem_attn.layers.size());
+            key.precomputed_spatial_v.reserve(precomputed_spatial_kv_slots.size() *
+                                              model.mem_attn.layers.size());
+            for (const auto* slot : precomputed_spatial_kv_slots) {
+                for (size_t i = 0; i < model.mem_attn.layers.size(); ++i) {
+                    key.precomputed_spatial_k.push_back(slot->sam31_mem_ca_k_spatial[i]);
+                    key.precomputed_spatial_v.push_back(slot->sam31_mem_ca_v_spatial[i]);
+                }
+            }
+        }
+
+        const bool cache_hit = cache.key.has_value() && *cache.key == key && cache.graph != nullptr;
+        if (!cache_hit) {
+            SAM3_PROFILE_CPU_START(sam31_prop_graph_cache_build);
+            const int64_t sam31_prop_graph_cache_build_t0 = ggml_time_us();
+            cache.reset();
+            const size_t buf_size = (ggml_tensor_overhead() * 131072) + (ggml_graph_overhead() * 2);
+            ggml_init_params gparams = {
+                .mem_size = buf_size,
+                .mem_buffer = nullptr,
+                .no_alloc = true,
+            };
+            auto ctx0 = make_ggml_context(gparams);
+            if (!ctx0) {
+                return output;
+            }
+
+            auto* image_raw = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
+            sam3_set_name(image_raw, "sam31_prop_image_raw");
+            ggml_set_input(image_raw);
+            auto* image = ggml_reshape_3d(ctx0.get(), image_raw, D, N, 1);
+            auto* src = ggml_reshape_3d(ctx0.get(), image_raw, D, N, 1);
+
+            auto* memory_image_t =
+                ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+            ggml_set_name(memory_image_t, "sam31_prop_memory_image");
+            ggml_set_input(memory_image_t);
+            auto* memory_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+            ggml_set_name(memory_t, "sam31_prop_memory");
+            ggml_set_input(memory_t);
+            auto* memory_image_pos_t =
+                ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+            ggml_set_name(memory_image_pos_t, "sam31_prop_memory_image_pos");
+            ggml_set_input(memory_image_pos_t);
+
+            auto* q_rope = tracker.cached_rope_head_q_tensor;
+            auto* k_rope =
+                use_single_precomputed_k_rope
+                    ? tracker.cached_rope_head_q_tensor
+                    : ggml_new_tensor_3d(
+                          ctx0.get(), GGML_TYPE_F32, 2, half_head, spatial_memory_tokens);
+            ggml_set_name(k_rope, "sam31_prop_k_rope");
+            if (upload_k_rope_input) {
+                ggml_set_input(k_rope);
+            }
+            auto* precomputed_spatial_k_pos_delta_t =
+                use_precomputed_spatial_kv
+                    ? ggml_new_tensor_3d(ctx0.get(),
+                                         GGML_TYPE_F32,
+                                         D,
+                                         static_cast<int64_t>(precomputed_spatial_kv_slots.size()),
+                                         1)
+                    : nullptr;
+            if (precomputed_spatial_k_pos_delta_t != nullptr) {
+                ggml_set_name(precomputed_spatial_k_pos_delta_t, "sam31_prop_spatial_k_pos_delta");
+                ggml_set_input(precomputed_spatial_k_pos_delta_t);
+            }
+
+            auto* src_pos_image_pe =
+                ggml_reshape_4d(ctx0.get(), tracker.cached_src_pos_tensor, D, H, H, 1);
+            ggml_set_name(src_pos_image_pe, "sam31_prop_image_pe");
+            auto* image_pe =
+                ggml_reshape_4d(ctx0.get(), model.sam31_prop_dense_pe_tensor, D, H, H, 1);
+            ggml_set_name(image_pe, "sam31_mux_image_pe");
+            auto* feat_s0 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, 32, H * 4, H * 4, 1);
+            sam3_set_name(feat_s0, "sam31_prop_projected_s0");
+            ggml_set_input(feat_s0);
+            auto* feat_s1 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, 64, H * 2, H * 2, 1);
+            sam3_set_name(feat_s1, "sam31_prop_projected_s1");
+            ggml_set_input(feat_s1);
+            auto* extra_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, M, 1);
+            ggml_set_name(extra_t, "sam31_prop_extra_per_object_embeddings");
+            ggml_set_input(extra_t);
+
+            auto* memory_output = sam31_build_multiplex_mem_attn_graph(
+                ctx0.get(),
+                model,
+                image,
+                src,
+                memory_image_t,
+                memory_t,
+                tracker.cached_src_pos_tensor,
+                memory_image_pos_t,
+                q_rope,
+                k_rope,
+                ptr_tokens,
+                use_precomputed_spatial_kv ? &precomputed_spatial_kv_slots : nullptr,
+                precomputed_spatial_k_pos_delta_t);
+            auto* memory_output_snapshot =
+                sam31_prop_direct_mem_output_enabled() && ggml_is_contiguous(memory_output)
+                    ? memory_output
+                    : ggml_cont(ctx0.get(), memory_output);
+            ggml_set_name(memory_output_snapshot, "sam31_mem_attn_output");
+            auto* image_feats = ggml_reshape_4d(ctx0.get(), memory_output_snapshot, D, H, H, 1);
+            const auto dec = sam31_build_mux_mask_dec_graph(
+                ctx0.get(), model, image_feats, image_pe, feat_s0, feat_s1, extra_t, H);
+
+            auto* graph = ggml_new_graph_custom(ctx0.get(), 131072, false);
+            ggml_build_forward_expand(graph, dec.masks);
+            ggml_build_forward_expand(graph, dec.iou_pred);
+            ggml_build_forward_expand(graph, dec.obj_score);
+            ggml_build_forward_expand(graph, dec.mask_tokens);
+
+            auto galloc = make_ggml_gallocr(model.backend);
+            if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+                cache.reset();
+                return output;
+            }
+
+            cache.key = key;
+            cache.graph = graph;
+            cache.image_raw = image_raw;
+            cache.memory_image = memory_image_t;
+            cache.memory = memory_t;
+            cache.memory_image_pos = memory_image_pos_t;
+            cache.k_rope = k_rope;
+            cache.precomputed_spatial_k_pos_delta = precomputed_spatial_k_pos_delta_t;
+            cache.feat_s0 = feat_s0;
+            cache.feat_s1 = feat_s1;
+            cache.extra = extra_t;
+            cache.masks = dec.masks;
+            cache.iou_pred = dec.iou_pred;
+            cache.obj_score = dec.obj_score;
+            cache.mask_tokens = dec.mask_tokens;
+            cache.galloc = std::move(galloc);
+            cache.ctx = std::move(ctx0);
+            SAM3_PROFILE_CPU_END(sam31_prop_graph_cache_build);
+            sam3_add_propagate_timing(&sam3_propagate_timing::graph_cache_build_ms,
+                                      sam31_prop_graph_cache_build_t0);
+        }
+
+        SAM3_PROFILE_CPU_START(sam31_prop_graph_cache_input_upload);
+        const int64_t sam31_prop_graph_cache_input_upload_t0 = ggml_time_us();
+        {
+            const int64_t upload_feature_t0 = ggml_time_us();
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], cache.image_raw);
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                      upload_feature_t0);
+        }
+        {
+            const int64_t upload_memory_t0 = ggml_time_us();
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 cache.memory_image,
+                                                 memory_image.data(),
+                                                 0,
+                                                 memory_image.size() * sizeof(float));
+            sam3_backend_tensor_set_prefer_async(
+                model.backend, cache.memory, memory.data(), 0, memory.size() * sizeof(float));
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 cache.memory_image_pos,
+                                                 memory_image_pos.data(),
+                                                 0,
+                                                 memory_image_pos.size() * sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_memory_upload_ms,
+                                      upload_memory_t0);
+        }
+        if (upload_k_rope_input) {
+            const int64_t upload_rope_t0 = ggml_time_us();
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 cache.k_rope,
+                                                 rope_k_data.data(),
+                                                 0,
+                                                 rope_k_data.size() * sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_rope_upload_ms, upload_rope_t0);
+        }
+        if (cache.precomputed_spatial_k_pos_delta != nullptr) {
+            const int64_t upload_memory_t0 = ggml_time_us();
+            sam3_backend_tensor_set_prefer_async(
+                model.backend,
+                cache.precomputed_spatial_k_pos_delta,
+                precomputed_spatial_k_pos_delta.data(),
+                0,
+                precomputed_spatial_k_pos_delta.size() * sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_memory_upload_ms,
+                                      upload_memory_t0);
+        }
+        {
+            const int64_t upload_feature_t0 = ggml_time_us();
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], cache.feat_s0);
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], cache.feat_s1);
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                      upload_feature_t0);
+        }
+        {
+            const int64_t upload_sparse_t0 = ggml_time_us();
+            const auto extra_embeddings = sam31_extra_per_object_embeddings_cpu(model);
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 cache.extra,
+                                                 extra_embeddings.data(),
+                                                 0,
+                                                 extra_embeddings.size() * sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_sparse_upload_ms,
+                                      upload_sparse_t0);
+        }
+        SAM3_PROFILE_CPU_END(sam31_prop_graph_cache_input_upload);
+        sam3_add_propagate_timing(&sam3_propagate_timing::graph_cache_input_upload_ms,
+                                  sam31_prop_graph_cache_input_upload_t0);
+
+        SAM3_PROFILE_CPU_START(sam31_prop_graph_cache_compute_total);
+        const int64_t sam31_prop_graph_cache_compute_total_t0 = ggml_time_us();
+        if (!sam3_graph_compute(model.backend, cache.graph, 4, "sam31_propagate_single_cached")) {
+            return output;
+        }
+        SAM3_PROFILE_CPU_END(sam31_prop_graph_cache_compute_total);
+        sam3_add_propagate_timing(&sam3_propagate_timing::graph_cache_compute_ms,
+                                  sam31_prop_graph_cache_compute_total_t0);
+
+        const int mhw = H * 4;
+        const size_t mask_count = sam3_count_mul(mhw, mhw);
+        SAM3_PROFILE_CPU_START(sam31_prop_graph_cache_output_read);
+        const int64_t sam31_prop_graph_cache_output_read_t0 = ggml_time_us();
+        std::array<float, K> ious = {};
+        ggml_backend_tensor_get(cache.iou_pred, ious.data(), 0, ious.size() * sizeof(float));
+        int best_idx = 0;
+        for (int i = 1; i < K; ++i) {
+            if (ious[static_cast<size_t>(i)] > ious[static_cast<size_t>(best_idx)]) {
+                best_idx = i;
+            }
+        }
+
+        output.n_masks = 1;
+        output.mask_h = mhw;
+        output.mask_w = mhw;
+        output.mask_logits.resize(mask_count);
+        ggml_backend_tensor_get(cache.masks,
+                                output.mask_logits.data(),
+                                sam3_count_mul(best_idx, mhw, mhw) * sizeof(float),
+                                output.mask_logits.size() * sizeof(float));
+        output.iou_scores = {ious[static_cast<size_t>(best_idx)]};
+        output.decoder_iou_scores.assign(ious.begin(), ious.end());
+        output.selected_mask_index = best_idx;
+        ggml_backend_tensor_get(cache.obj_score, &output.obj_score, 0, sizeof(float));
+        output.sam_token.resize(D);
+        ggml_backend_tensor_get(cache.mask_tokens,
+                                output.sam_token.data(),
+                                sam3_count_mul(best_idx, D) * sizeof(float),
+                                output.sam_token.size() * sizeof(float));
+        SAM3_PROFILE_CPU_END(sam31_prop_graph_cache_output_read);
+        sam3_add_propagate_timing(&sam3_propagate_timing::graph_cache_output_read_ms,
+                                  sam31_prop_graph_cache_output_read_t0);
+        return output;
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_prop_graph_build);
+    const int64_t sam31_prop_graph_build_t0 = ggml_time_us();
+    const size_t buf_size = (ggml_tensor_overhead() * 131072) + (ggml_graph_overhead() * 2);
+    ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        return output;
+    }
+
+    const bool alias_prop_features =
+        sam3_getenv("SAM31_ENABLE_PROP_ALIAS_FEATURE_INPUTS").has_value() ||
+        sam3_getenv("SAM3_ENABLE_PROP_ALIAS_FEATURE_INPUTS").has_value();
+    sam3_set_propagate_alias_timing(alias_prop_features, false);
+    auto alias_4d = [&](const ggml_tensor* src,
+                        std::string_view name,
+                        bool enabled,
+                        int64_t ne0,
+                        int64_t ne1,
+                        int64_t ne2,
+                        int64_t ne3) -> ggml_tensor* {
+        if (!enabled || src == nullptr || src->type != GGML_TYPE_F32 || src->ne[0] != ne0 ||
+            src->ne[1] != ne1 || src->ne[2] != ne2 || src->ne[3] != ne3) {
+            return nullptr;
+        }
+        return sam3_alias_tensor(ctx0.get(), src, name);
+    };
+    auto make_input_4d = [&](ggml_tensor*& tensor,
+                             std::string_view name,
+                             int64_t ne0,
+                             int64_t ne1,
+                             int64_t ne2,
+                             int64_t ne3) {
+        if (tensor != nullptr) {
+            return false;
+        }
+        tensor = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, ne0, ne1, ne2, ne3);
+        sam3_set_name(tensor, name);
+        ggml_set_input(tensor);
+        return true;
+    };
+
+    auto* image_raw =
+        alias_4d(state.neck_trk[2], "sam31_prop_image_raw", alias_prop_features, D, H, H, 1);
+    const bool upload_image_raw = make_input_4d(image_raw, "sam31_prop_image_raw", D, H, H, 1);
+    auto* image = ggml_reshape_3d(ctx0.get(), image_raw, D, N, 1);
+    auto* src = ggml_reshape_3d(ctx0.get(), image_raw, D, N, 1);
+
+    auto* memory_image_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+    ggml_set_name(memory_image_t, "sam31_prop_memory_image");
+    ggml_set_input(memory_image_t);
+    auto* memory_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+    ggml_set_name(memory_t, "sam31_prop_memory");
+    ggml_set_input(memory_t);
+    auto* src_pos_t = tracker.cached_src_pos_tensor;
+    auto* memory_image_pos_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, memory_tokens, 1);
+    ggml_set_name(memory_image_pos_t, "sam31_prop_memory_image_pos");
+    ggml_set_input(memory_image_pos_t);
+
+    auto* q_rope = tracker.cached_rope_head_q_tensor;
+    auto* k_rope =
+        use_single_precomputed_k_rope
+            ? tracker.cached_rope_head_q_tensor
+            : ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_head, spatial_memory_tokens);
+    ggml_set_name(k_rope, "sam31_prop_k_rope");
+    if (upload_k_rope_input) {
+        ggml_set_input(k_rope);
+    }
+    auto* precomputed_spatial_k_pos_delta_t =
+        use_precomputed_spatial_kv
+            ? ggml_new_tensor_3d(ctx0.get(),
+                                 GGML_TYPE_F32,
+                                 D,
+                                 static_cast<int64_t>(precomputed_spatial_kv_slots.size()),
+                                 1)
+            : nullptr;
+    if (precomputed_spatial_k_pos_delta_t != nullptr) {
+        ggml_set_name(precomputed_spatial_k_pos_delta_t, "sam31_prop_spatial_k_pos_delta");
+        ggml_set_input(precomputed_spatial_k_pos_delta_t);
+    }
+
+    auto* src_pos_image_pe = ggml_reshape_4d(ctx0.get(), tracker.cached_src_pos_tensor, D, H, H, 1);
+    ggml_set_name(src_pos_image_pe, "sam31_prop_image_pe");
+    auto* image_pe = ggml_reshape_4d(ctx0.get(), model.sam31_prop_dense_pe_tensor, D, H, H, 1);
+    ggml_set_name(image_pe, "sam31_mux_image_pe");
+    auto* feat_s0 = alias_4d(
+        state.neck_trk[0], "sam31_prop_projected_s0", alias_prop_features, 32, H * 4, H * 4, 1);
+    const bool upload_feat_s0 =
+        make_input_4d(feat_s0, "sam31_prop_projected_s0", 32, H * 4, H * 4, 1);
+    auto* feat_s1 = alias_4d(
+        state.neck_trk[1], "sam31_prop_projected_s1", alias_prop_features, 64, H * 2, H * 2, 1);
+    const bool upload_feat_s1 =
+        make_input_4d(feat_s1, "sam31_prop_projected_s1", 64, H * 2, H * 2, 1);
+    auto extra_embeddings = sam31_extra_per_object_embeddings_cpu(model);
+    auto* extra_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, M, 1);
+    ggml_set_name(extra_t, "sam31_prop_extra_per_object_embeddings");
+    ggml_set_input(extra_t);
+
+    auto* memory_output = sam31_build_multiplex_mem_attn_graph(
+        ctx0.get(),
+        model,
+        image,
+        src,
+        memory_image_t,
+        memory_t,
+        src_pos_t,
+        memory_image_pos_t,
+        q_rope,
+        k_rope,
+        ptr_tokens,
+        use_precomputed_spatial_kv ? &precomputed_spatial_kv_slots : nullptr,
+        precomputed_spatial_k_pos_delta_t);
+    const auto propagation_dump_dir = sam3_getenv("SAM31_PROPAGATION_DUMP_DIR");
+    ggml_set_name(memory_output, "sam31_mem_attn_output_predecoder_alias");
+    auto* memory_output_snapshot = !propagation_dump_dir.has_value() &&
+                                           sam31_prop_direct_mem_output_enabled() &&
+                                           ggml_is_contiguous(memory_output)
+                                       ? memory_output
+                                       : ggml_cont(ctx0.get(), memory_output);
+    ggml_set_name(memory_output_snapshot, "sam31_mem_attn_output");
+    auto* image_feats = ggml_reshape_4d(ctx0.get(), memory_output_snapshot, D, H, H, 1);
+    const auto dec = sam31_build_mux_mask_dec_graph(
+        ctx0.get(), model, image_feats, image_pe, feat_s0, feat_s1, extra_t, H);
+
+    if (propagation_dump_dir) {
+        auto* src_snapshot = ggml_cont(ctx0.get(), src);
+        ggml_set_name(src_snapshot, "sam31_mem_attn_src");
+        auto* src_pos_snapshot = ggml_cont(ctx0.get(), src_pos_t);
+        ggml_set_name(src_pos_snapshot, "sam31_mem_attn_src_pos");
+    }
+    constexpr std::array<std::string_view, 61> propagation_mem_attn_names = {{
+        "sam31_prop_image_raw",
+        "sam31_prop_image_pe",
+        "sam31_prop_projected_s0",
+        "sam31_prop_projected_s1",
+        "sam31_prop_memory_image",
+        "sam31_prop_memory",
+        "sam31_prop_memory_image_pos",
+        "sam31_mem_attn_src",
+        "sam31_mem_attn_src_pos",
+        "sam31_mem_attn_input",
+        "sam31_mem_attn_layer0_sa_norm",
+        "sam31_mem_attn_layer0_sa_q",
+        "sam31_mem_attn_layer0_sa_k",
+        "sam31_mem_attn_layer0_sa_v",
+        "sam31_mem_attn_layer0_ca_q",
+        "sam31_mem_attn_layer0_ca_k",
+        "sam31_mem_attn_layer0_ca_v",
+        "sam31_mem_attn_layer0_sa_fattn_q",
+        "sam31_mem_attn_layer0_sa_fattn_k",
+        "sam31_mem_attn_layer0_sa_fattn_v",
+        "sam31_mem_attn_layer0_sa_fattn",
+        "sam31_mem_attn_layer0_sa_fattn_q_dump",
+        "sam31_mem_attn_layer0_sa_fattn_k_dump",
+        "sam31_mem_attn_layer0_sa_fattn_v_dump",
+        "sam31_mem_attn_layer0_sa_fattn_dump",
+        "sam31_mem_attn_layer0_after_sa",
+        "sam31_mem_attn_layer0_after_ca",
+        "sam31_mem_attn_layer0_ffn_norm",
+        "sam31_mem_attn_layer0_ffn_fc1",
+        "sam31_mem_attn_layer0_ffn_gelu",
+        "sam31_mem_attn_layer0_ffn_fc2",
+        "sam31_mem_attn_layer0_after_ffn",
+        "sam31_mem_attn_layer1_ca_k",
+        "sam31_mem_attn_layer1_ca_v",
+        "sam31_mem_attn_layer1_after_sa",
+        "sam31_mem_attn_layer1_after_ca",
+        "sam31_mem_attn_layer1_ffn_norm",
+        "sam31_mem_attn_layer1_ffn_fc1",
+        "sam31_mem_attn_layer1_ffn_gelu",
+        "sam31_mem_attn_layer1_ffn_fc2",
+        "sam31_mem_attn_layer1_after_ffn",
+        "sam31_mem_attn_layer2_ca_k",
+        "sam31_mem_attn_layer2_ca_v",
+        "sam31_mem_attn_layer2_after_sa",
+        "sam31_mem_attn_layer2_after_ca",
+        "sam31_mem_attn_layer2_ffn_norm",
+        "sam31_mem_attn_layer2_ffn_fc1",
+        "sam31_mem_attn_layer2_ffn_gelu",
+        "sam31_mem_attn_layer2_ffn_fc2",
+        "sam31_mem_attn_layer2_after_ffn",
+        "sam31_mem_attn_layer3_ca_k",
+        "sam31_mem_attn_layer3_ca_v",
+        "sam31_mem_attn_layer3_after_sa",
+        "sam31_mem_attn_layer3_after_ca",
+        "sam31_mem_attn_layer3_ffn_norm",
+        "sam31_mem_attn_layer3_ffn_fc1",
+        "sam31_mem_attn_layer3_ffn_gelu",
+        "sam31_mem_attn_layer3_ffn_fc2",
+        "sam31_mem_attn_layer3_after_ffn",
+        "sam31_mem_attn_output_predecoder_alias",
+        "sam31_mem_attn_output",
+    }};
+    constexpr std::array<std::string_view, 36> propagation_decoder_names = {{
+        "sam31_mux_image_pe",
+        "sam31_mux_tokens_initial",
+        "sam31_mux_block0_after_sa",
+        "sam31_mux_block0_after_token_to_image",
+        "sam31_mux_block0_after_mlp",
+        "sam31_mux_block0_img2tok_attn_q_proj",
+        "sam31_mux_block0_img2tok_attn_k_proj",
+        "sam31_mux_block0_img2tok_attn_v_proj",
+        "sam31_mux_block0_img2tok_attn_core",
+        "sam31_mux_block0_after_image_to_token",
+        "sam31_mux_block0_queries",
+        "sam31_mux_block0_keys",
+        "sam31_mux_block1_after_sa",
+        "sam31_mux_block1_after_token_to_image",
+        "sam31_mux_block1_after_mlp",
+        "sam31_mux_block1_img2tok_attn_q_proj",
+        "sam31_mux_block1_img2tok_attn_k_proj",
+        "sam31_mux_block1_img2tok_attn_v_proj",
+        "sam31_mux_block1_img2tok_attn_core",
+        "sam31_mux_block1_after_image_to_token",
+        "sam31_mux_block1_queries",
+        "sam31_mux_block1_keys",
+        "sam31_mux_final_q",
+        "sam31_mux_final_k",
+        "sam31_mux_final_attn_q_proj",
+        "sam31_mux_final_attn_k_proj",
+        "sam31_mux_final_attn_v_proj",
+        "sam31_mux_final_attn_core",
+        "sam31_mux_final_attn_out",
+        "sam31_mux_final_pre_norm",
+        "sam31_mux_final_queries",
+        "sam31_mux_upscaled",
+        "sam31_mux_hyper_0",
+        "sam31_mux_hyper_1",
+        "sam31_mux_hyper_2",
+        "sam31_mux_mask_tokens",
+    }};
+    if (propagation_dump_dir) {
+        for (const auto name : propagation_mem_attn_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_set_output(tensor);
+            }
+        }
+        for (const auto name : propagation_decoder_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_set_output(tensor);
+            }
+        }
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 131072, false);
+    ggml_build_forward_expand(graph, dec.masks);
+    ggml_build_forward_expand(graph, dec.iou_pred);
+    ggml_build_forward_expand(graph, dec.obj_score);
+    ggml_build_forward_expand(graph, dec.mask_tokens);
+    if (propagation_dump_dir) {
+        for (const auto name : propagation_mem_attn_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_build_forward_expand(graph, tensor);
+            }
+        }
+        for (const auto name : propagation_decoder_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_build_forward_expand(graph, tensor);
+            }
+        }
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_graph_build);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_build_ms, sam31_prop_graph_build_t0);
+
+    SAM3_PROFILE_CPU_START(sam31_prop_graph_alloc);
+    const int64_t sam31_prop_graph_alloc_t0 = ggml_time_us();
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        return output;
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_graph_alloc);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_alloc_ms, sam31_prop_graph_alloc_t0);
+
+    SAM3_PROFILE_CPU_START(sam31_prop_input_upload);
+    const int64_t sam31_prop_input_upload_t0 = ggml_time_us();
+    if (upload_image_raw) {
+        const int64_t upload_feature_t0 = ggml_time_us();
+        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], image_raw);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                  upload_feature_t0);
+    }
+    {
+        const int64_t upload_memory_t0 = ggml_time_us();
+        sam3_backend_tensor_set_prefer_async(model.backend,
+                                             memory_image_t,
+                                             memory_image.data(),
+                                             0,
+                                             memory_image.size() * sizeof(float));
+        sam3_backend_tensor_set_prefer_async(
+            model.backend, memory_t, memory.data(), 0, memory.size() * sizeof(float));
+        sam3_backend_tensor_set_prefer_async(model.backend,
+                                             memory_image_pos_t,
+                                             memory_image_pos.data(),
+                                             0,
+                                             memory_image_pos.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_memory_upload_ms, upload_memory_t0);
+    }
+    if (upload_k_rope_input) {
+        const int64_t upload_rope_t0 = ggml_time_us();
+        sam3_backend_tensor_set_prefer_async(
+            model.backend, k_rope, rope_k_data.data(), 0, rope_k_data.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_rope_upload_ms, upload_rope_t0);
+    }
+    if (precomputed_spatial_k_pos_delta_t != nullptr) {
+        const int64_t upload_memory_t0 = ggml_time_us();
+        sam3_backend_tensor_set_prefer_async(
+            model.backend,
+            precomputed_spatial_k_pos_delta_t,
+            precomputed_spatial_k_pos_delta.data(),
+            0,
+            precomputed_spatial_k_pos_delta.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_memory_upload_ms, upload_memory_t0);
+    }
+    if (upload_feat_s0) {
+        const int64_t upload_feature_t0 = ggml_time_us();
+        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], feat_s0);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                  upload_feature_t0);
+    }
+    if (upload_feat_s1) {
+        const int64_t upload_feature_t0 = ggml_time_us();
+        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], feat_s1);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                  upload_feature_t0);
+    }
+    {
+        const int64_t upload_sparse_t0 = ggml_time_us();
+        sam3_backend_tensor_set_prefer_async(model.backend,
+                                             extra_t,
+                                             extra_embeddings.data(),
+                                             0,
+                                             extra_embeddings.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_sparse_upload_ms, upload_sparse_t0);
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_input_upload);
+    sam3_add_propagate_timing(&sam3_propagate_timing::input_upload_ms, sam31_prop_input_upload_t0);
+
+    SAM3_PROFILE_CPU_START(sam31_prop_graph_compute_total);
+    const int64_t sam31_prop_graph_compute_total_t0 = ggml_time_us();
+    if (!sam3_graph_compute(model.backend, graph, 4, "sam31_propagate_single")) {
+        return output;
+    }
+    SAM3_PROFILE_CPU_END(sam31_prop_graph_compute_total);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_compute_ms,
+                              sam31_prop_graph_compute_total_t0);
+
+    if (propagation_dump_dir) {
+        const std::string dump_dir{*propagation_dump_dir};
+        mkdir(dump_dir.c_str(), 0755);
+        for (const auto name : propagation_mem_attn_names) {
+            auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str());
+            if (tensor) {
+                (void) sam3_dump_tensor_to_path(
+                    tensor, std::string{name}, std::format("{}/{}", dump_dir, name));
+            }
+        }
+        (void) sam3_dump_tensor_to_path(
+            dec.masks, "sam31_mux_masks", std::format("{}/sam31_mux_masks", dump_dir));
+        (void) sam3_dump_tensor_to_path(
+            dec.iou_pred, "sam31_mux_iou", std::format("{}/sam31_mux_iou", dump_dir));
+        (void) sam3_dump_tensor_to_path(
+            dec.obj_score, "sam31_mux_obj_score", std::format("{}/sam31_mux_obj_score", dump_dir));
+        (void) sam3_dump_tensor_to_path(dec.mask_tokens,
+                                        "sam31_mux_mask_tokens",
+                                        std::format("{}/sam31_mux_mask_tokens", dump_dir));
+        for (const auto name : propagation_decoder_names) {
+            auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str());
+            if (tensor) {
+                (void) sam3_dump_tensor_to_path(
+                    tensor, std::string{name}, std::format("{}/{}", dump_dir, name));
+            }
+        }
+        if (model.mem_attn_norm_w) {
+            (void) sam3_dump_tensor_to_path(model.mem_attn_norm_w,
+                                            "sam31_mem_attn_norm_w",
+                                            std::format("{}/sam31_mem_attn_norm_w", dump_dir));
+        }
+        if (model.mem_attn_norm_b) {
+            (void) sam3_dump_tensor_to_path(model.mem_attn_norm_b,
+                                            "sam31_mem_attn_norm_b",
+                                            std::format("{}/sam31_mem_attn_norm_b", dump_dir));
+        }
+    }
+
+    const int mhw = H * 4;
+    const size_t mask_count = sam3_count_mul(mhw, mhw);
+    SAM3_PROFILE_CPU_START(sam31_prop_output_read);
+    const int64_t sam31_prop_output_read_t0 = ggml_time_us();
+    std::array<float, K> ious = {};
+    ggml_backend_tensor_get(dec.iou_pred, ious.data(), 0, ious.size() * sizeof(float));
+    int best_idx = 0;
+    for (int i = 1; i < K; ++i) {
+        if (ious[static_cast<size_t>(i)] > ious[static_cast<size_t>(best_idx)]) {
+            best_idx = i;
+        }
+    }
+
+    output.n_masks = 1;
+    output.mask_h = mhw;
+    output.mask_w = mhw;
+    output.mask_logits.resize(mask_count);
+    ggml_backend_tensor_get(dec.masks,
+                            output.mask_logits.data(),
+                            sam3_count_mul(best_idx, mhw, mhw) * sizeof(float),
+                            output.mask_logits.size() * sizeof(float));
+    output.iou_scores = {ious[static_cast<size_t>(best_idx)]};
+    output.decoder_iou_scores.assign(ious.begin(), ious.end());
+    output.selected_mask_index = best_idx;
+    ggml_backend_tensor_get(dec.obj_score, &output.obj_score, 0, sizeof(float));
+    output.sam_token.resize(D);
+    ggml_backend_tensor_get(dec.mask_tokens,
+                            output.sam_token.data(),
+                            sam3_count_mul(best_idx, D) * sizeof(float),
+                            output.sam_token.size() * sizeof(float));
+    SAM3_PROFILE_CPU_END(sam31_prop_output_read);
+    sam3_add_propagate_timing(&sam3_propagate_timing::output_read_ms, sam31_prop_output_read_t0);
+    return output;
 }
 
 static sam3_prop_output sam3_propagate_single(
@@ -14336,6 +21896,11 @@ static sam3_prop_output sam3_propagate_single(
     const int H = sam3_eff_feat_size(state, hp);
     const int N = static_cast<int>(sam3_count_mul(H, H));
 
+    if (hp.is_sam3_1()) {
+        return sam31_propagate_single(tracker, state, model, mem_bank, ptr_bank);
+    }
+    sam3_increment_propagate_single_calls();
+
     auto sel = sam3_select_memory_frames(mem_bank, hp.num_maskmem);
     if (sel.empty())
         return output;
@@ -14348,37 +21913,52 @@ static sam3_prop_output sam3_propagate_single(
         use_perceiver ? (hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d) : N;
 
     const int n_sel = static_cast<int>(sel.size());
-    std::vector<std::vector<float>> slot_feats(n_sel);
-    std::vector<std::vector<float>> slot_pes(n_sel);
+    std::vector<std::vector<float>> slot_feats_storage(n_sel);
+    std::vector<std::vector<float>> slot_pes_storage(n_sel);
+    std::vector<const std::vector<float>*> slot_feats(n_sel, nullptr);
+    std::vector<const std::vector<float>*> slot_pes(n_sel, nullptr);
     std::vector<int> spatial_tpos(n_sel, 1);  // default t_pos=1 for non-cond
     SAM3_PROFILE_CPU_START(prop_memory_slot_read);
+    const int64_t prop_memory_slot_read_t0 = ggml_time_us();
     for (int s = 0; s < n_sel; ++s) {
         const size_t slot_count = sam3_count_mul(MD, N_per_slot);
-        slot_feats[s].resize(slot_count);
-        ggml_backend_tensor_get(
-            mem_bank[sel[s]].spatial_feats, slot_feats[s].data(), 0, slot_count * sizeof(float));
-        slot_pes[s].resize(slot_count);
-        if (mem_bank[sel[s]].spatial_pe) {
+        const auto& slot = mem_bank[sel[s]];
+        if (slot.spatial_feats_cpu.size() == slot_count) {
+            slot_feats[s] = &slot.spatial_feats_cpu;
+        } else {
+            slot_feats_storage[s].resize(slot_count);
             ggml_backend_tensor_get(
-                mem_bank[sel[s]].spatial_pe, slot_pes[s].data(), 0, slot_count * sizeof(float));
+                slot.spatial_feats, slot_feats_storage[s].data(), 0, slot_count * sizeof(float));
+            slot_feats[s] = &slot_feats_storage[s];
+        }
+        if (slot.spatial_pe_cpu.size() == slot_count) {
+            slot_pes[s] = &slot.spatial_pe_cpu;
+        } else if (slot.spatial_pe) {
+            slot_pes_storage[s].resize(slot_count);
+            ggml_backend_tensor_get(
+                slot.spatial_pe, slot_pes_storage[s].data(), 0, slot_count * sizeof(float));
+            slot_pes[s] = &slot_pes_storage[s];
         } else {
             sam3_ensure_tracker_pe_caches(tracker, hp, H);
             if (use_perceiver) {
                 // For perceiver: zeros for 1D tokens, sinusoidal for 2D tokens
-                slot_pes[s] = tracker.cached_perceiver_pe_64;
+                slot_pes[s] = &tracker.cached_perceiver_pe_64;
             } else {
-                slot_pes[s] = tracker.cached_sinpe_64;
+                slot_pes[s] = &tracker.cached_sinpe_64;
             }
         }
         spatial_tpos[s] = mem_bank[sel[s]].is_cond_frame ? 0 : (n_sel - s);
     }
     SAM3_PROFILE_CPU_END(prop_memory_slot_read);
+    sam3_add_propagate_timing(&sam3_propagate_timing::memory_slot_read_ms,
+                              prop_memory_slot_read_t0);
 
     const int P = std::min(static_cast<int>(ptr_bank.size()), hp.max_obj_ptrs);
     std::vector<std::vector<float>> obj_ptrs(P);
     std::vector<int> ptr_tpos(P);
     const int cur_frame = tracker.frame_index;
     SAM3_PROFILE_CPU_START(prop_obj_ptr_read);
+    const int64_t prop_obj_ptr_read_t0 = ggml_time_us();
     for (int p = 0; p < P; ++p) {
         obj_ptrs[p].resize(D);
         ggml_backend_tensor_get(
@@ -14388,23 +21968,73 @@ static sam3_prop_output sam3_propagate_single(
         ptr_tpos[p] = std::max(ptr_tpos[p], 1);  // minimum distance of 1
     }
     SAM3_PROFILE_CPU_END(prop_obj_ptr_read);
+    sam3_add_propagate_timing(&sam3_propagate_timing::obj_ptr_read_ms, prop_obj_ptr_read_t0);
 
     SAM3_PROFILE_CPU_START(prop_prompt_build);
-    auto pd =
-        sam3_build_prompt_and_pos(model, slot_feats, slot_pes, spatial_tpos, obj_ptrs, ptr_tpos, H);
+    const int64_t prop_prompt_build_t0 = ggml_time_us();
+    auto pd = sam3_build_prompt_and_pos_refs(
+        model, slot_feats, slot_pes, spatial_tpos, obj_ptrs, ptr_tpos, H);
     SAM3_PROFILE_CPU_END(prop_prompt_build);
+    sam3_add_propagate_timing(&sam3_propagate_timing::prompt_build_ms, prop_prompt_build_t0);
+    std::vector<const sam3_memory_slot*> precomputed_spatial_kv_slots;
+    std::vector<int> precomputed_spatial_tpos;
+    if (!use_perceiver && sam3_static_mem_ca_kv_cache_enabled()) {
+        precomputed_spatial_kv_slots.reserve(static_cast<size_t>(n_sel));
+        precomputed_spatial_tpos.reserve(static_cast<size_t>(n_sel));
+        bool can_use_all_selected_slots = pd.M_spatial == n_sel * N;
+        for (int s = 0; s < n_sel && can_use_all_selected_slots; ++s) {
+            const auto& slot = mem_bank[sel[s]];
+            const int tpos_idx = spatial_tpos[static_cast<size_t>(s)];
+            const bool tpos_ok =
+                tpos_idx >= 0 && std::cmp_less(static_cast<size_t>(tpos_idx),
+                                               slot.sam3_mem_ca_k_spatial_by_tpos.size());
+            const bool layer_count_ok =
+                model.mem_attn.layers.size() <= slot.sam3_mem_ca_v_spatial.size();
+            const bool has_all_layer_kv =
+                tpos_ok && layer_count_ok &&
+                std::all_of(
+                    slot.sam3_mem_ca_k_spatial_by_tpos[static_cast<size_t>(tpos_idx)].begin(),
+                    slot.sam3_mem_ca_k_spatial_by_tpos[static_cast<size_t>(tpos_idx)].begin() +
+                        static_cast<ptrdiff_t>(model.mem_attn.layers.size()),
+                    [](const ggml_tensor* t) { return t != nullptr; }) &&
+                std::all_of(slot.sam3_mem_ca_v_spatial.begin(),
+                            slot.sam3_mem_ca_v_spatial.begin() +
+                                static_cast<ptrdiff_t>(model.mem_attn.layers.size()),
+                            [](const ggml_tensor* t) { return t != nullptr; });
+            can_use_all_selected_slots = slot.sam3_mem_kv_spatial_tokens == N && has_all_layer_kv;
+            if (can_use_all_selected_slots) {
+                precomputed_spatial_kv_slots.push_back(&slot);
+                precomputed_spatial_tpos.push_back(tpos_idx);
+            }
+        }
+        if (!can_use_all_selected_slots ||
+            static_cast<int>(precomputed_spatial_kv_slots.size()) != n_sel) {
+            precomputed_spatial_kv_slots.clear();
+            precomputed_spatial_tpos.clear();
+        }
+    }
 
     // ── RoPE frequencies (cached) ──────────────────────────────────────
     SAM3_PROFILE_CPU_START(prop_rope_cache);
+    const int64_t prop_rope_cache_t0 = ggml_time_us();
     sam3_ensure_tracker_pe_caches(tracker, hp, H);
     sam3_ensure_tracker_pe_backend_caches(tracker, model, H);
     SAM3_PROFILE_CPU_END(prop_rope_cache);
+    sam3_add_propagate_timing(&sam3_propagate_timing::rope_cache_ms, prop_rope_cache_t0);
     const int half_d = D / 2;  // 128
     const auto& rope_q_reord = tracker.cached_axial_cis_reord;
+    const bool use_cached_rope_k =
+        sam3_prop_rope_k_backend_cache_enabled() && pd.M_spatial > 0 &&
+        tracker.cached_rope_k_tensor != nullptr &&
+        tracker.cached_rope_k_tokens_per_slot == N_per_slot &&
+        tracker.cached_rope_k_slots >= n_sel &&
+        pd.M_spatial <=
+            sam3_count_mul(tracker.cached_rope_k_tokens_per_slot, tracker.cached_rope_k_slots);
     // For cross-attn K: build rope_k_data for all M_spatial tokens
     std::vector<float> rope_k_data;
     SAM3_PROFILE_CPU_START(prop_rope_k_build);
-    if (pd.M_spatial > 0) {
+    const int64_t prop_rope_k_build_t0 = ggml_time_us();
+    if (pd.M_spatial > 0 && !use_cached_rope_k) {
         rope_k_data.resize(sam3_count_mul(2, half_d, pd.M_spatial));
         if (use_perceiver) {
             // EdgeTAM perceiver: each frame has N_per_slot=512 tokens.
@@ -14438,9 +22068,11 @@ static sam3_prop_output sam3_propagate_single(
         }
     }
     SAM3_PROFILE_CPU_END(prop_rope_k_build);
+    sam3_add_propagate_timing(&sam3_propagate_timing::rope_k_build_ms, prop_rope_k_build_t0);
 
     // ── Build graph ─────────────────────────────────────────────────────
     SAM3_PROFILE_CPU_START(prop_graph_build);
+    const int64_t prop_graph_build_t0 = ggml_time_us();
     const size_t buf_size = (ggml_tensor_overhead() * 32768) + (ggml_graph_overhead() * 2);
     ggml_init_params gparams = {
         .mem_size = buf_size,
@@ -14451,18 +22083,76 @@ static sam3_prop_output sam3_propagate_single(
     if (!ctx0)
         return output;
 
-    // CRITICAL: create fresh input tensors for state features.
-    // Using state.neck_trk[*] directly as ggml_reshape operands pulls in
-    // the entire ViT+neck recomputation from the image encoder graph.
-    auto* curr_raw = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
-    ggml_set_name(curr_raw, "prop_curr");
-    ggml_set_input(curr_raw);
+    const bool alias_prop_features =
+        sam3_should_alias_prop_inputs(model.backend,
+                                      "SAM3_ENABLE_PROP_ALIAS_FEATURE_INPUTS",
+                                      "SAM3_DISABLE_PROP_ALIAS_FEATURE_INPUTS");
+    const bool alias_prop_constants =
+        sam3_should_alias_prop_inputs(model.backend,
+                                      "SAM3_ENABLE_PROP_ALIAS_CONSTANT_INPUTS",
+                                      "SAM3_DISABLE_PROP_ALIAS_CONSTANT_INPUTS");
+    sam3_set_propagate_alias_timing(alias_prop_features, alias_prop_constants);
+    auto alias_4d = [&](const ggml_tensor* src,
+                        std::string_view name,
+                        bool enabled,
+                        int64_t ne0,
+                        int64_t ne1,
+                        int64_t ne2,
+                        int64_t ne3) -> ggml_tensor* {
+        if (!enabled || src == nullptr || src->type != GGML_TYPE_F32 || src->ne[0] != ne0 ||
+            src->ne[1] != ne1 || src->ne[2] != ne2 || src->ne[3] != ne3) {
+            return nullptr;
+        }
+        return sam3_alias_tensor(ctx0.get(), src, name);
+    };
+    auto alias_3d = [&](const ggml_tensor* src,
+                        std::string_view name,
+                        bool enabled,
+                        int64_t ne0,
+                        int64_t ne1,
+                        int64_t ne2) -> ggml_tensor* {
+        if (!enabled || src == nullptr || src->type != GGML_TYPE_F32 || src->ne[0] != ne0 ||
+            src->ne[1] != ne1 || src->ne[2] != ne2) {
+            return nullptr;
+        }
+        return sam3_alias_tensor(ctx0.get(), src, name);
+    };
+    auto make_input_4d = [&](ggml_tensor*& tensor,
+                             std::string_view name,
+                             int64_t ne0,
+                             int64_t ne1,
+                             int64_t ne2,
+                             int64_t ne3) {
+        if (tensor != nullptr) {
+            return false;
+        }
+        tensor = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, ne0, ne1, ne2, ne3);
+        sam3_set_name(tensor, name);
+        ggml_set_input(tensor);
+        return true;
+    };
+    auto make_input_3d =
+        [&](ggml_tensor*& tensor, std::string_view name, int64_t ne0, int64_t ne1, int64_t ne2) {
+            if (tensor != nullptr) {
+                return false;
+            }
+            tensor = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, ne0, ne1, ne2);
+            sam3_set_name(tensor, name);
+            ggml_set_input(tensor);
+            return true;
+        };
+
+    // CRITICAL: do not use state.neck_trk[*] with their original op/src metadata.
+    // The alias path below creates fresh leaf metadata that points at the encoded
+    // backend buffers, avoiding both encoder-graph recomputation and GPU copies.
+    auto* curr_raw = alias_4d(state.neck_trk[2], "prop_curr", alias_prop_features, D, H, H, 1);
+    const bool upload_curr_raw = make_input_4d(curr_raw, "prop_curr", D, H, H, 1);
     auto* curr = ggml_reshape_3d(ctx0.get(), curr_raw, D, N, 1);
 
     // src_pos (sinusoidal PE 256-dim for 72×72)
-    auto* src_pos_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, D, N, 1);
-    ggml_set_name(src_pos_t, "src_pos");
-    ggml_set_input(src_pos_t);
+    auto* src_pos_t =
+        alias_3d(tracker.cached_src_pos_tensor, "src_pos", alias_prop_constants, D, N, 1);
+    const bool upload_src_pos = make_input_3d(src_pos_t, "src_pos", D, N, 1);
 
     // Prompt and prompt_pos
     auto* prompt_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, pd.M_total, 1);
@@ -14473,25 +22163,39 @@ static sam3_prop_output sam3_propagate_single(
     ggml_set_input(prompt_pos_t);
 
     // RoPE frequencies
-    auto* rope_q_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_d, N);
-    ggml_set_name(rope_q_t, "rope_q");
-    ggml_set_input(rope_q_t);
+    auto* rope_q_t =
+        alias_3d(tracker.cached_rope_q_tensor, "rope_q", alias_prop_constants, 2, half_d, N);
+    const bool upload_rope_q = make_input_3d(rope_q_t, "rope_q", 2, half_d, N);
     struct ggml_tensor* rope_k_t = nullptr;
     if (pd.M_spatial > 0) {
-        rope_k_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_d, pd.M_spatial);
+        if (use_cached_rope_k) {
+            rope_k_t = ggml_view_3d(ctx0.get(),
+                                    tracker.cached_rope_k_tensor,
+                                    2,
+                                    half_d,
+                                    pd.M_spatial,
+                                    tracker.cached_rope_k_tensor->nb[1],
+                                    tracker.cached_rope_k_tensor->nb[2],
+                                    0);
+        } else {
+            rope_k_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_d, pd.M_spatial);
+            ggml_set_input(rope_k_t);
+        }
         ggml_set_name(rope_k_t, "rope_k");
-        ggml_set_input(rope_k_t);
     }
 
-    auto* conditioned = sam3_build_mem_attn_graph(ctx0.get(),
-                                                  model,
-                                                  curr,
-                                                  src_pos_t,
-                                                  prompt_t,
-                                                  prompt_pos_t,
-                                                  rope_q_t,
-                                                  rope_k_t,
-                                                  pd.num_obj_ptr_tokens);
+    auto* conditioned = sam3_build_mem_attn_graph(
+        ctx0.get(),
+        model,
+        curr,
+        src_pos_t,
+        prompt_t,
+        prompt_pos_t,
+        rope_q_t,
+        rope_k_t,
+        pd.num_obj_ptr_tokens,
+        precomputed_spatial_kv_slots.empty() ? nullptr : &precomputed_spatial_kv_slots,
+        precomputed_spatial_tpos.empty() ? nullptr : &precomputed_spatial_tpos);
     auto* cond_spatial = ggml_reshape_4d(ctx0.get(), conditioned, D, H, H, 1);
 
     // Bug 3 fix: single not_a_point_embed token instead of empty sparse
@@ -14499,21 +22203,29 @@ static sam3_prop_output sam3_propagate_single(
     ggml_set_name(sparse_in, "prop_sparse");
     ggml_set_input(sparse_in);
 
-    auto* image_pe = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
-    ggml_set_name(image_pe, "prop_pe");
-    ggml_set_input(image_pe);
-    auto* dense_emb = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
-    ggml_set_name(dense_emb, "prop_dense");
-    ggml_set_input(dense_emb);
+    auto* image_pe = alias_4d(state.dense_pe_tensor, "prop_pe", alias_prop_constants, D, H, H, 1);
+    const bool upload_image_pe = make_input_4d(image_pe, "prop_pe", D, H, H, 1);
+    auto* dense_emb =
+        alias_4d(state.dense_nomask_tensor, "prop_dense", alias_prop_constants, D, H, H, 1);
+    const bool upload_dense_emb = make_input_4d(dense_emb, "prop_dense", D, H, H, 1);
 
     const int H0 = H * 4;
     const int H1 = H * 2;
-    auto* trk_s0 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H0, H0, 1);
-    ggml_set_name(trk_s0, "prop_trk_s0");
-    ggml_set_input(trk_s0);
-    auto* trk_s1 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H1, H1, 1);
-    ggml_set_name(trk_s1, "prop_trk_s1");
-    ggml_set_input(trk_s1);
+    auto* trk_s0 = alias_4d(state.neck_trk[0], "prop_trk_s0", alias_prop_features, D, H0, H0, 1);
+    const bool upload_trk_s0 = make_input_4d(trk_s0, "prop_trk_s0", D, H0, H0, 1);
+    auto* trk_s1 = alias_4d(state.neck_trk[1], "prop_trk_s1", alias_prop_features, D, H1, H1, 1);
+    const bool upload_trk_s1 = make_input_4d(trk_s1, "prop_trk_s1", D, H1, H1, 1);
+    sam3_set_propagate_alias_timing(
+        !upload_curr_raw || !upload_trk_s0 || !upload_trk_s1,
+        !upload_src_pos || !upload_rope_q || !upload_image_pe || !upload_dense_emb,
+        static_cast<int>(!upload_curr_raw) + static_cast<int>(!upload_trk_s0) +
+            static_cast<int>(!upload_trk_s1),
+        static_cast<int>(!upload_src_pos) + static_cast<int>(!upload_rope_q) +
+            static_cast<int>(!upload_image_pe) + static_cast<int>(!upload_dense_emb),
+        static_cast<int>(upload_curr_raw) + static_cast<int>(upload_trk_s0) +
+            static_cast<int>(upload_trk_s1),
+        static_cast<int>(upload_src_pos) + static_cast<int>(upload_rope_q) +
+            static_cast<int>(upload_image_pe) + static_cast<int>(upload_dense_emb));
 
     auto dec = sam3_build_sam_dec_graph(
         ctx0.get(), model, cond_spatial, image_pe, sparse_in, dense_emb, trk_s0, trk_s1, H);
@@ -14524,6 +22236,31 @@ static sam3_prop_output sam3_propagate_single(
     if (dec.mask_tokens)
         ggml_set_output(dec.mask_tokens);
 
+    const auto propagation_dump_dir = sam3_getenv("SAM31_PROPAGATION_DUMP_DIR");
+    constexpr std::array<std::string_view, 14> propagation_mem_attn_names = {{
+        "phase7_mem_attn_input",
+        "phase7_mem_attn_layer0_after_sa",
+        "phase7_mem_attn_layer0_after_ca",
+        "phase7_mem_attn_layer0_after_ffn",
+        "phase7_mem_attn_layer1_after_sa",
+        "phase7_mem_attn_layer1_after_ca",
+        "phase7_mem_attn_layer1_after_ffn",
+        "phase7_mem_attn_layer2_after_sa",
+        "phase7_mem_attn_layer2_after_ca",
+        "phase7_mem_attn_layer2_after_ffn",
+        "phase7_mem_attn_layer3_after_sa",
+        "phase7_mem_attn_layer3_after_ca",
+        "phase7_mem_attn_layer3_after_ffn",
+        "phase7_mem_attn_output",
+    }};
+    if (propagation_dump_dir) {
+        for (const auto name : propagation_mem_attn_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_set_output(tensor);
+            }
+        }
+    }
+
     auto* graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
     ggml_build_forward_expand(graph, dec.masks);
     ggml_build_forward_expand(graph, dec.iou_pred);
@@ -14531,82 +22268,182 @@ static sam3_prop_output sam3_propagate_single(
     ggml_build_forward_expand(graph, dec.sam_token);
     if (dec.mask_tokens)
         ggml_build_forward_expand(graph, dec.mask_tokens);
+    if (propagation_dump_dir) {
+        for (const auto name : propagation_mem_attn_names) {
+            if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+                ggml_build_forward_expand(graph, tensor);
+            }
+        }
+    }
     SAM3_PROFILE_CPU_END(prop_graph_build);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_build_ms, prop_graph_build_t0);
 
     SAM3_PROFILE_CPU_START(prop_graph_alloc);
+    const int64_t prop_graph_alloc_t0 = ggml_time_us();
     auto galloc = make_ggml_gallocr(model.backend);
     if (!reserve_and_alloc_graph(galloc.get(), graph)) {
         return output;
     }
     SAM3_PROFILE_CPU_END(prop_graph_alloc);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_alloc_ms, prop_graph_alloc_t0);
 
     // Upload prompt data
     SAM3_PROFILE_CPU_START(prop_input_upload);
-    ggml_backend_tensor_set(prompt_t, pd.prompt.data(), 0, pd.prompt.size() * sizeof(float));
-    ggml_backend_tensor_set(
-        prompt_pos_t, pd.prompt_pos.data(), 0, pd.prompt_pos.size() * sizeof(float));
-    if (tracker.cached_rope_q_tensor) {
+    const int64_t prop_input_upload_t0 = ggml_time_us();
+    {
+        const int64_t upload_prompt_t0 = ggml_time_us();
+        ggml_backend_tensor_set(prompt_t, pd.prompt.data(), 0, pd.prompt.size() * sizeof(float));
+        ggml_backend_tensor_set(
+            prompt_pos_t, pd.prompt_pos.data(), 0, pd.prompt_pos.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_prompt_upload_ms, upload_prompt_t0);
+    }
+    if (upload_rope_q && tracker.cached_rope_q_tensor) {
+        const int64_t upload_rope_t0 = ggml_time_us();
         sam3_backend_tensor_copy_async(model.backend, tracker.cached_rope_q_tensor, rope_q_t);
-    } else {
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_rope_upload_ms, upload_rope_t0);
+    } else if (upload_rope_q) {
+        const int64_t upload_rope_t0 = ggml_time_us();
         ggml_backend_tensor_set(
             rope_q_t, rope_q_reord.data(), 0, rope_q_reord.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_rope_upload_ms, upload_rope_t0);
     }
-    if (rope_k_t && !rope_k_data.empty())
+    if (rope_k_t && !rope_k_data.empty()) {
+        const int64_t upload_rope_t0 = ggml_time_us();
         ggml_backend_tensor_set(
             rope_k_t, rope_k_data.data(), 0, rope_k_data.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_rope_upload_ms, upload_rope_t0);
+    }
 
     // Set default obj_score when pred_obj_scores=False (older SAM2 models)
     if (!model.sam_dec.obj_score_token) {
         auto* t = ggml_graph_get_tensor(graph, "sam_dec_obj_score");
         if (t) {
+            const int64_t upload_sparse_t0 = ggml_time_us();
             float v = 10.0f;
             ggml_backend_tensor_set(t, &v, 0, sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_sparse_upload_ms,
+                                      upload_sparse_t0);
         }
     }
 
     // Upload src_pos (sinusoidal PE 256-dim)
-    if (tracker.cached_src_pos_tensor) {
+    if (upload_src_pos && tracker.cached_src_pos_tensor) {
+        const int64_t upload_constant_t0 = ggml_time_us();
         sam3_backend_tensor_copy_async(model.backend, tracker.cached_src_pos_tensor, src_pos_t);
-    } else {
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
+                                  upload_constant_t0);
+    } else if (upload_src_pos) {
+        const int64_t upload_constant_t0 = ggml_time_us();
         ggml_backend_tensor_set(src_pos_t,
                                 tracker.cached_sinpe_256.data(),
                                 0,
                                 tracker.cached_sinpe_256.size() * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
+                                  upload_constant_t0);
     }
 
     // Upload not_a_point_embed, image_pe, dense_emb from state PE cache
-    sam3_populate_pe_cache(state, model);
+    {
+        const int64_t upload_constant_t0 = ggml_time_us();
+        sam3_populate_pe_cache(state, model);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
+                                  upload_constant_t0);
+    }
     if (state.not_a_point_tensor) {
+        const int64_t upload_sparse_t0 = ggml_time_us();
         sam3_backend_tensor_copy_async(model.backend, state.not_a_point_tensor, sparse_in);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_sparse_upload_ms, upload_sparse_t0);
     } else {
+        const int64_t upload_sparse_t0 = ggml_time_us();
         ggml_backend_tensor_set(
             sparse_in, state.not_a_point_cache, 0, static_cast<size_t>(D) * sizeof(float));
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_sparse_upload_ms, upload_sparse_t0);
     }
-    if (state.dense_pe_tensor && state.dense_nomask_tensor) {
+    if (upload_image_pe && upload_dense_emb && state.dense_pe_tensor && state.dense_nomask_tensor) {
+        const int64_t upload_constant_t0 = ggml_time_us();
         sam3_backend_tensor_copy_async(model.backend, state.dense_pe_tensor, image_pe);
         sam3_backend_tensor_copy_async(model.backend, state.dense_nomask_tensor, dense_emb);
+        sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
+                                  upload_constant_t0);
     } else {
-        ggml_backend_tensor_set(
-            image_pe, state.dense_pe_cache.data(), 0, state.dense_pe_cache.size() * sizeof(float));
-        ggml_backend_tensor_set(dense_emb,
-                                state.dense_nomask_cache.data(),
-                                0,
-                                state.dense_nomask_cache.size() * sizeof(float));
+        if (!upload_image_pe && !upload_dense_emb) {
+            // Both tensors are external aliases.
+        } else if (!upload_image_pe || !upload_dense_emb) {
+            return output;
+        } else {
+            const int64_t upload_constant_t0 = ggml_time_us();
+            ggml_backend_tensor_set(image_pe,
+                                    state.dense_pe_cache.data(),
+                                    0,
+                                    state.dense_pe_cache.size() * sizeof(float));
+            ggml_backend_tensor_set(dense_emb,
+                                    state.dense_nomask_cache.data(),
+                                    0,
+                                    state.dense_nomask_cache.size() * sizeof(float));
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
+                                      upload_constant_t0);
+        }
     }
 
     // Copy tracker features from state to fresh input tensors
     {
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], curr_raw);
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], trk_s0);
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], trk_s1);
+        if (upload_curr_raw) {
+            const int64_t upload_feature_t0 = ggml_time_us();
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], curr_raw);
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                      upload_feature_t0);
+        }
+        if (upload_trk_s0) {
+            const int64_t upload_feature_t0 = ggml_time_us();
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], trk_s0);
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                      upload_feature_t0);
+        }
+        if (upload_trk_s1) {
+            const int64_t upload_feature_t0 = ggml_time_us();
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], trk_s1);
+            sam3_add_propagate_timing(&sam3_propagate_timing::input_feature_upload_ms,
+                                      upload_feature_t0);
+        }
     }
     SAM3_PROFILE_CPU_END(prop_input_upload);
+    sam3_add_propagate_timing(&sam3_propagate_timing::input_upload_ms, prop_input_upload_t0);
 
     SAM3_PROFILE_CPU_START(prop_graph_compute_total);
+    const int64_t prop_graph_compute_total_t0 = ggml_time_us();
     if (!sam3_graph_compute(model.backend, graph, 4, "propagate_single")) {
         return output;
     }
     SAM3_PROFILE_CPU_END(prop_graph_compute_total);
+    sam3_add_propagate_timing(&sam3_propagate_timing::graph_compute_ms,
+                              prop_graph_compute_total_t0);
+
+    if (propagation_dump_dir) {
+        const std::string dump_dir{*propagation_dump_dir};
+        mkdir(dump_dir.c_str(), 0755);
+        for (const auto name : propagation_mem_attn_names) {
+            auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str());
+            if (tensor) {
+                (void) sam3_dump_tensor_to_path(
+                    tensor, std::string{name}, std::format("{}/{}", dump_dir, name));
+            }
+        }
+        (void) sam3_dump_tensor_to_path(
+            dec.masks, "phase7_prop_masks", std::format("{}/phase7_prop_masks", dump_dir));
+        (void) sam3_dump_tensor_to_path(
+            dec.iou_pred, "phase7_prop_iou", std::format("{}/phase7_prop_iou", dump_dir));
+        (void) sam3_dump_tensor_to_path(dec.obj_score,
+                                        "phase7_prop_obj_score",
+                                        std::format("{}/phase7_prop_obj_score", dump_dir));
+        (void) sam3_dump_tensor_to_path(dec.sam_token,
+                                        "phase7_prop_sam_token",
+                                        std::format("{}/phase7_prop_sam_token", dump_dir));
+        if (dec.mask_tokens) {
+            (void) sam3_dump_tensor_to_path(dec.mask_tokens,
+                                            "phase7_prop_mask_tokens",
+                                            std::format("{}/phase7_prop_mask_tokens", dump_dir));
+        }
+    }
 
     const int mhw = H * 4;
     const int num_mask_tokens = hp.sam_n_multimask + 1;  // 4
@@ -14616,6 +22453,7 @@ static sam3_prop_output sam3_propagate_single(
     const bool use_multimask = (hp.is_sam2() || hp.is_edgetam()) && hp.multimask_output_in_sam;
 
     SAM3_PROFILE_CPU_START(prop_output_read);
+    const int64_t prop_output_read_t0 = ggml_time_us();
     if (use_multimask) {
         // Read all 4 IoU predictions
         std::vector<float> all_ious(num_mask_tokens);
@@ -14693,6 +22531,7 @@ static sam3_prop_output sam3_propagate_single(
             dec.sam_token, output.sam_token.data(), 0, output.sam_token.size() * sizeof(float));
     }
     SAM3_PROFILE_CPU_END(prop_output_read);
+    sam3_add_propagate_timing(&sam3_propagate_timing::output_read_ms, prop_output_read_t0);
 
     return output;
 }
@@ -14795,6 +22634,602 @@ static void sam3_dump_memory_mask_if_requested(const float* data,
     }
 }
 
+static void sam3_dump_f32_tensor_if_requested(std::string_view env_name,
+                                              std::string_view name,
+                                              std::span<const float> data,
+                                              std::span<const int64_t> shape) {
+    const auto dump_dir = sam3_getenv(env_name);
+    if (!dump_dir || data.empty() || shape.empty()) {
+        return;
+    }
+    const std::string prefix = std::format("{}/{}", *dump_dir, name);
+    {
+        std::ofstream f(prefix + ".bin", std::ios::binary);
+        if (!f) {
+            return;
+        }
+        f.write(reinterpret_cast<const char*>(data.data()),
+                static_cast<std::streamsize>(data.size() * sizeof(float)));
+    }
+    {
+        std::ofstream f(prefix + ".shape");
+        if (!f) {
+            return;
+        }
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i != 0) {
+                f << " ";
+            }
+            f << shape[i];
+        }
+        f << "\n";
+    }
+}
+
+static bool sam3_should_dump_mem_slot(int inst_id) {
+    if (!sam3_getenv("SAM3_DUMP_MEM_SLOT_DIR").has_value()) {
+        return false;
+    }
+    const auto filter = sam3_getenv("SAM3_DUMP_MEM_SLOT_INST_ID");
+    if (!filter || filter->empty()) {
+        return true;
+    }
+    int wanted = 0;
+    const auto* first = filter->data();
+    const auto* last = filter->data() + filter->size();
+    const auto [ptr, ec] = std::from_chars(first, last, wanted);
+    return ec == std::errc{} && ptr == last && wanted == inst_id;
+}
+
+static float sam31_mask_logit_to_mem_value(float logit) {
+    if (logit >= 32.0f) {
+        return 1.0f;
+    }
+    if (logit <= -32.0f) {
+        return -1.0f;
+    }
+    const float prob = 1.0f / (1.0f + std::exp(-logit));
+    return (prob * 2.0f) - 1.0f;
+}
+
+static std::vector<float> sam31_prepare_initial_mask_memory_logits(const sam3_mask& mask,
+                                                                   int input_mask_size,
+                                                                   int low_res_mask_size) {
+    const int width = mask.width;
+    const int height = mask.height;
+    std::vector<float> mask01(sam3_count_mul(width, height));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            mask01[sam3_count_mul(y, width) + static_cast<size_t>(x)] =
+                mask.data[sam3_count_mul(y, width) + static_cast<size_t>(x)] > 127 ? 1.0f : 0.0f;
+        }
+    }
+
+    auto interactive_mask =
+        sam3_bilinear_interpolate(mask01.data(), width, height, input_mask_size, input_mask_size);
+    for (auto& v : interactive_mask) {
+        v = v > 0.0f ? 1.0f : 0.0f;
+    }
+
+    auto video_mask = sam3_bilinear_interpolate(
+        interactive_mask.data(), input_mask_size, input_mask_size, width, height);
+    std::vector<float> video_logits(sam3_count_mul(width, height));
+    for (size_t i = 0; i < video_logits.size(); ++i) {
+        video_logits[i] = video_mask[i] > 0.5f ? 1024.0f : -1024.0f;
+    }
+
+    return sam3_bilinear_interpolate(
+        video_logits.data(), width, height, low_res_mask_size, low_res_mask_size);
+}
+
+static std::vector<float> sam3_prepare_initial_mask_prompt_input(const sam3_detection& det,
+                                                                 int input_mask_size) {
+    const int width = det.mask.width;
+    const int height = det.mask.height;
+    if (width <= 0 || height <= 0) {
+        return {};
+    }
+
+    std::vector<float> mask01(sam3_count_mul(width, height));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            mask01[sam3_count_mul(y, width) + static_cast<size_t>(x)] =
+                det.mask.data[sam3_count_mul(y, width) + static_cast<size_t>(x)] > 127 ? 1.0f
+                                                                                       : 0.0f;
+        }
+    }
+    return sam3_bilinear_interpolate(
+        mask01.data(), width, height, input_mask_size, input_mask_size);
+}
+
+static std::vector<float> sam3_prepare_initial_mask_memory_logits(const sam3_detection& det,
+                                                                  int input_mask_size) {
+    auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+    if (input_mask.empty()) {
+        return {};
+    }
+    std::vector<float> mask_logits(input_mask.size());
+    for (size_t i = 0; i < input_mask.size(); ++i) {
+        const float value = std::clamp(input_mask[i], 0.0f, 1.0f);
+        mask_logits[i] = value * 20.0f - 10.0f;
+    }
+    return mask_logits;
+}
+
+static std::vector<float> sam3_prepare_tracker_mask_prompt(const sam3_model& model,
+                                                           std::span<const float> input_mask,
+                                                           int input_mask_size,
+                                                           int mask_prompt_size) {
+    auto* weight = model.tensors.contains("trk_mask_ds.weight")
+                       ? model.tensors.at("trk_mask_ds.weight")
+                       : nullptr;
+    auto* bias =
+        model.tensors.contains("trk_mask_ds.bias") ? model.tensors.at("trk_mask_ds.bias") : nullptr;
+    if (!weight || !bias || input_mask_size <= 0 || mask_prompt_size <= 0) {
+        return {};
+    }
+
+    constexpr int kernel = 4;
+    constexpr int stride = 4;
+    const int conv_size = ((input_mask_size - kernel) / stride) + 1;
+    if (conv_size != mask_prompt_size ||
+        input_mask.size() < sam3_count_mul(input_mask_size, input_mask_size)) {
+        return {};
+    }
+
+    std::array<float, kernel * kernel> w{};
+    float b = 0.0f;
+    sam3_read_f32(weight, w.data(), static_cast<int64_t>(w.size()));
+    sam3_read_f32(bias, &b, 1);
+
+    std::vector<float> prompt(sam3_count_mul(mask_prompt_size, mask_prompt_size), b);
+    for (int oy = 0; oy < mask_prompt_size; ++oy) {
+        for (int ox = 0; ox < mask_prompt_size; ++ox) {
+            float sum = b;
+            for (int ky = 0; ky < kernel; ++ky) {
+                for (int kx = 0; kx < kernel; ++kx) {
+                    const int ix = (ox * stride) + kx;
+                    const int iy = (oy * stride) + ky;
+                    sum +=
+                        w[static_cast<size_t>(kx) + sam3_count_mul(ky, kernel)] *
+                        input_mask[sam3_count_mul(iy, input_mask_size) + static_cast<size_t>(ix)];
+                }
+            }
+            prompt[sam3_count_mul(oy, mask_prompt_size) + static_cast<size_t>(ox)] = sum;
+        }
+    }
+    return prompt;
+}
+
+static bool sam3_compute_mask_input_obj_ptr(sam3_state& state,
+                                            const sam3_model& model,
+                                            const sam3_detection& det,
+                                            std::vector<float>& out_ptr) {
+    const auto& hp = model.hparams;
+    if (hp.model_type != SAM3_MODEL_SAM3) {
+        return false;
+    }
+    const int D = hp.neck_dim;
+    const int H = sam3_eff_feat_size(state, hp);
+    const int H4 = H * 4;
+    const int H2 = H * 2;
+    const int input_mask_size = H * 16;
+    if (!state.neck_trk[0] || !state.neck_trk[1] || !state.neck_trk[2]) {
+        return false;
+    }
+
+    auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+    if (input_mask.empty()) {
+        return false;
+    }
+    auto mask_prompt = sam3_prepare_tracker_mask_prompt(model, input_mask, input_mask_size, H4);
+    if (mask_prompt.empty()) {
+        return false;
+    }
+
+    auto& cache = state.mask_input_obj_ptr_cache;
+    if (!cache.matches(D, H, model.backend)) {
+        sam3_mask_input_obj_ptr_graph_cache next;
+        next.D = D;
+        next.H = H;
+        next.backend = model.backend;
+
+        const size_t buf_size = (ggml_tensor_overhead() * 32768) + (ggml_graph_overhead() * 2);
+        ggml_init_params params = {
+            .mem_size = buf_size,
+            .mem_buffer = nullptr,
+            .no_alloc = true,
+        };
+        next.ctx = make_ggml_context(params);
+        if (!next.ctx) {
+            return false;
+        }
+
+        next.image_feats = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(next.image_feats, "sam3_mask_input_image_feats");
+        ggml_set_input(next.image_feats);
+        next.feat_s0 = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H4, H4, 1);
+        ggml_set_name(next.feat_s0, "sam3_mask_input_feat_s0");
+        ggml_set_input(next.feat_s0);
+        next.feat_s1 = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H2, H2, 1);
+        ggml_set_name(next.feat_s1, "sam3_mask_input_feat_s1");
+        ggml_set_input(next.feat_s1);
+        next.sparse = ggml_new_tensor_3d(next.ctx.get(), GGML_TYPE_F32, D, 1, 1);
+        ggml_set_name(next.sparse, "sam3_mask_input_sparse");
+        ggml_set_input(next.sparse);
+        next.image_pe = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_name(next.image_pe, "sam3_mask_input_image_pe");
+        ggml_set_input(next.image_pe);
+        next.mask_prompt = ggml_new_tensor_4d(next.ctx.get(), GGML_TYPE_F32, H4, H4, 1, 1);
+        ggml_set_name(next.mask_prompt, "sam3_mask_input_prompt");
+        ggml_set_input(next.mask_prompt);
+        auto* dense =
+            sam31_build_mask_dense_embedding_graph(next.ctx.get(), model.sam_pe, next.mask_prompt);
+
+        auto dec = sam3_build_sam_dec_graph(next.ctx.get(),
+                                            model,
+                                            next.image_feats,
+                                            next.image_pe,
+                                            next.sparse,
+                                            dense,
+                                            next.feat_s0,
+                                            next.feat_s1,
+                                            H);
+        ggml_set_output(dec.sam_token);
+        ggml_set_output(dec.obj_score);
+        next.sam_token = dec.sam_token;
+        next.obj_score = dec.obj_score;
+
+        next.graph = ggml_new_graph_custom(next.ctx.get(), 32768, false);
+        ggml_build_forward_expand(next.graph, dec.sam_token);
+        ggml_build_forward_expand(next.graph, dec.obj_score);
+
+        next.buffer =
+            GgmlBackendBufferHandle{ggml_backend_alloc_ctx_tensors(next.ctx.get(), model.backend)};
+        if (!next.buffer) {
+            return false;
+        }
+
+        if (!model.sam_dec.obj_score_token) {
+            if (auto* t = ggml_graph_get_tensor(next.graph, "sam_dec_obj_score")) {
+                const float present = 10.0f;
+                ggml_backend_tensor_set(t, &present, 0, sizeof(float));
+            }
+        }
+
+        sam3_populate_pe_cache(state, model);
+        if (state.not_a_point_tensor) {
+            sam3_backend_tensor_copy_async(model.backend, state.not_a_point_tensor, next.sparse);
+        } else {
+            ggml_backend_tensor_set(
+                next.sparse, state.not_a_point_cache, 0, static_cast<size_t>(D) * sizeof(float));
+        }
+        if (state.dense_pe_tensor) {
+            sam3_backend_tensor_copy_async(model.backend, state.dense_pe_tensor, next.image_pe);
+        } else {
+            ggml_backend_tensor_set(next.image_pe,
+                                    state.dense_pe_cache.data(),
+                                    0,
+                                    state.dense_pe_cache.size() * sizeof(float));
+        }
+        cache = std::move(next);
+    }
+
+    ggml_backend_tensor_set(
+        cache.mask_prompt, mask_prompt.data(), 0, mask_prompt.size() * sizeof(float));
+    if (!sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[2], cache.image_feats) ||
+        !sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[0], cache.feat_s0) ||
+        !sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[1], cache.feat_s1)) {
+        return false;
+    }
+
+    if (!sam3_graph_compute(
+            model.backend, cache.graph, state.n_threads, "sam3_mask_input_obj_ptr")) {
+        return false;
+    }
+
+    std::vector<float> sam_token(static_cast<size_t>(D));
+    ggml_backend_tensor_get(cache.sam_token, sam_token.data(), 0, sam_token.size() * sizeof(float));
+    float obj_logit = 0.0f;
+    ggml_backend_tensor_get(cache.obj_score, &obj_logit, 0, sizeof(float));
+    out_ptr.assign(static_cast<size_t>(D), 0.0f);
+    sam3_extract_obj_ptr_cpu(model, sam_token.data(), obj_logit, out_ptr.data());
+    return true;
+}
+
+static bool sam31_encode_memory(sam3_tracker& tracker,
+                                sam3_state& state,
+                                const sam3_model& model,
+                                int inst_id,
+                                const float* mask_logits,
+                                int mask_h,
+                                int mask_w,
+                                int frame_idx,
+                                bool is_cond,
+                                float obj_score) {
+    const auto& hp = model.hparams;
+    const int D = hp.neck_dim;
+    const int H = sam3_eff_feat_size(state, hp);
+    const int INTERPOL = H * 16;
+    constexpr int M = sam3::sam31::multiplex_count;
+    constexpr int mask_channels = M * 2;
+    constexpr int valid_slot = 0;
+    constexpr int condition_slot_offset = M;
+
+    if (!state.neck_trk[2] || state.neck_trk[2]->ne[0] != D || state.neck_trk[2]->ne[1] != H ||
+        state.neck_trk[2]->ne[2] != H) {
+        std::println(stderr, "{}: SAM3.1 current image feature is not available", __func__);
+        return false;
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_mem_mask_prepare);
+    const int INPUT_MASK_RES = sam3_eff_img_size(state, hp);
+    SAM3_PROFILE_CPU_START(sam31_mem_mask_input_interp);
+    auto input_mask =
+        sam3_bilinear_interpolate(mask_logits, mask_w, mask_h, INPUT_MASK_RES, INPUT_MASK_RES);
+    SAM3_PROFILE_CPU_END(sam31_mem_mask_input_interp);
+    SAM3_PROFILE_CPU_START(sam31_mem_mask_sigmoid_scale);
+    for (auto& v : input_mask) {
+        v = sam31_mask_logit_to_mem_value(v);
+    }
+    SAM3_PROFILE_CPU_END(sam31_mem_mask_sigmoid_scale);
+    std::vector<float> resized_mask;
+    const float* resized_mask_data = input_mask.data();
+    if (INTERPOL != INPUT_MASK_RES) {
+        SAM3_PROFILE_CPU_START(sam31_mem_mask_resized_interp);
+        resized_mask = sam3_bilinear_interpolate(
+            input_mask.data(), INPUT_MASK_RES, INPUT_MASK_RES, INTERPOL, INTERPOL);
+        resized_mask_data = resized_mask.data();
+        SAM3_PROFILE_CPU_END(sam31_mem_mask_resized_interp);
+    }
+    const size_t plane = sam3_count_mul(INTERPOL, INTERPOL);
+    const bool dump_slot = sam3_should_dump_mem_slot(inst_id);
+    const bool dump_mux_mask = sam3_getenv("SAM3_DUMP_MEM_MASK_DIR").has_value() || dump_slot;
+    std::optional<std::vector<float>> mux_mask;
+    if (dump_mux_mask) {
+        SAM3_PROFILE_CPU_START(sam31_mem_mask_mux_fill);
+        mux_mask.emplace(sam3_count_mul(INTERPOL, INTERPOL, mask_channels), 0.0f);
+        auto* valid_mask = mux_mask->data() + static_cast<ptrdiff_t>(plane * valid_slot);
+        std::copy_n(resized_mask_data, plane, valid_mask);
+        std::fill_n(
+            mux_mask->data() + static_cast<ptrdiff_t>(plane * (condition_slot_offset + valid_slot)),
+            plane,
+            is_cond ? 1.0f : 0.0f);
+        SAM3_PROFILE_CPU_END(sam31_mem_mask_mux_fill);
+        sam3_dump_memory_mask_if_requested(mux_mask->data(),
+                                           mux_mask->size(),
+                                           INTERPOL,
+                                           INTERPOL,
+                                           frame_idx,
+                                           inst_id,
+                                           is_cond,
+                                           "sam31_mux");
+    }
+    SAM3_PROFILE_CPU_END(sam31_mem_mask_prepare);
+
+    const size_t bs = (ggml_tensor_overhead() * 65536) + ggml_graph_overhead();
+    ggml_init_params gp = {
+        .mem_size = bs,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gp);
+    if (!ctx0) {
+        return false;
+    }
+
+    auto* masks =
+        ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, INTERPOL, INTERPOL, mask_channels, 1);
+    ggml_set_name(masks, "sam31_mem_masks");
+    ggml_set_input(masks);
+    auto* pix_feat = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
+    ggml_set_name(pix_feat, "sam31_mem_pix_feat");
+    ggml_set_input(pix_feat);
+
+    auto* ds = masks;
+    for (int s = 0; s < 4; ++s) {
+        const int out_ch = static_cast<int>(model.mem_enc.ds_conv_w[s]->ne[3]);
+        ds = ggml_conv_2d(ctx0.get(), model.mem_enc.ds_conv_w[s], ds, 2, 2, 1, 1, 1, 1);
+        ds = ggml_add(ctx0.get(),
+                      ds,
+                      ggml_reshape_4d(ctx0.get(), model.mem_enc.ds_conv_b[s], 1, 1, out_ch, 1));
+        ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 1, 2, 0, 3));
+        ds = sam3_layer_norm_2d(
+            ctx0.get(), ds, model.mem_enc.ds_norm_w[s], model.mem_enc.ds_norm_b[s]);
+        ds = ggml_gelu(ctx0.get(), ds);
+        ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 2, 0, 1, 3));
+    }
+    ds = ggml_conv_2d(ctx0.get(), model.mem_enc.ds_conv_w[4], ds, 1, 1, 0, 0, 1, 1);
+    ds = ggml_add(
+        ctx0.get(), ds, ggml_reshape_4d(ctx0.get(), model.mem_enc.ds_conv_b[4], 1, 1, D, 1));
+    ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 1, 2, 0, 3));
+
+    auto* pix_whcb = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), pix_feat, 2, 0, 1, 3));
+    auto* pix = ggml_conv_2d(ctx0.get(), model.mem_enc.pix_proj_w, pix_whcb, 1, 1, 0, 0, 1, 1);
+    pix = ggml_add(
+        ctx0.get(), pix, ggml_reshape_4d(ctx0.get(), model.mem_enc.pix_proj_b, 1, 1, D, 1));
+    pix = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), pix, 1, 2, 0, 3));
+
+    auto* h = ggml_add(ctx0.get(), pix, ds);
+    for (int i = 0; i < 2; ++i) {
+        h = sam3_cxblock_forward(ctx0.get(),
+                                 h,
+                                 model.mem_enc.fuser_dw_w[i],
+                                 model.mem_enc.fuser_dw_b[i],
+                                 model.mem_enc.fuser_norm_w[i],
+                                 model.mem_enc.fuser_norm_b[i],
+                                 model.mem_enc.fuser_fc1_w[i],
+                                 model.mem_enc.fuser_fc1_b[i],
+                                 model.mem_enc.fuser_fc2_w[i],
+                                 model.mem_enc.fuser_fc2_b[i],
+                                 model.mem_enc.fuser_gamma[i]);
+    }
+    ggml_set_name(h, "sam31_mem_out");
+    ggml_set_output(h);
+
+    auto* g = ggml_new_graph_custom(ctx0.get(), 65536, false);
+    ggml_build_forward_expand(g, h);
+    auto ga = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(ga.get(), g)) {
+        return false;
+    }
+    const size_t plane_bytes = plane * sizeof(float);
+    SAM3_PROFILE_CPU_START(sam31_mem_mask_zero);
+    ggml_backend_tensor_memset(masks, 0, 0, ggml_nbytes(masks));
+    SAM3_PROFILE_CPU_END(sam31_mem_mask_zero);
+    SAM3_PROFILE_CPU_START(sam31_mem_mask_upload);
+    ggml_backend_tensor_set(masks, resized_mask_data, plane_bytes * valid_slot, plane_bytes);
+    if (is_cond) {
+        std::vector<float> condition_plane(plane, 1.0f);
+        ggml_backend_tensor_set(masks,
+                                condition_plane.data(),
+                                plane_bytes * (condition_slot_offset + valid_slot),
+                                plane_bytes);
+    }
+    SAM3_PROFILE_CPU_END(sam31_mem_mask_upload);
+    SAM3_PROFILE_CPU_START(sam31_mem_pix_copy);
+    sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], pix_feat);
+    SAM3_PROFILE_CPU_END(sam31_mem_pix_copy);
+    SAM3_PROFILE_CPU_START(sam31_mem_graph_compute_total);
+    if (!sam3_graph_compute(model.backend, g, 4, "sam31_memory_encode")) {
+        return false;
+    }
+    SAM3_PROFILE_CPU_END(sam31_mem_graph_compute_total);
+
+    if (sam31_backend_memory_slot_enabled()) {
+        SAM3_PROFILE_CPU_START(sam31_mem_store_slot_backend);
+        sam3_ensure_tracker_pe_backend_caches(tracker, model, H);
+        if (tracker.cached_src_pos_tensor &&
+            sam31_store_spatial_memory_slot_backend(tracker,
+                                                    model,
+                                                    inst_id,
+                                                    h,
+                                                    state.neck_trk[2],
+                                                    tracker.cached_src_pos_tensor,
+                                                    D,
+                                                    H,
+                                                    H,
+                                                    frame_idx,
+                                                    is_cond,
+                                                    obj_score)) {
+            SAM3_PROFILE_CPU_END(sam31_mem_store_slot_backend);
+            return true;
+        }
+        SAM3_PROFILE_CPU_END(sam31_mem_store_slot_backend);
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_mem_output_materialize);
+    std::vector<float> memory_features(sam3_count_mul(D, H, H));
+    SAM3_PROFILE_CPU_START(sam31_mem_output_read);
+    ggml_backend_tensor_get(h, memory_features.data(), 0, memory_features.size() * sizeof(float));
+    SAM3_PROFILE_CPU_END(sam31_mem_output_read);
+    if (model.no_obj_embed_spatial) {
+        SAM3_PROFILE_CPU_START(sam31_mem_no_obj_add);
+        std::vector<float> no_obj(sam3_count_mul(D, M));
+        sam3_read_f32(
+            model.no_obj_embed_spatial, no_obj.data(), static_cast<int64_t>(no_obj.size()));
+        std::vector<float> no_obj_sum(static_cast<size_t>(D), 0.0f);
+        for (int slot = 0; slot < M; ++slot) {
+            if (slot == valid_slot && obj_score > 0.0f) {
+                continue;
+            }
+            for (int d = 0; d < D; ++d) {
+                no_obj_sum[static_cast<size_t>(d)] +=
+                    no_obj[static_cast<size_t>(d) + sam3_count_mul(slot, D)];
+            }
+        }
+        for (int n = 0; n < H * H; ++n) {
+            for (int d = 0; d < D; ++d) {
+                memory_features[static_cast<size_t>(d) + sam3_count_mul(n, D)] +=
+                    no_obj_sum[static_cast<size_t>(d)];
+            }
+        }
+        SAM3_PROFILE_CPU_END(sam31_mem_no_obj_add);
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_mem_image_features_read);
+    std::vector<float> image_features(sam3_count_mul(D, H, H));
+    sam3_read_f32(
+        state.neck_trk[2], image_features.data(), static_cast<int64_t>(image_features.size()));
+    SAM3_PROFILE_CPU_END(sam31_mem_image_features_read);
+    SAM3_PROFILE_CPU_START(sam31_mem_image_pos_prepare);
+    std::vector<float> image_pos;
+    if (state.neck_trk_pe[2] && state.neck_trk_pe[2]->ne[0] == D &&
+        state.neck_trk_pe[2]->ne[1] == H && state.neck_trk_pe[2]->ne[2] == H) {
+        image_pos.resize(sam3_count_mul(D, H, H));
+        sam3_read_f32(
+            state.neck_trk_pe[2], image_pos.data(), static_cast<int64_t>(image_pos.size()));
+    } else {
+        sam3_ensure_tracker_pe_caches(tracker, hp, H);
+        image_pos = tracker.cached_sinpe_256;
+    }
+    std::vector<float> memory_pos;
+    SAM3_PROFILE_CPU_END(sam31_mem_image_pos_prepare);
+    SAM3_PROFILE_CPU_END(sam31_mem_output_materialize);
+
+    const std::array<int64_t, 4> mux_shape{
+        INTERPOL,
+        INTERPOL,
+        mask_channels,
+        1,
+    };
+    const std::array<int64_t, 4> mux_input_shape{
+        INPUT_MASK_RES,
+        INPUT_MASK_RES,
+        mask_channels,
+        1,
+    };
+    const std::array<int64_t, 4> feature_shape{
+        D,
+        H,
+        H,
+        1,
+    };
+    if (dump_slot) {
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR",
+            "memory_mux_mask_interpolated",
+            mux_mask ? std::span<const float>{*mux_mask} : std::span<const float>{},
+            mux_shape);
+        std::vector<float> mux_input(sam3_count_mul(INPUT_MASK_RES, INPUT_MASK_RES, mask_channels),
+                                     0.0f);
+        const size_t input_plane = sam3_count_mul(INPUT_MASK_RES, INPUT_MASK_RES);
+        std::copy_n(input_mask.data(), input_plane, mux_input.data());
+        std::fill_n(mux_input.data() +
+                        static_cast<ptrdiff_t>(input_plane * (condition_slot_offset + valid_slot)),
+                    input_plane,
+                    is_cond ? 1.0f : 0.0f);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "memory_mux_mask_input", mux_input, mux_input_shape);
+    }
+    if (dump_slot) {
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_feats", memory_features, feature_shape);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_pe", memory_pos, feature_shape);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "image_features", image_features, feature_shape);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "image_pos_enc", image_pos, feature_shape);
+    }
+
+    SAM3_PROFILE_CPU_START(sam31_mem_store_slot);
+    const bool stored = sam3_store_spatial_memory_slot(tracker,
+                                                       model,
+                                                       inst_id,
+                                                       std::move(memory_features),
+                                                       std::move(memory_pos),
+                                                       D,
+                                                       H,
+                                                       H,
+                                                       frame_idx,
+                                                       is_cond,
+                                                       std::move(image_features),
+                                                       std::move(image_pos));
+    SAM3_PROFILE_CPU_END(sam31_mem_store_slot);
+    return stored;
+}
+
 static bool sam3_encode_memory(sam3_tracker& tracker,
                                sam3_state& state,
                                const sam3_model& model,
@@ -14806,40 +23241,103 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
                                bool is_cond,
                                float obj_score) {
     const auto& hp = model.hparams;
+    if (hp.is_sam3_1()) {
+        return sam31_encode_memory(tracker,
+                                   state,
+                                   model,
+                                   inst_id,
+                                   mask_logits,
+                                   mask_h,
+                                   mask_w,
+                                   frame_idx,
+                                   is_cond,
+                                   obj_score);
+    }
     const int D = hp.neck_dim;
     const int MD = hp.mem_out_dim;
     const int H = sam3_eff_feat_size(state, hp);
     const int HIGH_RES = sam3_eff_img_size(state, hp);
     const int INTERPOL = H * 16;
+    const size_t image_feature_count = sam3_count_mul(D, H, H);
+    std::optional<std::string_view> memory_image_features_ref;
+    if (is_cond) {
+        memory_image_features_ref = sam3_getenv("SAM3_MEM_IMAGE_FEATURES_REF");
+    }
+    std::vector<float> memory_image_features_ref_cpu;
+    if (memory_image_features_ref) {
+        memory_image_features_ref_cpu.resize(image_feature_count);
+        const std::array<int64_t, 4> expected_shape{D, H, H, 1};
+        if (!sam3_load_debug_f32(
+                *memory_image_features_ref, memory_image_features_ref_cpu, expected_shape)) {
+            return false;
+        }
+    }
 
     // Mask preprocessing: mask_logits -> HIGH_RES -> sigmoid/scale/bias -> INTERPOL.
-    // EdgeTAM's HIGH_RES and INTERPOL are both 1024, so avoid a no-op second resize.
+    // Initial SAM3 conditioning masks already follow the official tracker contract at
+    // input_mask_size (H*16), so keep them at INTERPOL resolution and avoid an
+    // unnecessary 1152 -> 1008 -> 1152 resampling roundtrip.
     SAM3_PROFILE_CPU_START(mem_mask_prepare);
-    auto m_hires = sam3_bilinear_interpolate(mask_logits, mask_w, mask_h, HIGH_RES, HIGH_RES);
     const float sig_scale = hp.sigmoid_scale();
     const float sig_bias = hp.sigmoid_bias();
-    const bool binarize_cond_mem =
-        is_cond && hp.is_sam2() && !sam3_getenv("SAM2_DISABLE_BINARIZE_COND_MEM").has_value();
-    if (binarize_cond_mem) {
-        for (auto& v : m_hires) {
-            v = ((v > 0.0f) ? sig_scale : 0.0f) + sig_bias;
-        }
-    } else {
-        for (auto& v : m_hires) {
+    const bool direct_interpol_mask =
+        is_cond && hp.model_type == SAM3_MODEL_SAM3 && mask_w == INTERPOL && mask_h == INTERPOL &&
+        !sam3_getenv("SAM3_DISABLE_DIRECT_INITIAL_MEM_MASK").has_value();
+    std::vector<float> m_hires;
+    std::vector<float> m_interp;
+    const float* m_interp_data = nullptr;
+    size_t m_interp_size = 0;
+    if (direct_interpol_mask) {
+        m_interp.assign(mask_logits, mask_logits + sam3_count_mul(mask_w, mask_h));
+        for (auto& v : m_interp) {
             const float s = 1.0f / (1.0f + expf(-v));
             v = (s * sig_scale) + sig_bias;
         }
-    }
-    sam3_dump_memory_mask_if_requested(
-        m_hires.data(), m_hires.size(), HIGH_RES, HIGH_RES, frame_idx, inst_id, is_cond, "hires");
-    std::vector<float> m_interp;
-    const float* m_interp_data = m_hires.data();
-    size_t m_interp_size = m_hires.size();
-    if (INTERPOL != HIGH_RES) {
-        m_interp =
-            sam3_bilinear_interpolate(m_hires.data(), HIGH_RES, HIGH_RES, INTERPOL, INTERPOL);
         m_interp_data = m_interp.data();
         m_interp_size = m_interp.size();
+    } else {
+        m_hires = sam3_bilinear_interpolate(mask_logits, mask_w, mask_h, HIGH_RES, HIGH_RES);
+        const bool binarize_cond_mem =
+            is_cond && hp.is_sam2() && !sam3_getenv("SAM2_DISABLE_BINARIZE_COND_MEM").has_value();
+        if (binarize_cond_mem) {
+            for (auto& v : m_hires) {
+                v = ((v > 0.0f) ? sig_scale : 0.0f) + sig_bias;
+            }
+        } else {
+            for (auto& v : m_hires) {
+                const float s = 1.0f / (1.0f + expf(-v));
+                v = (s * sig_scale) + sig_bias;
+            }
+        }
+        sam3_dump_memory_mask_if_requested(m_hires.data(),
+                                           m_hires.size(),
+                                           HIGH_RES,
+                                           HIGH_RES,
+                                           frame_idx,
+                                           inst_id,
+                                           is_cond,
+                                           "hires");
+        m_interp_data = m_hires.data();
+        m_interp_size = m_hires.size();
+        if (INTERPOL != HIGH_RES) {
+            m_interp =
+                sam3_bilinear_interpolate(m_hires.data(), HIGH_RES, HIGH_RES, INTERPOL, INTERPOL);
+            m_interp_data = m_interp.data();
+            m_interp_size = m_interp.size();
+        }
+    }
+    std::vector<float> memory_mask_input_ref_cpu;
+    if (is_cond) {
+        if (const auto memory_mask_input_ref = sam3_getenv("SAM3_MEM_MASK_INPUT_REF")) {
+            memory_mask_input_ref_cpu.resize(sam3_count_mul(INTERPOL, INTERPOL));
+            const std::array<int64_t, 4> expected_shape{INTERPOL, INTERPOL, 1, 1};
+            if (!sam3_load_debug_f32(
+                    *memory_mask_input_ref, memory_mask_input_ref_cpu, expected_shape)) {
+                return false;
+            }
+            m_interp_data = memory_mask_input_ref_cpu.data();
+            m_interp_size = memory_mask_input_ref_cpu.size();
+        }
     }
     sam3_dump_memory_mask_if_requested(
         m_interp_data, m_interp_size, INTERPOL, INTERPOL, frame_idx, inst_id, is_cond, "interp");
@@ -14922,7 +23420,12 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
     }
     ggml_backend_tensor_set(mask_in, m_interp_data, 0, m_interp_size * sizeof(float));
     // Copy pixel features from state tensor to fresh input
-    {
+    if (!memory_image_features_ref_cpu.empty()) {
+        ggml_backend_tensor_set(pix_in_raw,
+                                memory_image_features_ref_cpu.data(),
+                                0,
+                                memory_image_features_ref_cpu.size() * sizeof(float));
+    } else {
         sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], pix_in_raw);
     }
     if (!sam3_graph_compute(model.backend, g, 4, "memory_encode")) {
@@ -14948,6 +23451,60 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
         for (size_t i = 0; i < md.size(); ++i) {
             md[i] += no_obj_emb[i % MD];
         }
+    }
+
+    if (sam3_should_dump_mem_slot(inst_id)) {
+        const std::array<int64_t, 4> mask_shape{
+            INTERPOL,
+            INTERPOL,
+            1,
+            1,
+        };
+        const std::array<int64_t, 4> memory_shape{
+            MD,
+            H,
+            H,
+            1,
+        };
+        const std::array<int64_t, 4> image_shape{
+            D,
+            H,
+            H,
+            1,
+        };
+        sam3_dump_f32_tensor_if_requested("SAM3_DUMP_MEM_SLOT_DIR",
+                                          "memory_mask_input",
+                                          std::span<const float>(m_interp_data, m_interp_size),
+                                          mask_shape);
+        sam3_ensure_tracker_pe_caches(tracker, hp, H);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_feats", md, memory_shape);
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_pe", tracker.cached_sinpe_64, memory_shape);
+
+        std::vector<float> image_features;
+        if (!memory_image_features_ref_cpu.empty()) {
+            image_features = memory_image_features_ref_cpu;
+        } else {
+            image_features.resize(image_feature_count);
+            sam3_read_f32(state.neck_trk[2],
+                          image_features.data(),
+                          static_cast<int64_t>(image_features.size()));
+        }
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "image_features", image_features, image_shape);
+
+        std::vector<float> image_pos;
+        if (state.neck_trk_pe[2] && state.neck_trk_pe[2]->ne[0] == D &&
+            state.neck_trk_pe[2]->ne[1] == H && state.neck_trk_pe[2]->ne[2] == H) {
+            image_pos.resize(sam3_count_mul(D, H, H));
+            sam3_read_f32(
+                state.neck_trk_pe[2], image_pos.data(), static_cast<int64_t>(image_pos.size()));
+        } else {
+            image_pos = sam3_sinusoidal_pe_2d(H, H, D);
+        }
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "image_pos_enc", image_pos, image_shape);
     }
 
     if (!tracker.ctx) {
@@ -14984,11 +23541,13 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
         sam3_memory_slot slot{
             .spatial_feats = st,
             .spatial_pe = nullptr,  // fixed PE is reconstructed from tracker cache
+            .spatial_feats_cpu = std::move(perc_latents),
+            .spatial_pe_cpu = {},
             .frame_index = frame_idx,
             .is_cond_frame = is_cond,
         };
         auto& bk = tracker.mem_banks[inst_id];
-        bk.push_back(slot);
+        bk.push_back(std::move(slot));
         while (std::cmp_greater(bk.size(), hp.num_maskmem)) {
             bool removed = false;
             for (auto it = bk.begin(); it != bk.end(); ++it)
@@ -15015,11 +23574,13 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
     sam3_memory_slot slot{
         .spatial_feats = st,
         .spatial_pe = nullptr,  // fixed PE is reconstructed from tracker cache
+        .spatial_feats_cpu = md,
+        .spatial_pe_cpu = {},
         .frame_index = frame_idx,
         .is_cond_frame = is_cond,
     };
     auto& bk = tracker.mem_banks[inst_id];
-    bk.push_back(slot);
+    bk.push_back(std::move(slot));
     while (std::cmp_greater(bk.size(), hp.num_maskmem)) {
         bool removed = false;
         for (auto it = bk.begin(); it != bk.end(); ++it)
@@ -15032,6 +23593,12 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
             bk.erase(bk.begin() + 1);
     }
     return true;
+}
+
+static thread_local sam3_tracker_add_timing g_sam3_last_tracker_add_timing;
+
+sam3_tracker_add_timing sam3_tracker_last_add_timing() {
+    return g_sam3_last_tracker_add_timing;
 }
 
 static void sam3_store_obj_ptr(
@@ -15068,6 +23635,7 @@ sam3_tracker_ptr sam3_create_tracker(const sam3_model& model, const sam3_video_p
     }
     sam3_tracker_ptr tracker{std::make_unique<sam3_tracker>().release()};
     tracker->params = params;
+    sam3_ensure_tracker_pe_caches(*tracker, model.hparams);
     fprintf(stderr,
             "%s: tracker created (hotstart=%d, max_keep_alive=%d)\n",
             __func__,
@@ -15450,7 +24018,11 @@ bool sam3_refine_instance(sam3_tracker& tracker,
     tgt->last_seen = fi;
     std::vector<float> op(D);
     if (!rdet.sam_token.empty()) {
-        sam3_extract_obj_ptr_cpu(model, rdet.sam_token.data(), rdet.obj_score_logit, op.data());
+        sam3_extract_obj_ptr_cpu(model,
+                                 rdet.sam_token.data(),
+                                 rdet.obj_score_logit,
+                                 op.data(),
+                                 model.hparams.is_sam3_1());
     } else {
         std::ranges::fill(op, 0.0f);
     }
@@ -15505,22 +24077,33 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
     int memory_mask_w = det.raw_mask_width;
     int memory_mask_h = det.raw_mask_height;
     if (det.raw_mask_logits.empty() || memory_mask_w <= 0 || memory_mask_h <= 0) {
-        const int mask_hw = sam3_eff_feat_size(state, model.hparams) * 4;
-        synth_logits.resize(sam3_count_mul(mask_hw, mask_hw));
         const int mw = det.mask.width;
         const int mh = det.mask.height;
-        for (int y = 0; y < mask_hw; ++y) {
-            const int sy = y * mh / mask_hw;
-            for (int x = 0; x < mask_hw; ++x) {
-                const int sx = x * mw / mask_hw;
-                synth_logits[sam3_count_mul(y, mask_hw) + static_cast<size_t>(x)] =
-                    (det.mask.data[sam3_count_mul(sy, mw) + static_cast<size_t>(sx)] > 127) ? 6.0f
-                                                                                            : -6.0f;
+        if (model.hparams.is_sam3_1()) {
+            const int H = sam3_eff_feat_size(state, model.hparams);
+            const int low_res_mask_size = H * 4;
+            const int input_mask_size = low_res_mask_size * 4;
+            synth_logits = sam31_prepare_initial_mask_memory_logits(
+                det.mask, input_mask_size, low_res_mask_size);
+            memory_mask_w = low_res_mask_size;
+            memory_mask_h = low_res_mask_size;
+        } else {
+            const int mask_hw = sam3_eff_feat_size(state, model.hparams) * 4;
+            synth_logits.resize(sam3_count_mul(mask_hw, mask_hw));
+            for (int y = 0; y < mask_hw; ++y) {
+                const int sy = y * mh / mask_hw;
+                for (int x = 0; x < mask_hw; ++x) {
+                    const int sx = x * mw / mask_hw;
+                    synth_logits[sam3_count_mul(y, mask_hw) + static_cast<size_t>(x)] =
+                        (det.mask.data[sam3_count_mul(sy, mw) + static_cast<size_t>(sx)] > 127)
+                            ? 6.0f
+                            : -6.0f;
+                }
             }
+            memory_mask_w = mask_hw;
+            memory_mask_h = mask_hw;
         }
         memory_mask_logits = synth_logits.data();
-        memory_mask_w = mask_hw;
-        memory_mask_h = mask_hw;
     }
 
     // Encode into memory bank
@@ -15542,7 +24125,8 @@ int sam3_tracker_add_instance(sam3_tracker& tracker,
     // Extract object pointer from the SAM decoder token
     std::vector<float> op(D);
     if (!det.sam_token.empty()) {
-        sam3_extract_obj_ptr_cpu(model, det.sam_token.data(), obj_score, op.data());
+        sam3_extract_obj_ptr_cpu(
+            model, det.sam_token.data(), obj_score, op.data(), model.hparams.is_sam3_1());
     } else {
         std::ranges::fill(op, 0.0f);
     }
@@ -15567,8 +24151,13 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
                                sam3_state& state,
                                const sam3_model& model,
                                const sam3_detection& det) {
+    g_sam3_last_tracker_add_timing = {};
     if (det.mask.data.empty()) {
-        fprintf(stderr, "%s: detection mask is empty\n", __func__);
+        std::println(stderr, "{}: detection mask is empty", __func__);
+        return -1;
+    }
+    if (det.mask.width <= 0 || det.mask.height <= 0) {
+        std::println(stderr, "{}: detection mask shape is invalid", __func__);
         return -1;
     }
 
@@ -15576,36 +24165,135 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     const int inst_id = tracker.next_inst_id++;
     const int fi = std::max(0, tracker.frame_index);
 
-    const int mask_hw = sam3_eff_feat_size(state, model.hparams) * 4;
-    std::vector<float> det_logits(sam3_count_mul(mask_hw, mask_hw));
-    for (int r = 0; r < mask_hw; ++r) {
-        for (int c = 0; c < mask_hw; ++c) {
-            int sx = c * det.mask.width / mask_hw;
-            int sy = r * det.mask.height / mask_hw;
-            sx = std::min(sx, det.mask.width - 1);
-            sy = std::min(sy, det.mask.height - 1);
-            det_logits[sam3_count_mul(r, mask_hw) + static_cast<size_t>(c)] =
-                (det.mask.data[sam3_count_mul(sy, det.mask.width) + static_cast<size_t>(sx)] > 127)
-                    ? 5.0f
-                    : -5.0f;
+    SAM3_PROFILE_CPU_START(add_detection_mask_logits_prepare);
+    const int64_t mask_prepare_t0 = ggml_time_us();
+    std::vector<float> synth_logits;
+    const float* memory_mask_logits = det.raw_mask_logits.data();
+    int memory_mask_w = det.raw_mask_width;
+    int memory_mask_h = det.raw_mask_height;
+    const bool has_raw_logits =
+        memory_mask_w > 0 && memory_mask_h > 0 &&
+        det.raw_mask_logits.size() >= sam3_count_mul(memory_mask_w, memory_mask_h);
+    if (model.hparams.is_sam3_1()) {
+        if (!has_raw_logits) {
+            const int H = sam3_eff_feat_size(state, model.hparams);
+            const int low_res_mask_size = H * 4;
+            const int input_mask_size = low_res_mask_size * 4;
+            synth_logits = sam31_prepare_initial_mask_memory_logits(
+                det.mask, input_mask_size, low_res_mask_size);
+            memory_mask_w = low_res_mask_size;
+            memory_mask_h = low_res_mask_size;
+            memory_mask_logits = synth_logits.data();
         }
+    } else {
+        const int H = sam3_eff_feat_size(state, model.hparams);
+        synth_logits = sam3_prepare_initial_mask_memory_logits(det, H * 16);
+        memory_mask_w = H * 16;
+        memory_mask_h = H * 16;
+        memory_mask_logits = synth_logits.data();
     }
+    g_sam3_last_tracker_add_timing.mask_prepare_ms = (ggml_time_us() - mask_prepare_t0) / 1000.0;
+    SAM3_PROFILE_CPU_END(add_detection_mask_logits_prepare);
 
-    if (!sam3_encode_memory(
-            tracker, state, model, inst_id, det_logits.data(), mask_hw, mask_hw, fi, true, 1.0f)) {
-        fprintf(stderr, "%s: failed to encode memory for instance %d\n", __func__, inst_id);
+    const float obj_score_logit =
+        (std::isfinite(det.obj_score_logit) && det.obj_score_logit != 0.0f) ? det.obj_score_logit
+                                                                            : 10.0f;
+    SAM3_PROFILE_CPU_START(add_detection_encode_memory);
+    const int64_t encode_memory_t0 = ggml_time_us();
+    if (!sam3_encode_memory(tracker,
+                            state,
+                            model,
+                            inst_id,
+                            memory_mask_logits,
+                            memory_mask_h,
+                            memory_mask_w,
+                            fi,
+                            true,
+                            obj_score_logit)) {
+        g_sam3_last_tracker_add_timing.memory_encode_ms =
+            (ggml_time_us() - encode_memory_t0) / 1000.0;
+        SAM3_PROFILE_CPU_END(add_detection_encode_memory);
+        std::println(stderr, "{}: failed to encode memory for instance {}", __func__, inst_id);
         return -1;
     }
+    g_sam3_last_tracker_add_timing.memory_encode_ms = (ggml_time_us() - encode_memory_t0) / 1000.0;
+    SAM3_PROFILE_CPU_END(add_detection_encode_memory);
 
-    std::vector<float> obj_ptr(D);
-    auto* nop = model.tensors.at("no_obj_ptr");
-    if (nop->type == GGML_TYPE_F16) {
-        std::vector<ggml_fp16_t> tmp(D);
-        ggml_backend_tensor_get(nop, tmp.data(), 0, static_cast<size_t>(D) * sizeof(ggml_fp16_t));
-        ggml_fp16_to_fp32_row(tmp.data(), obj_ptr.data(), D);
-    } else {
-        ggml_backend_tensor_get(nop, obj_ptr.data(), 0, static_cast<size_t>(D) * sizeof(float));
+    std::vector<float> obj_ptr(D, 0.0f);
+    const int64_t obj_ptr_t0 = ggml_time_us();
+    if (!det.sam_token.empty()) {
+        SAM3_PROFILE_CPU_START(add_detection_obj_ptr_from_token);
+        sam3_extract_obj_ptr_cpu(model,
+                                 det.sam_token.data(),
+                                 obj_score_logit,
+                                 obj_ptr.data(),
+                                 model.hparams.is_sam3_1());
+        SAM3_PROFILE_CPU_END(add_detection_obj_ptr_from_token);
+    } else if (model.hparams.is_sam3_1()) {
+        SAM3_PROFILE_CPU_START(add_detection_interactive_obj_ptr);
+        if (!sam31_compute_interactive_mask_obj_ptr(state, model, det, obj_ptr)) {
+            std::println(stderr,
+                         "{}: SAM3.1 interactive mask object pointer failed; using zero pointer",
+                         __func__);
+            std::ranges::fill(obj_ptr, 0.0f);
+        }
+        SAM3_PROFILE_CPU_END(add_detection_interactive_obj_ptr);
+    } else if (!model.hparams.is_sam3_1()) {
+        if (!sam3_compute_mask_input_obj_ptr(state, model, det, obj_ptr)) {
+            auto nop_it = model.tensors.find("no_obj_ptr");
+            if (nop_it == model.tensors.end()) {
+                std::println(stderr, "{}: no_obj_ptr tensor is missing", __func__);
+                return -1;
+            }
+            auto* nop = nop_it->second;
+            if (nop->type == GGML_TYPE_F16) {
+                std::vector<ggml_fp16_t> tmp(D);
+                ggml_backend_tensor_get(
+                    nop, tmp.data(), 0, static_cast<size_t>(D) * sizeof(ggml_fp16_t));
+                ggml_fp16_to_fp32_row(tmp.data(), obj_ptr.data(), D);
+            } else {
+                ggml_backend_tensor_get(
+                    nop, obj_ptr.data(), 0, static_cast<size_t>(D) * sizeof(float));
+            }
+        }
     }
+    g_sam3_last_tracker_add_timing.obj_ptr_ms = (ggml_time_us() - obj_ptr_t0) / 1000.0;
+    if (!model.hparams.is_sam3_1()) {
+        if (const auto obj_ptr_ref = sam3_getenv("SAM3_MEM_OBJ_PTR_REF")) {
+            std::vector<float> obj_ptr_ref_cpu(static_cast<size_t>(D));
+            const std::array<int64_t, 2> expected_shape{D, 1};
+            if (!sam3_load_debug_f32(*obj_ptr_ref, obj_ptr_ref_cpu, expected_shape)) {
+                return -1;
+            }
+            obj_ptr = std::move(obj_ptr_ref_cpu);
+        }
+    }
+    if (!model.hparams.is_sam3_1() && sam3_should_dump_mem_slot(inst_id)) {
+        const std::array<int64_t, 2> obj_ptr_shape = {D, 1};
+        const std::array<int64_t, 2> score_shape = {1, 1};
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "obj_ptr", obj_ptr, obj_ptr_shape);
+        sam3_dump_f32_tensor_if_requested("SAM3_DUMP_MEM_SLOT_DIR",
+                                          "object_score_logits",
+                                          std::span<const float>(&obj_score_logit, 1),
+                                          score_shape);
+    }
+    if (model.hparams.is_sam3_1() && sam3_should_dump_mem_slot(inst_id)) {
+        constexpr int M = sam3::sam31::multiplex_count;
+        std::vector<float> mux_obj_ptr(sam3_count_mul(D, M), 0.0f);
+        std::ranges::copy(obj_ptr, mux_obj_ptr.begin());
+        const float forced_object_score_logit = 10.0f;
+        const std::array<int64_t, 3> obj_ptr_shape = {D, 1, M};
+        const std::array<int64_t, 2> score_shape = {1, 1};
+        sam3_dump_f32_tensor_if_requested(
+            "SAM3_DUMP_MEM_SLOT_DIR", "obj_ptr", mux_obj_ptr, obj_ptr_shape);
+        sam3_dump_f32_tensor_if_requested("SAM3_DUMP_MEM_SLOT_DIR",
+                                          "object_score_logits",
+                                          std::span<const float>(&forced_object_score_logit, 1),
+                                          score_shape);
+    }
+    SAM3_PROFILE_CPU_START(add_detection_store);
+    const int64_t store_t0 = ggml_time_us();
     sam3_store_obj_ptr(tracker, model, inst_id, obj_ptr.data(), fi);
 
     sam3_masklet ml{};
@@ -15617,6 +24305,8 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     ml.mds_sum = 1;
     tracker.masklets.push_back(ml);
     tracker.frame_index = std::max(tracker.frame_index, fi + 1);
+    g_sam3_last_tracker_add_timing.store_ms = (ggml_time_us() - store_t0) / 1000.0;
+    SAM3_PROFILE_CPU_END(add_detection_store);
     return inst_id;
 }
 
@@ -15638,14 +24328,19 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
     sam3_reset_context(tracker.pe_backend_ctx);
     tracker.cached_src_pos_tensor = nullptr;
     tracker.cached_rope_q_tensor = nullptr;
+    tracker.cached_rope_head_q_tensor = nullptr;
+    tracker.cached_rope_k_tensor = nullptr;
     tracker.cached_pe_backend_feat_size = 0;
+    tracker.cached_rope_k_tokens_per_slot = 0;
+    tracker.cached_rope_k_slots = 0;
+    tracker.sam31_prop_graph_cache.reset();
 }
 
 /*****************************************************************************
 ** Visual-only video tracking
 *****************************************************************************/
 
-sam3_tracker_ptr sam3_create_visual_tracker([[maybe_unused]] const sam3_model& model,
+sam3_tracker_ptr sam3_create_visual_tracker(const sam3_model& model,
                                             const sam3_visual_track_params& params) {
     sam3_video_params vp;
     vp.text_prompt = "";  // no PCS detection
@@ -15657,22 +24352,29 @@ sam3_tracker_ptr sam3_create_visual_tracker([[maybe_unused]] const sam3_model& m
     vp.bbox_only = params.bbox_only;
     sam3_tracker_ptr tracker{std::make_unique<sam3_tracker>().release()};
     tracker->params = vp;
-    fprintf(stderr,
-            "%s: visual-only tracker created (max_keep_alive=%d)\n",
-            __func__,
-            params.max_keep_alive);
+    sam3_ensure_tracker_pe_caches(*tracker, model.hparams);
+    sam3_ensure_tracker_pe_backend_caches(*tracker, model);
+    if (!sam31_warmup_interactive_mask_head(model, 4)) {
+        std::println(stderr, "{}: SAM3.1 interactive mask-head warmup failed", __func__);
+    }
+    std::println(stderr,
+                 "{}: visual-only tracker created (max_keep_alive={})",
+                 __func__,
+                 params.max_keep_alive);
     return tracker;
 }
 
-sam3_result sam3_propagate_frame(sam3_tracker& tracker,
-                                 sam3_state& state,
-                                 const sam3_model& model,
-                                 const sam3_image& frame) {
+sam3_result sam3_propagate_encoded_frame(sam3_tracker& tracker,
+                                         sam3_state& state,
+                                         const sam3_model& model) {
+    sam3_propagate_timing_scope propagate_timing_scope(g_sam3_last_propagate_timing);
     sam3_result result{};
     const int D = model.hparams.neck_dim;
-    if (!sam3_encode_image_impl(state, model, frame, false))
-        return result;
     const int fi = tracker.frame_index;
+    g_sam3_last_propagate_timing.active_masklets = static_cast<int>(std::min<size_t>(
+        tracker.masklets.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
+    g_sam3_last_propagate_timing.pending_masklets = static_cast<int>(std::min<size_t>(
+        tracker.pending.size(), static_cast<size_t>(std::numeric_limits<int>::max())));
     SAM3_LOG(1,
              "%s: frame %d (%zu active + %zu pending)\n",
              __func__,
@@ -15696,6 +24398,7 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
         if (tracker.params.bbox_only) {
             int fg = 0;
             sam3_box box{};
+            const int64_t bbox_t0 = ggml_time_us();
             if (sam3_bbox_from_logits(po[id].mask_logits,
                                       po[id].mask_w,
                                       po[id].mask_h,
@@ -15705,6 +24408,7 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
                                       fg)) {
                 pb[id] = box;
             }
+            sam3_add_propagate_timing(&sam3_propagate_timing::bbox_from_logits_ms, bbox_t0);
             ml.last_score = po[id].iou_scores[0];
             ml.last_seen = fi;
             const float cov = static_cast<float>(fg) /
@@ -15715,6 +24419,7 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
         int fg = 0;
         sam3_box box{};
         SAM3_PROFILE_CPU_START(prop_fullmask_active_resize_bbox);
+        const int64_t active_resize_t0 = ggml_time_us();
         if (sam3_mask_from_logits_resized(po[id].mask_logits.data(),
                                           po[id].mask_w,
                                           po[id].mask_h,
@@ -15726,6 +24431,8 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
             pb[id] = box;
         }
         SAM3_PROFILE_CPU_END(prop_fullmask_active_resize_bbox);
+        sam3_add_propagate_timing(&sam3_propagate_timing::fullmask_active_resize_bbox_ms,
+                                  active_resize_t0);
         ml.last_score = po[id].iou_scores[0];
         ml.last_seen = fi;
         const float cov = static_cast<float>(fg) /
@@ -15747,6 +24454,7 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
             int fg2 = 0;
             sam3_box box2{};
             SAM3_PROFILE_CPU_START(prop_fullmask_pending_resize_bbox);
+            const int64_t pending_resize_t0 = ggml_time_us();
             if (sam3_mask_from_logits_resized(p2.mask_logits.data(),
                                               p2.mask_w,
                                               p2.mask_h,
@@ -15758,9 +24466,12 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
                 pb[id] = box2;
             }
             SAM3_PROFILE_CPU_END(prop_fullmask_pending_resize_bbox);
+            sam3_add_propagate_timing(&sam3_propagate_timing::fullmask_pending_resize_bbox_ms,
+                                      pending_resize_t0);
             const float c2 = static_cast<float>(fg2) / static_cast<float>(sam3_count_mul(
                                                            state.orig_width, state.orig_height));
             ml.mds_sum += (c2 > 0.001f && p2.obj_score > 0.0f) ? 1 : -1;
+            const int64_t pending_memory_update_t0 = ggml_time_us();
             sam3_encode_memory(tracker,
                                state,
                                model,
@@ -15774,6 +24485,8 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
             std::vector<float> op(D);
             sam3_extract_obj_ptr_cpu(model, p2.sam_token.data(), p2.obj_score, op.data());
             sam3_store_obj_ptr(tracker, model, id, op.data(), fi);
+            sam3_add_propagate_timing(&sam3_propagate_timing::memory_update_ms,
+                                      pending_memory_update_t0);
         }
     }
 
@@ -15786,6 +24499,7 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
         if (tracker.params.recondition_every > 1 && (fi % tracker.params.recondition_every) != 0) {
             continue;
         }
+        const int64_t active_memory_update_t0 = ggml_time_us();
         sam3_encode_memory(tracker,
                            state,
                            model,
@@ -15800,12 +24514,17 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
         sam3_extract_obj_ptr_cpu(
             model, it->second.sam_token.data(), it->second.obj_score, op.data());
         sam3_store_obj_ptr(tracker, model, id, op.data(), fi);
+        sam3_add_propagate_timing(&sam3_propagate_timing::memory_update_ms,
+                                  active_memory_update_t0);
     }
 
     // ── Update tracker state (confirmation / eviction) ───────────────────
+    const int64_t tracker_update_t0 = ggml_time_us();
     sam3_update_tracker(tracker, fi);
+    sam3_add_propagate_timing(&sam3_propagate_timing::tracker_update_ms, tracker_update_t0);
 
     // ── Build result ─────────────────────────────────────────────────────
+    const int64_t result_build_t0 = ggml_time_us();
     const bool capture_prop_logits = sam3_getenv("SAM3_CAPTURE_PROP_LOGITS").has_value();
     auto add_mask_to_result = [&](int inst_id,
                                   float score,
@@ -15940,9 +24659,20 @@ sam3_result sam3_propagate_frame(sam3_tracker& tracker,
             SAM3_PROFILE_CPU_END(prop_fullmask_cleanup);
         }
     }
+    sam3_add_propagate_timing(&sam3_propagate_timing::result_build_ms, result_build_t0);
     tracker.frame_index++;
     SAM3_LOG(2, "%s: frame %d done — %zu tracked\n", __func__, fi, result.detections.size());
     return result;
+}
+
+sam3_result sam3_propagate_frame(sam3_tracker& tracker,
+                                 sam3_state& state,
+                                 const sam3_model& model,
+                                 const sam3_image& frame) {
+    if (!sam3_encode_image_for_tracking(state, model, frame)) {
+        return sam3_result{};
+    }
+    return sam3_propagate_encoded_frame(tracker, state, model);
 }
 
 /*****************************************************************************
@@ -16430,7 +25160,7 @@ static bool sam3_dump_tensor_to_path(struct ggml_tensor* t,
     }
 
     std::vector<float> data(numel);
-    if (t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_F32) {
+    if (t->type != GGML_TYPE_F16 && t->type != GGML_TYPE_BF16 && t->type != GGML_TYPE_F32) {
         fprintf(stderr,
                 "%s: unsupported tensor type %d for '%s'\n",
                 __func__,
@@ -16444,19 +25174,26 @@ static bool sam3_dump_tensor_to_path(struct ggml_tensor* t,
     const int64_t ne2 = t->ne[2];
     const int64_t ne3 = t->ne[3];
 
-    if (ggml_is_contiguous(t)) {
+    const auto read_row_as_f32 = [&](size_t offset, float* dst) {
         if (t->type == GGML_TYPE_F16) {
-            std::vector<ggml_fp16_t> f16_data(numel);
+            std::vector<ggml_fp16_t> row(static_cast<size_t>(ne0));
             ggml_backend_tensor_get(
-                t, f16_data.data(), 0, static_cast<size_t>(numel) * sizeof(ggml_fp16_t));
-            ggml_fp16_to_fp32_row(f16_data.data(), data.data(), numel);
+                t, row.data(), offset, static_cast<size_t>(ne0) * sizeof(ggml_fp16_t));
+            ggml_fp16_to_fp32_row(row.data(), dst, ne0);
+        } else if (t->type == GGML_TYPE_BF16) {
+            std::vector<ggml_bf16_t> row(static_cast<size_t>(ne0));
+            ggml_backend_tensor_get(
+                t, row.data(), offset, static_cast<size_t>(ne0) * sizeof(ggml_bf16_t));
+            ggml_bf16_to_fp32_row(row.data(), dst, ne0);
         } else {
-            ggml_backend_tensor_get(t, data.data(), 0, static_cast<size_t>(numel) * sizeof(float));
+            ggml_backend_tensor_get(t, dst, offset, static_cast<size_t>(ne0) * sizeof(float));
         }
-    } else if (t->nb[0] == ggml_type_size(t->type)) {
-        // Serialize non-contiguous logical tensors in row-major ggml order.
-        if (t->type == GGML_TYPE_F16) {
-            std::vector<ggml_fp16_t> row(ne0);
+    };
+
+    if (ggml_is_contiguous(t)) {
+        if (t->type == GGML_TYPE_F32) {
+            ggml_backend_tensor_get(t, data.data(), 0, static_cast<size_t>(numel) * sizeof(float));
+        } else {
             for (int64_t i3 = 0; i3 < ne3; ++i3) {
                 for (int64_t i2 = 0; i2 < ne2; ++i2) {
                     for (int64_t i1 = 0; i1 < ne1; ++i1) {
@@ -16469,30 +25206,25 @@ static bool sam3_dump_tensor_to_path(struct ggml_tensor* t,
                         const size_t offs = (static_cast<size_t>(i3) * t->nb[3]) +
                                             (static_cast<size_t>(i2) * t->nb[2]) +
                                             (static_cast<size_t>(i1) * t->nb[1]);
-                        ggml_backend_tensor_get(
-                            t, row.data(), offs, static_cast<size_t>(ne0) * sizeof(ggml_fp16_t));
-                        ggml_fp16_to_fp32_row(row.data(), data.data() + row_idx, ne0);
+                        read_row_as_f32(offs, data.data() + row_idx);
                     }
                 }
             }
-        } else {
-            for (int64_t i3 = 0; i3 < ne3; ++i3) {
-                for (int64_t i2 = 0; i2 < ne2; ++i2) {
-                    for (int64_t i1 = 0; i1 < ne1; ++i1) {
-                        const size_t row_idx =
-                            ((static_cast<size_t>(i3) * static_cast<size_t>(ne2) *
-                              static_cast<size_t>(ne1)) +
-                             (static_cast<size_t>(i2) * static_cast<size_t>(ne1)) +
-                             static_cast<size_t>(i1)) *
-                            static_cast<size_t>(ne0);
-                        const size_t offs = (static_cast<size_t>(i3) * t->nb[3]) +
-                                            (static_cast<size_t>(i2) * t->nb[2]) +
-                                            (static_cast<size_t>(i1) * t->nb[1]);
-                        ggml_backend_tensor_get(t,
-                                                data.data() + row_idx,
-                                                offs,
-                                                static_cast<size_t>(ne0) * sizeof(float));
-                    }
+        }
+    } else if (t->nb[0] == ggml_type_size(t->type)) {
+        // Serialize non-contiguous logical tensors in row-major ggml order.
+        for (int64_t i3 = 0; i3 < ne3; ++i3) {
+            for (int64_t i2 = 0; i2 < ne2; ++i2) {
+                for (int64_t i1 = 0; i1 < ne1; ++i1) {
+                    const size_t row_idx = ((static_cast<size_t>(i3) * static_cast<size_t>(ne2) *
+                                             static_cast<size_t>(ne1)) +
+                                            (static_cast<size_t>(i2) * static_cast<size_t>(ne1)) +
+                                            static_cast<size_t>(i1)) *
+                                           static_cast<size_t>(ne0);
+                    const size_t offs = (static_cast<size_t>(i3) * t->nb[3]) +
+                                        (static_cast<size_t>(i2) * t->nb[2]) +
+                                        (static_cast<size_t>(i1) * t->nb[1]);
+                    read_row_as_f32(offs, data.data() + row_idx);
                 }
             }
         }
@@ -16937,7 +25669,7 @@ bool sam3_test_dump_phase5(const sam3_model& model,
         "ddec_ref_boxes_init",
         "ddec_query_sine_0",
         "ddec_query_pos_0",
-        "ddec_rpb_mask_0",
+        "ddec_rpb_mask_obj_0",
         "ddec_layer0_after_sa",
         "ddec_layer0_after_text_ca",
         "ddec_layer0_after_img_ca",
@@ -17038,14 +25770,6 @@ bool sam3_test_dump_phase5(const sam3_model& model,
         ggml_backend_tensor_set(qpos_pres, zeros.data(), 0, static_cast<size_t>(D) * sizeof(float));
     }
 
-    auto* rpb_pz = ggml_get_tensor(ctx0.get(), "rpb_pres_zeros");
-    if (rpb_pz) {
-        const auto n = static_cast<size_t>(rpb_pz->ne[0]) * static_cast<size_t>(rpb_pz->ne[1]) *
-                       static_cast<size_t>(rpb_pz->ne[2]) * static_cast<size_t>(rpb_pz->ne[3]);
-        std::vector<float> zeros(n, 0.0f);
-        ggml_backend_tensor_set(rpb_pz, zeros.data(), 0, n * sizeof(float));
-    }
-
     {
         int n_valid = 0;
         for (int i = 0; i < L; ++i) {
@@ -17057,7 +25781,7 @@ bool sam3_test_dump_phase5(const sam3_model& model,
             n_valid = 1;
         }
 
-        const float scale = static_cast<float>(L) / static_cast<float>(n_valid);
+        const float scale = 1.0f / static_cast<float>(n_valid);
         std::vector<float> valid_mask(L);
         std::vector<float> attn_bias(L);
         for (int i = 0; i < L; ++i) {
@@ -17245,7 +25969,7 @@ bool sam3_test_dump_phase5_from_ref_inputs(const sam3_model& model,
         "ddec_ref_boxes_init",
         "ddec_query_sine_0",
         "ddec_query_pos_0",
-        "ddec_rpb_mask_0",
+        "ddec_rpb_mask_obj_0",
         "ddec_layer0_after_sa",
         "ddec_layer0_after_text_ca",
         "ddec_layer0_after_img_ca",
@@ -17347,13 +26071,6 @@ bool sam3_test_dump_phase5_from_ref_inputs(const sam3_model& model,
         ggml_backend_tensor_set(qpos_pres, zeros.data(), 0, D * sizeof(float));
     }
 
-    auto* rpb_pz = ggml_get_tensor(ctx0.get(), "rpb_pres_zeros");
-    if (rpb_pz) {
-        int n = static_cast<int>(rpb_pz->ne[0] * rpb_pz->ne[1] * rpb_pz->ne[2] * rpb_pz->ne[3]);
-        std::vector<float> zeros(n, 0.0f);
-        ggml_backend_tensor_set(rpb_pz, zeros.data(), 0, n * sizeof(float));
-    }
-
     {
         int n_valid = 0;
         for (int i = 0; i < L; ++i) {
@@ -17365,7 +26082,7 @@ bool sam3_test_dump_phase5_from_ref_inputs(const sam3_model& model,
             n_valid = 1;
         }
 
-        const float scale = static_cast<float>(L) / static_cast<float>(n_valid);
+        const float scale = 1.0f / static_cast<float>(n_valid);
         std::vector<float> valid_mask(L);
         std::vector<float> attn_bias(L);
         for (int i = 0; i < L; ++i) {
@@ -18522,17 +27239,13 @@ bool sam3_test_dump_sam31_mux_mask_decoder_case(const sam3_model& model,
     }};
 
     for (auto& input : inputs) {
-        if (!sam3_load_ref_f32_tensor(sam3_join_path(input_dir, input.name),
-                                      input.data,
-                                      input.shape)) {
+        if (!sam3_load_ref_f32_tensor(
+                sam3_join_path(input_dir, input.name), input.data, input.shape)) {
             return false;
         }
         if (input.shape.empty() || input.shape.size() > GGML_MAX_DIMS) {
-            std::println(stderr,
-                         "{}: unsupported rank {} for {}",
-                         __func__,
-                         input.shape.size(),
-                         input.name);
+            std::println(
+                stderr, "{}: unsupported rank {} for {}", __func__, input.shape.size(), input.name);
             return false;
         }
     }
@@ -18558,10 +27271,8 @@ bool sam3_test_dump_sam31_mux_mask_decoder_case(const sam3_model& model,
     for (auto& input : inputs) {
         std::array<int64_t, GGML_MAX_DIMS> ne = {1, 1, 1, 1};
         std::ranges::copy(input.shape, ne.begin());
-        input.tensor = ggml_new_tensor(ctx0.get(),
-                                       GGML_TYPE_F32,
-                                       static_cast<int>(input.shape.size()),
-                                       ne.data());
+        input.tensor = ggml_new_tensor(
+            ctx0.get(), GGML_TYPE_F32, static_cast<int>(input.shape.size()), ne.data());
         ggml_set_name(input.tensor, input.name.c_str());
         ggml_set_input(input.tensor);
     }
@@ -18609,7 +27320,718 @@ bool sam3_test_dump_sam31_mux_mask_decoder_case(const sam3_model& model,
             ok = false;
         }
     }
+    return ok;
+}
 
+bool sam3_test_dump_sam31_memory_backbone_case(const sam3_model& model,
+                                               const std::string& case_ref_dir,
+                                               const std::string& output_dir,
+                                               int n_threads) {
+    if (!model.hparams.is_sam3_1()) {
+        std::println(stderr, "{}: model is not SAM3.1", __func__);
+        return false;
+    }
+
+    const std::array required_tensors = {
+        model.mem_enc.ds_conv_w[0],   model.mem_enc.ds_conv_b[0],    model.mem_enc.ds_norm_w[0],
+        model.mem_enc.ds_norm_b[0],   model.mem_enc.ds_conv_w[1],    model.mem_enc.ds_conv_b[1],
+        model.mem_enc.ds_norm_w[1],   model.mem_enc.ds_norm_b[1],    model.mem_enc.ds_conv_w[2],
+        model.mem_enc.ds_conv_b[2],   model.mem_enc.ds_norm_w[2],    model.mem_enc.ds_norm_b[2],
+        model.mem_enc.ds_conv_w[3],   model.mem_enc.ds_conv_b[3],    model.mem_enc.ds_norm_w[3],
+        model.mem_enc.ds_norm_b[3],   model.mem_enc.ds_conv_w[4],    model.mem_enc.ds_conv_b[4],
+        model.mem_enc.pix_proj_w,     model.mem_enc.pix_proj_b,      model.mem_enc.fuser_dw_w[0],
+        model.mem_enc.fuser_dw_b[0],  model.mem_enc.fuser_norm_w[0], model.mem_enc.fuser_norm_b[0],
+        model.mem_enc.fuser_fc1_w[0], model.mem_enc.fuser_fc1_b[0],  model.mem_enc.fuser_fc2_w[0],
+        model.mem_enc.fuser_fc2_b[0], model.mem_enc.fuser_gamma[0],  model.mem_enc.fuser_dw_w[1],
+        model.mem_enc.fuser_dw_b[1],  model.mem_enc.fuser_norm_w[1], model.mem_enc.fuser_norm_b[1],
+        model.mem_enc.fuser_fc1_w[1], model.mem_enc.fuser_fc1_b[1],  model.mem_enc.fuser_fc2_w[1],
+        model.mem_enc.fuser_fc2_b[1], model.mem_enc.fuser_gamma[1],
+    };
+    if (std::ranges::any_of(required_tensors,
+                            [](const ggml_tensor* tensor) { return tensor == nullptr; })) {
+        std::println(stderr, "{}: SAM3.1 memory backbone tensors are not bound", __func__);
+        return false;
+    }
+
+    mkdir(output_dir.c_str(), 0755);
+    const std::string input_dir = sam3_join_path(case_ref_dir, "cpp_inputs");
+
+    struct InputSpec {
+        std::string name;
+        std::vector<float> data;
+        std::vector<int64_t> shape;
+        ggml_tensor* tensor = nullptr;
+    };
+
+    std::array<InputSpec, 2> inputs = {{
+        {.name = "pix_feat"},
+        {.name = "masks"},
+    }};
+
+    for (auto& input : inputs) {
+        if (!sam3_load_ref_f32_tensor(
+                sam3_join_path(input_dir, input.name), input.data, input.shape)) {
+            return false;
+        }
+        if (input.shape.size() != 4) {
+            std::println(stderr, "{}: expected rank-4 tensor for {}", __func__, input.name);
+            return false;
+        }
+    }
+
+    const auto& pix_shape = inputs[0].shape;
+    const auto& mask_shape = inputs[1].shape;
+    const int D = static_cast<int>(pix_shape[0]);
+    const int H = static_cast<int>(pix_shape[1]);
+    const int W = static_cast<int>(pix_shape[2]);
+    const int B = static_cast<int>(pix_shape[3]);
+    if (D != model.hparams.neck_dim || H <= 0 || W <= 0 || B != 1) {
+        std::println(stderr,
+                     "{}: unsupported pix_feat shape [{}, {}, {}, {}]",
+                     __func__,
+                     pix_shape[0],
+                     pix_shape[1],
+                     pix_shape[2],
+                     pix_shape[3]);
+        return false;
+    }
+    if (mask_shape[2] != 32 || mask_shape[3] != B) {
+        std::println(stderr,
+                     "{}: unsupported masks shape [{}, {}, {}, {}]",
+                     __func__,
+                     mask_shape[0],
+                     mask_shape[1],
+                     mask_shape[2],
+                     mask_shape[3]);
+        return false;
+    }
+
+    const size_t buf_size = (ggml_tensor_overhead() * 65536) + (ggml_graph_overhead() * 2);
+    const ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        std::println(stderr, "{}: failed to init SAM3.1 memory context", __func__);
+        return false;
+    }
+
+    for (auto& input : inputs) {
+        std::array<int64_t, GGML_MAX_DIMS> ne = {1, 1, 1, 1};
+        std::ranges::copy(input.shape, ne.begin());
+        input.tensor = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]);
+        ggml_set_name(input.tensor, input.name.c_str());
+        ggml_set_input(input.tensor);
+    }
+
+    auto* pix_feat = inputs[0].tensor;
+    auto* masks = inputs[1].tensor;
+
+    auto* ds = masks;
+    for (int s = 0; s < 4; ++s) {
+        const int out_ch = static_cast<int>(model.mem_enc.ds_conv_w[s]->ne[3]);
+        ds = ggml_conv_2d(ctx0.get(), model.mem_enc.ds_conv_w[s], ds, 2, 2, 1, 1, 1, 1);
+        ds = ggml_add(ctx0.get(),
+                      ds,
+                      ggml_reshape_4d(ctx0.get(), model.mem_enc.ds_conv_b[s], 1, 1, out_ch, 1));
+        ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 1, 2, 0, 3));
+        ds = sam3_layer_norm_2d(
+            ctx0.get(), ds, model.mem_enc.ds_norm_w[s], model.mem_enc.ds_norm_b[s]);
+        ds = ggml_gelu(ctx0.get(), ds);
+        ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 2, 0, 1, 3));
+    }
+    ds = ggml_conv_2d(ctx0.get(), model.mem_enc.ds_conv_w[4], ds, 1, 1, 0, 0, 1, 1);
+    ds = ggml_add(
+        ctx0.get(), ds, ggml_reshape_4d(ctx0.get(), model.mem_enc.ds_conv_b[4], 1, 1, D, 1));
+    ds = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), ds, 1, 2, 0, 3));
+    sam3_set_name(ds, "mask_downsampled");
+
+    auto* pix_whcb = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), pix_feat, 2, 0, 1, 3));
+    auto* pix = ggml_conv_2d(ctx0.get(), model.mem_enc.pix_proj_w, pix_whcb, 1, 1, 0, 0, 1, 1);
+    pix = ggml_add(
+        ctx0.get(), pix, ggml_reshape_4d(ctx0.get(), model.mem_enc.pix_proj_b, 1, 1, D, 1));
+    pix = ggml_cont(ctx0.get(), ggml_permute(ctx0.get(), pix, 1, 2, 0, 3));
+    sam3_set_name(pix, "pix_feat_proj");
+
+    auto* fused = ggml_add(ctx0.get(), pix, ds);
+    sam3_set_name(fused, "fused_input");
+
+    auto* h = fused;
+    std::array<ggml_tensor*, 2> fuser_outputs = {};
+    for (int i = 0; i < 2; ++i) {
+        h = sam3_cxblock_forward(ctx0.get(),
+                                 h,
+                                 model.mem_enc.fuser_dw_w[i],
+                                 model.mem_enc.fuser_dw_b[i],
+                                 model.mem_enc.fuser_norm_w[i],
+                                 model.mem_enc.fuser_norm_b[i],
+                                 model.mem_enc.fuser_fc1_w[i],
+                                 model.mem_enc.fuser_fc1_b[i],
+                                 model.mem_enc.fuser_fc2_w[i],
+                                 model.mem_enc.fuser_fc2_b[i],
+                                 model.mem_enc.fuser_gamma[i]);
+        sam3_set_name(h, std::format("fuser{}", i));
+        fuser_outputs[static_cast<size_t>(i)] = h;
+    }
+    sam3_set_name(h, "vision_features");
+
+    ggml_set_output(ds);
+    ggml_set_output(pix);
+    ggml_set_output(fused);
+    for (auto* tensor : fuser_outputs) {
+        ggml_set_output(tensor);
+    }
+    ggml_set_output(h);
+
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 65536, false);
+    ggml_build_forward_expand(graph, h);
+    ggml_build_forward_expand(graph, ds);
+    ggml_build_forward_expand(graph, pix);
+    ggml_build_forward_expand(graph, fused);
+    for (auto* tensor : fuser_outputs) {
+        ggml_build_forward_expand(graph, tensor);
+    }
+
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        std::println(stderr, "{}: failed to allocate SAM3.1 memory graph", __func__);
+        return false;
+    }
+
+    for (const auto& input : inputs) {
+        ggml_backend_tensor_set(
+            input.tensor, input.data.data(), 0, input.data.size() * sizeof(float));
+    }
+
+    if (!sam3_graph_compute(model.backend, graph, n_threads, "sam31_memory_backbone")) {
+        return false;
+    }
+
+    bool ok = true;
+    const std::array<std::pair<std::string_view, ggml_tensor*>, 5> outputs = {{
+        {"mask_downsampled", ds},
+        {"pix_feat_proj", pix},
+        {"fused_input", fused},
+        {"fuser0", fuser_outputs[0]},
+        {"vision_features", h},
+    }};
+    for (const auto& [name, tensor] : outputs) {
+        if (!sam3_dump_tensor_to_path(
+                tensor, std::string{name}, sam3_join_path(output_dir, std::string{name}))) {
+            ok = false;
+        }
+    }
+    auto pos_enc = sam3_sinusoidal_pe_2d(H, W, D);
+    if (!sam3_dump_raw_f32_to_path(
+            pos_enc.data(), {D, W, H, B}, sam3_join_path(output_dir, "vision_pos_enc"))) {
+        ok = false;
+    }
+
+    std::vector<float> memory_features(sam3_count_mul(D, H, W));
+    sam3_read_f32(h, memory_features.data(), static_cast<int64_t>(memory_features.size()));
+    sam3_tracker storage_tracker{};
+    if (!sam3_store_spatial_memory_slot(storage_tracker,
+                                        model,
+                                        /* inst_id = */ 0,
+                                        std::move(memory_features),
+                                        pos_enc,
+                                        D,
+                                        H,
+                                        W,
+                                        /* frame_idx = */ 0,
+                                        /* is_cond = */ true)) {
+        ok = false;
+    } else {
+        const auto& bank = storage_tracker.mem_banks[0];
+        if (bank.size() != 1) {
+            std::println(stderr, "{}: expected one stored SAM3.1 memory slot", __func__);
+            ok = false;
+        } else {
+            const auto& slot = bank.front();
+            if (!sam3_dump_raw_f32_to_path(slot.spatial_feats_cpu.data(),
+                                           {D, W, H, B},
+                                           sam3_join_path(output_dir, "stored_spatial_feats"))) {
+                ok = false;
+            }
+            if (!sam3_dump_raw_f32_to_path(slot.spatial_pe_cpu.data(),
+                                           {D, W, H, B},
+                                           sam3_join_path(output_dir, "stored_spatial_pe"))) {
+                ok = false;
+            }
+            const std::vector<const std::vector<float>*> slot_feats = {&slot.spatial_feats_cpu};
+            const std::vector<const std::vector<float>*> slot_pes = {&slot.spatial_pe_cpu};
+            const std::vector<int> spatial_tpos = {1};
+            const std::vector<std::vector<float>> obj_ptrs = {};
+            const std::vector<int> ptr_tpos = {};
+            const auto prompt_data = sam3_build_prompt_and_pos_refs(
+                model, slot_feats, slot_pes, spatial_tpos, obj_ptrs, ptr_tpos, H);
+            if (!sam3_dump_raw_f32_to_path(prompt_data.prompt.data(),
+                                           {D, sam3_dim_mul(H, W), B},
+                                           sam3_join_path(output_dir, "memory_prompt"))) {
+                ok = false;
+            }
+            if (!sam3_dump_raw_f32_to_path(prompt_data.prompt_pos.data(),
+                                           {D, sam3_dim_mul(H, W), B},
+                                           sam3_join_path(output_dir, "memory_prompt_pos"))) {
+                ok = false;
+            }
+        }
+    }
+
+    return ok;
+}
+
+bool sam3_test_dump_sam31_propagation_features_case(const sam3_model& model,
+                                                    const std::string& case_ref_dir,
+                                                    const std::string& output_dir,
+                                                    int n_threads) {
+    if (!model.hparams.is_sam3_1()) {
+        std::println(stderr, "{}: model is not SAM3.1", __func__);
+        return false;
+    }
+
+    mkdir(output_dir.c_str(), 0755);
+    const std::string input_dir = sam3_join_path(case_ref_dir, "cpp_inputs");
+
+    std::vector<float> vit_data;
+    std::vector<int64_t> vit_shape;
+    if (!sam3_load_ref_f32_tensor(sam3_join_path(input_dir, "vit_out"), vit_data, vit_shape)) {
+        return false;
+    }
+    if (vit_shape.size() != 4) {
+        std::println(stderr, "{}: unsupported vit_out shape", __func__);
+        return false;
+    }
+    const int E = static_cast<int>(vit_shape[0]);
+    const int H = static_cast<int>(vit_shape[1]);
+    const int W = static_cast<int>(vit_shape[2]);
+    const int B = static_cast<int>(vit_shape[3]);
+    if (E != model.hparams.vit_embed_dim || H <= 0 || W != H || B != 1) {
+        std::println(
+            stderr, "{}: unsupported vit_out shape [{}, {}, {}, {}]", __func__, E, H, W, B);
+        return false;
+    }
+
+    const size_t buf_size = (ggml_tensor_overhead() * 32768) + (ggml_graph_overhead() * 2);
+    ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        return false;
+    }
+
+    auto* vit_out = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, E, H, W, 1);
+    ggml_set_name(vit_out, "vit_out");
+    ggml_set_input(vit_out);
+
+    std::array<ggml_tensor*, 3> propagation = {};
+    sam31_build_propagation_feature_graph(ctx0.get(), vit_out, model, propagation.data());
+    sam3_set_name(propagation[0], "projected_s0");
+    sam3_set_name(propagation[1], "projected_s1");
+    sam3_set_name(propagation[2], "image_features");
+    for (auto* tensor : propagation) {
+        ggml_set_output(tensor);
+    }
+
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 32768, false);
+    for (auto* tensor : propagation) {
+        ggml_build_forward_expand(graph, tensor);
+    }
+
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        return false;
+    }
+    ggml_backend_tensor_set(vit_out, vit_data.data(), 0, vit_data.size() * sizeof(float));
+    if (!sam3_graph_compute(model.backend, graph, n_threads, "sam31_propagation_features")) {
+        return false;
+    }
+
+    bool ok = true;
+    const std::array<std::pair<std::string_view, ggml_tensor*>, 3> outputs = {{
+        {"projected_s0", propagation[0]},
+        {"projected_s1", propagation[1]},
+        {"image_features", propagation[2]},
+    }};
+    for (const auto& [name, tensor] : outputs) {
+        if (!sam3_dump_tensor_to_path(
+                tensor, std::string{name}, sam3_join_path(output_dir, std::string{name}))) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool sam3_test_dump_sam31_memory_attention_case(const sam3_model& model,
+                                                const std::string& case_ref_dir,
+                                                const std::string& output_dir,
+                                                int n_threads) {
+    if (!model.hparams.is_sam3_1()) {
+        std::println(stderr, "{}: model is not SAM3.1", __func__);
+        return false;
+    }
+    if (model.mem_attn.layers.size() != 4 || model.mem_attn_norm_w == nullptr ||
+        model.mem_attn_norm_b == nullptr) {
+        std::println(stderr, "{}: SAM3.1 memory attention tensors are not bound", __func__);
+        return false;
+    }
+
+    mkdir(output_dir.c_str(), 0755);
+    const std::string input_dir = sam3_join_path(case_ref_dir, "cpp_inputs");
+
+    struct InputSpec {
+        std::string name;
+        std::vector<float> data;
+        std::vector<int64_t> shape;
+        ggml_tensor* tensor = nullptr;
+    };
+
+    std::array<InputSpec, 8> inputs = {{
+        {.name = "image"},
+        {.name = "src"},
+        {.name = "memory_image"},
+        {.name = "memory"},
+        {.name = "image_pos"},
+        {.name = "src_pos"},
+        {.name = "memory_image_pos"},
+        {.name = "memory_pos"},
+    }};
+
+    for (auto& input : inputs) {
+        if (!sam3_load_ref_f32_tensor(
+                sam3_join_path(input_dir, input.name), input.data, input.shape)) {
+            return false;
+        }
+        if (input.shape.size() != 3) {
+            std::println(stderr, "{}: expected rank-3 tensor for {}", __func__, input.name);
+            return false;
+        }
+    }
+
+    const int D = static_cast<int>(inputs[1].shape[0]);
+    const int N = static_cast<int>(inputs[1].shape[1]);
+    const int B = static_cast<int>(inputs[1].shape[2]);
+    const int H = static_cast<int>(std::sqrt(static_cast<double>(N)));
+    if (D != 256 || B != 1 || H <= 0 || H * H != N) {
+        std::println(stderr, "{}: unsupported src shape [{}, {}, {}]", __func__, D, N, B);
+        return false;
+    }
+    for (const auto& input : inputs) {
+        if (input.shape[0] != D || input.shape[1] != N || input.shape[2] != B) {
+            std::println(stderr,
+                         "{}: unsupported {} shape [{}, {}, {}]",
+                         __func__,
+                         input.name,
+                         input.shape[0],
+                         input.shape[1],
+                         input.shape[2]);
+            return false;
+        }
+    }
+
+    const int num_heads = 8;
+    const int head_dim = D / num_heads;
+    const int half_head = head_dim / 2;
+    std::vector<float> rope_raw(sam3_count_mul(N, head_dim));
+    sam3_compute_axial_cis(rope_raw.data(), head_dim, H, H, 10000.0f, 1.0f);
+    std::vector<float> rope_reord(sam3_count_mul(2, half_head, N));
+    for (int n = 0; n < N; ++n) {
+        for (int i = 0; i < half_head; ++i) {
+            rope_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, head_dim)] =
+                rope_raw[sam3_count_mul(n, head_dim) + sam3_count_mul(i, 2)];
+            rope_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                       sam3_count_mul(n, head_dim)] =
+                rope_raw[sam3_count_mul(n, head_dim) + sam3_count_mul(i, 2) +
+                         static_cast<size_t>(1)];
+        }
+    }
+
+    const size_t buf_size = (ggml_tensor_overhead() * 65536) + (ggml_graph_overhead() * 2);
+    const ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        std::println(stderr, "{}: failed to init SAM3.1 memory-attention context", __func__);
+        return false;
+    }
+
+    constexpr std::array<size_t, 6> used_input_indices = {0, 1, 2, 3, 5, 6};
+    for (const size_t index : used_input_indices) {
+        auto& input = inputs[index];
+        input.tensor = ggml_new_tensor_3d(
+            ctx0.get(), GGML_TYPE_F32, input.shape[0], input.shape[1], input.shape[2]);
+        ggml_set_name(input.tensor, input.name.c_str());
+        ggml_set_input(input.tensor);
+    }
+    auto* q_rope = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_head, N);
+    ggml_set_name(q_rope, "sam31_mem_attn_q_rope");
+    ggml_set_input(q_rope);
+    auto* k_rope = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_head, N);
+    ggml_set_name(k_rope, "sam31_mem_attn_k_rope");
+    ggml_set_input(k_rope);
+
+    auto* output = sam31_build_multiplex_mem_attn_graph(ctx0.get(),
+                                                        model,
+                                                        inputs[0].tensor,
+                                                        inputs[1].tensor,
+                                                        inputs[2].tensor,
+                                                        inputs[3].tensor,
+                                                        inputs[5].tensor,
+                                                        inputs[6].tensor,
+                                                        q_rope,
+                                                        k_rope);
+
+    const std::array<std::string_view, 14> output_names = {{
+        "sam31_mem_attn_input",
+        "sam31_mem_attn_layer0_after_sa",
+        "sam31_mem_attn_layer0_after_ca",
+        "sam31_mem_attn_layer0_after_ffn",
+        "sam31_mem_attn_layer1_after_sa",
+        "sam31_mem_attn_layer1_after_ca",
+        "sam31_mem_attn_layer1_after_ffn",
+        "sam31_mem_attn_layer2_after_sa",
+        "sam31_mem_attn_layer2_after_ca",
+        "sam31_mem_attn_layer2_after_ffn",
+        "sam31_mem_attn_layer3_after_sa",
+        "sam31_mem_attn_layer3_after_ca",
+        "sam31_mem_attn_layer3_after_ffn",
+        "sam31_mem_attn_output",
+    }};
+    for (const auto name : output_names) {
+        if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+            ggml_set_output(tensor);
+        }
+    }
+    ggml_set_output(output);
+
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 131072, false);
+    ggml_build_forward_expand(graph, output);
+    for (const auto name : output_names) {
+        if (auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str())) {
+            ggml_build_forward_expand(graph, tensor);
+        }
+    }
+
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        std::println(stderr, "{}: failed to allocate SAM3.1 memory-attention graph", __func__);
+        return false;
+    }
+
+    for (const size_t index : used_input_indices) {
+        const auto& input = inputs[index];
+        ggml_backend_tensor_set(
+            input.tensor, input.data.data(), 0, input.data.size() * sizeof(float));
+    }
+    ggml_backend_tensor_set(q_rope, rope_reord.data(), 0, rope_reord.size() * sizeof(float));
+    ggml_backend_tensor_set(k_rope, rope_reord.data(), 0, rope_reord.size() * sizeof(float));
+
+    if (!sam3_graph_compute(model.backend, graph, n_threads, "sam31_memory_attention")) {
+        return false;
+    }
+
+    bool ok = true;
+    for (const auto name : output_names) {
+        auto* tensor = ggml_get_tensor(ctx0.get(), std::string{name}.c_str());
+        if (!tensor || !sam3_dump_tensor_to_path(
+                           tensor, std::string{name}, sam3_join_path(output_dir, name))) {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+bool sam3_test_dump_sam31_memory_attention_decoder_case(const sam3_model& model,
+                                                        const std::string& case_ref_dir,
+                                                        const std::string& output_dir,
+                                                        int n_threads) {
+    if (!model.hparams.is_sam3_1()) {
+        std::println(stderr, "{}: model is not SAM3.1", __func__);
+        return false;
+    }
+    if (model.mem_attn.layers.size() != 4 || model.mem_attn_norm_w == nullptr ||
+        model.mem_attn_norm_b == nullptr || model.sam31_sam_dec.mask_tokens == nullptr) {
+        std::println(stderr, "{}: SAM3.1 propagation tensors are not bound", __func__);
+        return false;
+    }
+
+    mkdir(output_dir.c_str(), 0755);
+    const std::string input_dir = sam3_join_path(case_ref_dir, "cpp_inputs");
+
+    struct InputSpec {
+        std::string name;
+        std::vector<float> data;
+        std::vector<int64_t> shape;
+        ggml_tensor* tensor = nullptr;
+    };
+
+    std::array<InputSpec, 10> inputs = {{
+        {.name = "image"},
+        {.name = "src"},
+        {.name = "memory_image"},
+        {.name = "memory"},
+        {.name = "src_pos"},
+        {.name = "memory_image_pos"},
+        {.name = "image_pe"},
+        {.name = "projected_feat_s0"},
+        {.name = "projected_feat_s1"},
+        {.name = "extra_per_object_embeddings"},
+    }};
+
+    for (auto& input : inputs) {
+        if (!sam3_load_ref_f32_tensor(
+                sam3_join_path(input_dir, input.name), input.data, input.shape)) {
+            return false;
+        }
+        if (input.shape.empty() || input.shape.size() > GGML_MAX_DIMS) {
+            std::println(
+                stderr, "{}: unsupported rank {} for {}", __func__, input.shape.size(), input.name);
+            return false;
+        }
+    }
+
+    const int D = static_cast<int>(inputs[1].shape[0]);
+    const int N = static_cast<int>(inputs[1].shape[1]);
+    const int B = static_cast<int>(inputs[1].shape[2]);
+    const int H = static_cast<int>(std::sqrt(static_cast<double>(N)));
+    if (D != 256 || B <= 0 || H <= 0 || H * H != N) {
+        std::println(stderr, "{}: unsupported src shape [{}, {}, {}]", __func__, D, N, B);
+        return false;
+    }
+    const auto expect_rank3 = [&](size_t index, int expected_b) -> bool {
+        const auto& input = inputs[index];
+        if (input.shape.size() != 3 || input.shape[0] != D || input.shape[1] != N ||
+            input.shape[2] != expected_b) {
+            std::println(stderr, "{}: unsupported {} shape", __func__, input.name);
+            return false;
+        }
+        return true;
+    };
+    if (!expect_rank3(0, 1) || !expect_rank3(1, B) || !expect_rank3(2, 1) || !expect_rank3(3, B) ||
+        !expect_rank3(4, B) || !expect_rank3(5, 1)) {
+        return false;
+    }
+    if (inputs[6].shape != std::vector<int64_t>{D, H, H, 1} ||
+        inputs[7].shape != std::vector<int64_t>{32, H * 4, H * 4, B} ||
+        inputs[8].shape != std::vector<int64_t>{64, H * 2, H * 2, B} ||
+        inputs[9].shape != std::vector<int64_t>{D, 16, B}) {
+        std::println(stderr, "{}: unsupported decoder input shapes for H={} B={}", __func__, H, B);
+        return false;
+    }
+
+    const int num_heads = 8;
+    const int head_dim = D / num_heads;
+    const int half_head = head_dim / 2;
+    std::vector<float> rope_raw(sam3_count_mul(N, head_dim));
+    sam3_compute_axial_cis(rope_raw.data(), head_dim, H, H, 10000.0f, 1.0f);
+    std::vector<float> rope_reord(sam3_count_mul(2, half_head, N));
+    for (int n = 0; n < N; ++n) {
+        for (int i = 0; i < half_head; ++i) {
+            rope_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, head_dim)] =
+                rope_raw[sam3_count_mul(n, head_dim) + sam3_count_mul(i, 2)];
+            rope_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                       sam3_count_mul(n, head_dim)] =
+                rope_raw[sam3_count_mul(n, head_dim) + sam3_count_mul(i, 2) +
+                         static_cast<size_t>(1)];
+        }
+    }
+
+    const size_t buf_size = (ggml_tensor_overhead() * 131072) + (ggml_graph_overhead() * 2);
+    const ggml_init_params gparams = {
+        .mem_size = buf_size,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    auto ctx0 = make_ggml_context(gparams);
+    if (!ctx0) {
+        std::println(stderr, "{}: failed to init SAM3.1 propagation context", __func__);
+        return false;
+    }
+
+    for (auto& input : inputs) {
+        std::array<int64_t, GGML_MAX_DIMS> ne = {1, 1, 1, 1};
+        std::ranges::copy(input.shape, ne.begin());
+        input.tensor = ggml_new_tensor(
+            ctx0.get(), GGML_TYPE_F32, static_cast<int>(input.shape.size()), ne.data());
+        ggml_set_name(input.tensor, input.name.c_str());
+        ggml_set_input(input.tensor);
+    }
+    auto* q_rope = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_head, N);
+    ggml_set_name(q_rope, "sam31_mem_attn_q_rope");
+    ggml_set_input(q_rope);
+    auto* k_rope = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_head, N);
+    ggml_set_name(k_rope, "sam31_mem_attn_k_rope");
+    ggml_set_input(k_rope);
+
+    auto* memory_output = sam31_build_multiplex_mem_attn_graph(ctx0.get(),
+                                                               model,
+                                                               inputs[0].tensor,
+                                                               inputs[1].tensor,
+                                                               inputs[2].tensor,
+                                                               inputs[3].tensor,
+                                                               inputs[4].tensor,
+                                                               inputs[5].tensor,
+                                                               q_rope,
+                                                               k_rope);
+    auto* memory_output_snapshot = ggml_dup(ctx0.get(), memory_output);
+    ggml_set_name(memory_output_snapshot, "sam31_mem_attn_output_snapshot");
+    auto* image_feats = ggml_reshape_4d(ctx0.get(), memory_output, D, H, H, B);
+    const auto dec = sam31_build_mux_mask_dec_graph(ctx0.get(),
+                                                    model,
+                                                    image_feats,
+                                                    inputs[6].tensor,
+                                                    inputs[7].tensor,
+                                                    inputs[8].tensor,
+                                                    inputs[9].tensor,
+                                                    H);
+
+    ggml_set_output(memory_output_snapshot);
+    auto* graph = ggml_new_graph_custom(ctx0.get(), 131072, false);
+    ggml_build_forward_expand(graph, memory_output_snapshot);
+    ggml_build_forward_expand(graph, dec.masks);
+    ggml_build_forward_expand(graph, dec.iou_pred);
+    ggml_build_forward_expand(graph, dec.obj_score);
+    ggml_build_forward_expand(graph, dec.mask_tokens);
+
+    auto galloc = make_ggml_gallocr(model.backend);
+    if (!reserve_and_alloc_graph(galloc.get(), graph)) {
+        std::println(stderr, "{}: failed to allocate SAM3.1 propagation graph", __func__);
+        return false;
+    }
+
+    for (const auto& input : inputs) {
+        ggml_backend_tensor_set(
+            input.tensor, input.data.data(), 0, input.data.size() * sizeof(float));
+    }
+    ggml_backend_tensor_set(q_rope, rope_reord.data(), 0, rope_reord.size() * sizeof(float));
+    ggml_backend_tensor_set(k_rope, rope_reord.data(), 0, rope_reord.size() * sizeof(float));
+
+    if (!sam3_graph_compute(model.backend, graph, n_threads, "sam31_memory_attention_decoder")) {
+        return false;
+    }
+
+    bool ok = true;
+    const std::array<std::pair<std::string_view, ggml_tensor*>, 5> outputs = {{
+        {"sam31_mem_attn_output", memory_output_snapshot},
+        {"masks", dec.masks},
+        {"iou_pred", dec.iou_pred},
+        {"mask_tokens_out", dec.mask_tokens},
+        {"object_score_logits", dec.obj_score},
+    }};
+    for (const auto& [name, tensor] : outputs) {
+        if (!sam3_dump_tensor_to_path(
+                tensor, std::string{name}, sam3_join_path(output_dir, std::string{name}))) {
+            ok = false;
+        }
+    }
     return ok;
 }
 

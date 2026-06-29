@@ -24,11 +24,18 @@ ENCODE_RE = re.compile(r"sam2_encode_image_hiera: SAM2 image encoded in ([0-9.]+
 COMPUTE_RE = re.compile(
     r"SAM3_PROFILE compute (?:label=(\S+) )?backend=(\S+) nodes=(\d+) ms=([0-9.]+)"
 )
-TENSOR_SET_RE = re.compile(r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
-TENSOR_GET_RE = re.compile(r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)")
+TENSOR_SET_RE = re.compile(
+    r"SAM3_PROFILE tensor_set name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)"
+)
+TENSOR_GET_RE = re.compile(
+    r"SAM3_PROFILE tensor_get name=\S+ bytes=\d+ offset=\d+ ms=([0-9.]+)"
+)
 CPU_SPAN_RE = re.compile(r"SAM3_PROFILE cpu name=(\S+) ms=([0-9.]+)")
 HIERA_CUT_RE = re.compile(
     r"SAM3_PROFILE_HIERA_CUT label=(\S+) nodes=(\d+) mean_ms=([0-9.]+) warmup=(\d+) iter=(\d+)"
+)
+SAM3_ENCODE_CUT_RE = re.compile(
+    r"SAM3_PROFILE_ENCODE_CUT label=(\S+) nodes=(\d+) mean_ms=([0-9.]+) warmup=(\d+) iter=(\d+)"
 )
 HIERA_CUT_OPS_RE = re.compile(
     r"SAM3_PROFILE_HIERA_CUT_OPS label=(\S+) op=(\S+) count=(\d+) out_elements=(\d+)"
@@ -49,7 +56,7 @@ GRAPH_MATMUL_RE = re.compile(
     r"dst_type=(\S+) dst_ne=([0-9,]+)"
 )
 CUDA_NODE_RE = re.compile(
-    r"GGML_CUDA_PROFILE_NODE fused=(\d+) skipped=(\d+) op=(\S+) name=(\S*) ms=([0-9.]+) "
+    r"GGML_CUDA_PROFILE_NODE fused=(\d+) skipped=(\d+) op=(\S+) name=(.*?) ms=([0-9.]+) "
     r"dst_type=(\S+) dst_ne=([0-9,]+)"
     r"(?: src0_type=(\S+) src0_ne=([0-9,]+) src1_type=(\S+) src1_ne=([0-9,]+))?"
 )
@@ -82,6 +89,16 @@ def summarize(path: Path) -> dict[str, Any]:
                 "iter": int(iters),
             }
         )
+    sam3_encode_cuts: dict[str, list[dict[str, Any]]] = {}
+    for label, nodes, ms, warmup, iters in SAM3_ENCODE_CUT_RE.findall(text):
+        sam3_encode_cuts.setdefault(label, []).append(
+            {
+                "nodes": int(nodes),
+                "mean_ms": float(ms),
+                "warmup": int(warmup),
+                "iter": int(iters),
+            }
+        )
     hiera_cut_ops: dict[str, dict[str, dict[str, int | float]]] = {}
     for label, op, count, elements in HIERA_CUT_OPS_RE.findall(text):
         op_stats = hiera_cut_ops.setdefault(label, {}).setdefault(
@@ -96,9 +113,15 @@ def summarize(path: Path) -> dict[str, Any]:
             op_stats["mean_count"] = op_stats["count"] / samples
             op_stats["mean_out_elements"] = op_stats["out_elements"] / samples
     hiera_cut_matmuls: dict[str, dict[str, dict[str, int | float | str]]] = {}
-    for label, src0_type, src0_ne, src1_type, src1_ne, dst_type, dst_ne in HIERA_CUT_MATMUL_RE.findall(
-        text
-    ):
+    for (
+        label,
+        src0_type,
+        src0_ne,
+        src1_type,
+        src1_ne,
+        dst_type,
+        dst_ne,
+    ) in HIERA_CUT_MATMUL_RE.findall(text):
         key = (
             f"src0={src0_type}[{src0_ne}] src1={src1_type}[{src1_ne}] "
             f"dst={dst_type}[{dst_ne}]"
@@ -135,9 +158,15 @@ def summarize(path: Path) -> dict[str, Any]:
             op_stats["mean_count"] = op_stats["count"] / samples
             op_stats["mean_out_elements"] = op_stats["out_elements"] / samples
     graph_matmuls: dict[str, dict[str, dict[str, int | float | str]]] = {}
-    for label, src0_type, src0_ne, src1_type, src1_ne, dst_type, dst_ne in GRAPH_MATMUL_RE.findall(
-        text
-    ):
+    for (
+        label,
+        src0_type,
+        src0_ne,
+        src1_type,
+        src1_ne,
+        dst_type,
+        dst_ne,
+    ) in GRAPH_MATMUL_RE.findall(text):
         key = (
             f"src0={src0_type}[{src0_ne}] src1={src1_type}[{src1_ne}] "
             f"dst={dst_type}[{dst_ne}]"
@@ -159,7 +188,10 @@ def summarize(path: Path) -> dict[str, Any]:
         # Estimate samples from GRAPH_OPS when available; otherwise keep raw counts.
         label_samples = max(
             1,
-            max((int(stats["samples"]) for stats in graph_ops.get(label, {}).values()), default=1),
+            max(
+                (int(stats["samples"]) for stats in graph_ops.get(label, {}).values()),
+                default=1,
+            ),
         )
         for stats in matmuls.values():
             stats["samples"] = label_samples
@@ -172,7 +204,19 @@ def summarize(path: Path) -> dict[str, Any]:
     cuda_nodes_by_label_signature: dict[str, dict[str, dict[str, Any]]] = {}
 
     def make_cuda_node(match: tuple[str, ...]) -> dict[str, Any]:
-        fused, skipped, op, name, ms, dst_type, dst_ne, src0_type, src0_ne, src1_type, src1_ne = match
+        (
+            fused,
+            skipped,
+            op,
+            name,
+            ms,
+            dst_type,
+            dst_ne,
+            src0_type,
+            src0_ne,
+            src1_type,
+            src1_ne,
+        ) = match
         return {
             "fused": bool(int(fused)),
             "skipped": int(skipped),
@@ -200,11 +244,15 @@ def summarize(path: Path) -> dict[str, Any]:
         by_signature: dict[str, dict[str, Any]],
     ) -> None:
         op = node_row["op"]
-        op_stats = by_op.setdefault(op, {"count": 0, "sum_ms": 0.0, "min_ms": None, "max_ms": 0.0})
+        op_stats = by_op.setdefault(
+            op, {"count": 0, "sum_ms": 0.0, "min_ms": None, "max_ms": 0.0}
+        )
         op_stats["count"] += 1
         op_stats["sum_ms"] += node_row["ms"]
         op_stats["min_ms"] = (
-            node_row["ms"] if op_stats["min_ms"] is None else min(op_stats["min_ms"], node_row["ms"])
+            node_row["ms"]
+            if op_stats["min_ms"] is None
+            else min(op_stats["min_ms"], node_row["ms"])
         )
         op_stats["max_ms"] = max(op_stats["max_ms"], node_row["ms"])
         signature = cuda_node_signature(node_row)
@@ -263,7 +311,9 @@ def summarize(path: Path) -> dict[str, Any]:
         if stats["count"] > 1:
             stats["sum_ms_drop_max"] = stats["sum_ms"] - stats["max_ms"]
             stats["mean_ms_drop_max"] = stats["sum_ms_drop_max"] / (stats["count"] - 1)
-            stats["max_fraction_of_sum"] = stats["max_ms"] / stats["sum_ms"] if stats["sum_ms"] else 0.0
+            stats["max_fraction_of_sum"] = (
+                stats["max_ms"] / stats["sum_ms"] if stats["sum_ms"] else 0.0
+            )
 
     result: dict[str, Any] = {
         "path": str(path),
@@ -273,7 +323,9 @@ def summarize(path: Path) -> dict[str, Any]:
         "profile_compute_sum_ms": sum(ms for _, _, _, ms in computes),
         "profile_compute_top": [
             {"label": label, "backend": backend, "nodes": nodes, "ms": ms}
-            for label, backend, nodes, ms in sorted(computes, key=lambda item: item[3], reverse=True)[:5]
+            for label, backend, nodes, ms in sorted(
+                computes, key=lambda item: item[3], reverse=True
+            )[:5]
         ],
         "profile_compute_by_label": {
             label: {
@@ -284,7 +336,9 @@ def summarize(path: Path) -> dict[str, Any]:
             }
             for label, values in sorted(
                 {
-                    label: [ms for item_label, _, _, ms in computes if item_label == label]
+                    label: [
+                        ms for item_label, _, _, ms in computes if item_label == label
+                    ]
                     for label in {item_label for item_label, _, _, _ in computes}
                 }.items()
             )
@@ -309,10 +363,17 @@ def summarize(path: Path) -> dict[str, Any]:
             }
             for label, values in sorted(hiera_cuts.items())
         },
+        "sam3_encode_cuts": {
+            label: {
+                "count": len(values),
+                "mean_ms": mean([row["mean_ms"] for row in values]),
+                "values": values,
+            }
+            for label, values in sorted(sam3_encode_cuts.items())
+        },
         "hiera_cut_ops": {
             label: {
-                op: stats
-                for op, stats in sorted(ops.items(), key=lambda item: item[0])
+                op: stats for op, stats in sorted(ops.items(), key=lambda item: item[0])
             }
             for label, ops in sorted(hiera_cut_ops.items(), key=lambda item: item[0])
         },
@@ -320,15 +381,17 @@ def summarize(path: Path) -> dict[str, Any]:
             label: {
                 key: stats
                 for key, stats in sorted(
-                    matmuls.items(), key=lambda item: (-float(item[1]["mean_count"]), item[0])
+                    matmuls.items(),
+                    key=lambda item: (-float(item[1]["mean_count"]), item[0]),
                 )
             }
-            for label, matmuls in sorted(hiera_cut_matmuls.items(), key=lambda item: item[0])
+            for label, matmuls in sorted(
+                hiera_cut_matmuls.items(), key=lambda item: item[0]
+            )
         },
         "graph_ops": {
             label: {
-                op: stats
-                for op, stats in sorted(ops.items(), key=lambda item: item[0])
+                op: stats for op, stats in sorted(ops.items(), key=lambda item: item[0])
             }
             for label, ops in sorted(graph_ops.items(), key=lambda item: item[0])
         },
@@ -336,16 +399,22 @@ def summarize(path: Path) -> dict[str, Any]:
             label: {
                 key: stats
                 for key, stats in sorted(
-                    matmuls.items(), key=lambda item: (-float(item[1]["mean_count"]), item[0])
+                    matmuls.items(),
+                    key=lambda item: (-float(item[1]["mean_count"]), item[0]),
                 )
             }
-            for label, matmuls in sorted(graph_matmuls.items(), key=lambda item: item[0])
+            for label, matmuls in sorted(
+                graph_matmuls.items(), key=lambda item: item[0]
+            )
         },
-        "cuda_profile_nodes_top": sorted(cuda_nodes, key=lambda item: item["ms"], reverse=True)[:20],
+        "cuda_profile_nodes_top": sorted(
+            cuda_nodes, key=lambda item: item["ms"], reverse=True
+        )[:20],
         "cuda_profile_nodes_by_op": {
             op: stats
             for op, stats in sorted(
-                cuda_nodes_by_op.items(), key=lambda item: (-float(item[1]["sum_ms"]), item[0])
+                cuda_nodes_by_op.items(),
+                key=lambda item: (-float(item[1]["sum_ms"]), item[0]),
             )
         },
         "cuda_profile_nodes_by_signature": {

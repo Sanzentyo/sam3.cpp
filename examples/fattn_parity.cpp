@@ -12,10 +12,12 @@
 #include <chrono>
 #include <cmath>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -31,6 +33,11 @@ struct Args {
     int warmup = 0;
     int iters = 0;
     float tolerance = 4.0e-2f;
+    std::optional<std::string> json_path;
+    std::optional<std::string> dump_output_path;
+    std::optional<std::string> input_q_path;
+    std::optional<std::string> input_k_path;
+    std::optional<std::string> input_v_path;
     bool cuda = true;
     bool show_help = false;
 };
@@ -75,7 +82,8 @@ static void usage(const char* argv0) {
     std::cerr << std::format(
         "Usage: {} [--cpu|--cuda] [--d <head_dim>] [--n <tokens>] "
         "[--run-d <head_dim>] [--heads <n>] [--batch <n>] [--sample-queries <n>] "
-        "[--warmup <n>] [--iters <n>] [--tolerance <f>]\n",
+        "[--warmup <n>] [--iters <n>] [--tolerance <f>] [--json <path>] "
+        "[--dump-output <path>] [--input-q <path> --input-k <path> --input-v <path>]\n",
         argv0);
 }
 
@@ -169,6 +177,36 @@ static bool parse_args(int argc, char** argv, Args& args) {
             if (!v || !parse_float(v, args.tolerance)) {
                 return false;
             }
+        } else if (arg == "--json") {
+            const char* v = need_value("--json");
+            if (!v) {
+                return false;
+            }
+            args.json_path = v;
+        } else if (arg == "--dump-output") {
+            const char* v = need_value("--dump-output");
+            if (!v) {
+                return false;
+            }
+            args.dump_output_path = v;
+        } else if (arg == "--input-q") {
+            const char* v = need_value("--input-q");
+            if (!v) {
+                return false;
+            }
+            args.input_q_path = v;
+        } else if (arg == "--input-k") {
+            const char* v = need_value("--input-k");
+            if (!v) {
+                return false;
+            }
+            args.input_k_path = v;
+        } else if (arg == "--input-v") {
+            const char* v = need_value("--input-v");
+            if (!v) {
+                return false;
+            }
+            args.input_v_path = v;
         } else if (arg == "--help" || arg == "-h") {
             args.show_help = true;
             return true;
@@ -176,6 +214,13 @@ static bool parse_args(int argc, char** argv, Args& args) {
             std::cerr << std::format("unknown argument: {}\n", argv[i]);
             return false;
         }
+    }
+    const int input_count = static_cast<int>(args.input_q_path.has_value()) +
+                            static_cast<int>(args.input_k_path.has_value()) +
+                            static_cast<int>(args.input_v_path.has_value());
+    if (input_count != 0 && input_count != 3) {
+        std::cerr << "--input-q, --input-k, and --input-v must be provided together\n";
+        return false;
     }
     return true;
 }
@@ -216,6 +261,31 @@ static std::vector<float> make_input(size_t n, int salt) {
     std::vector<float> out(n);
     for (size_t i = 0; i < n; ++i) {
         out[i] = deterministic_value(i, salt);
+    }
+    return out;
+}
+
+static std::optional<std::vector<float>> read_input_dump(const std::string_view path,
+                                                         size_t elements) {
+    std::vector<float> out(elements);
+    std::ifstream in{std::string{path}, std::ios::binary};
+    if (!in) {
+        std::cerr << std::format("failed to open input dump: {}\n", path);
+        return std::nullopt;
+    }
+    in.read(reinterpret_cast<char*>(out.data()),
+            static_cast<std::streamsize>(out.size() * sizeof(float)));
+    if (in.gcount() != static_cast<std::streamsize>(out.size() * sizeof(float))) {
+        std::cerr << std::format("short input dump: {} read {} bytes expected {}\n",
+                                 path,
+                                 in.gcount(),
+                                 out.size() * sizeof(float));
+        return std::nullopt;
+    }
+    char extra = 0;
+    if (in.read(&extra, 1)) {
+        std::cerr << std::format("input dump has extra data: {}\n", path);
+        return std::nullopt;
     }
     return out;
 }
@@ -373,6 +443,93 @@ static double run_once_ms(ggml_backend_t backend, ggml_cgraph* graph) {
     return std::chrono::duration<double, std::milli>(t1 - t0).count();
 }
 
+static bool write_output_dump(const std::string_view path, const std::vector<float>& data) {
+    std::ofstream out{std::string{path}, std::ios::binary};
+    if (!out) {
+        std::cerr << std::format("failed to open output dump: {}\n", path);
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size() * sizeof(float)));
+    if (!out) {
+        std::cerr << std::format("failed to write output dump: {}\n", path);
+        return false;
+    }
+    return true;
+}
+
+static bool write_json_result(const std::string_view path,
+                              const Args& args,
+                              int run_d,
+                              size_t sampled_queries,
+                              float max_abs,
+                              double mean_abs,
+                              size_t bad,
+                              size_t checked,
+                              size_t nonfinite,
+                              size_t max_i,
+                              float max_got,
+                              float max_ref,
+                              const BenchResult& timing) {
+    std::ofstream out{std::string{path}};
+    if (!out) {
+        std::cerr << std::format("failed to open json result: {}\n", path);
+        return false;
+    }
+    out << std::format(
+        "{{\n"
+        "  \"backend\": \"{}\",\n"
+        "  \"d\": {},\n"
+        "  \"run_d\": {},\n"
+        "  \"n\": {},\n"
+        "  \"heads\": {},\n"
+        "  \"batch\": {},\n"
+        "  \"sampled_q\": {},\n"
+        "  \"max_abs\": {:.9g},\n"
+        "  \"mean_abs\": {:.17g},\n"
+        "  \"bad\": {},\n"
+        "  \"checked\": {},\n"
+        "  \"nonfinite\": {},\n"
+        "  \"max_i\": {},\n"
+        "  \"max_got\": {:.9g},\n"
+        "  \"max_ref\": {:.9g},\n"
+        "  \"warmup\": {},\n"
+        "  \"iters\": {},\n"
+        "  \"mean_ms\": {:.9g},\n"
+        "  \"median_ms\": {:.9g},\n"
+        "  \"p95_ms\": {:.9g},\n"
+        "  \"min_ms\": {:.9g},\n"
+        "  \"max_ms\": {:.9g}\n"
+        "}}\n",
+        args.cuda ? "CUDA" : "CPU",
+        args.d,
+        run_d,
+        args.n,
+        args.heads,
+        args.batch,
+        sampled_queries,
+        max_abs,
+        mean_abs,
+        bad,
+        checked,
+        nonfinite,
+        max_i,
+        max_got,
+        max_ref,
+        args.warmup,
+        args.iters,
+        timing.mean_ms,
+        timing.median_ms,
+        timing.p95_ms,
+        timing.min_ms,
+        timing.max_ms);
+    if (!out) {
+        std::cerr << std::format("failed to write json result: {}\n", path);
+        return false;
+    }
+    return true;
+}
+
 static bool run_ggml_attention(const Args& args,
                                int run_d,
                                const std::vector<float>& q_data,
@@ -467,9 +624,24 @@ int main(int argc, char** argv) {
     }
 
     const size_t elements = static_cast<size_t>(args.d) * args.n * args.heads * args.batch;
-    auto q = make_input(elements, 1);
-    auto k = make_input(elements, 2);
-    auto v = make_input(elements, 3);
+    std::vector<float> q;
+    std::vector<float> k;
+    std::vector<float> v;
+    if (args.input_q_path.has_value()) {
+        auto q_loaded = read_input_dump(*args.input_q_path, elements);
+        auto k_loaded = read_input_dump(*args.input_k_path, elements);
+        auto v_loaded = read_input_dump(*args.input_v_path, elements);
+        if (!q_loaded.has_value() || !k_loaded.has_value() || !v_loaded.has_value()) {
+            return 1;
+        }
+        q = std::move(*q_loaded);
+        k = std::move(*k_loaded);
+        v = std::move(*v_loaded);
+    } else {
+        q = make_input(elements, 1);
+        k = make_input(elements, 2);
+        v = make_input(elements, 3);
+    }
     auto q_run = pad_head_dim(q, args, run_d);
     auto k_run = pad_head_dim(k, args, run_d);
     auto v_run = pad_head_dim(v, args, run_d);
@@ -538,6 +710,25 @@ int main(int argc, char** argv) {
     }
     mean_abs = nonfinite == checked ? std::numeric_limits<double>::quiet_NaN()
                                     : mean_abs / static_cast<double>(checked - nonfinite);
+
+    if (args.dump_output_path.has_value() && !write_output_dump(*args.dump_output_path, got)) {
+        return 1;
+    }
+    if (args.json_path.has_value() && !write_json_result(*args.json_path,
+                                                         args,
+                                                         run_d,
+                                                         query_indices.size(),
+                                                         max_abs,
+                                                         mean_abs,
+                                                         bad,
+                                                         checked,
+                                                         nonfinite,
+                                                         max_i,
+                                                         max_got,
+                                                         max_ref,
+                                                         timing)) {
+        return 1;
+    }
 
     std::cout << std::format(
         "backend={} D={} run_D={} N={} heads={} batch={} sampled_q={} max_abs={:.9g} "

@@ -16,6 +16,7 @@ from typing import Any
 
 FATTN_RE = re.compile(
     r"GGML_CUDA_PROFILE_FATTN "
+    r"(?:name=(?P<name>\S+) )?"
     r"Q_convert_ms=(?P<q_convert>[0-9.]+) "
     r"K_convert_ms=(?P<k_convert>[0-9.]+) "
     r"V_convert_ms=(?P<v_convert>[0-9.]+) "
@@ -28,12 +29,17 @@ FATTN_RE = re.compile(
 )
 
 CUDNN_RE = re.compile(
-    r"backend=cudnn-sdpa-bf16 "
+    r"backend=cudnn-sdpa(?:-bf16| "
+    r"io_dtype=(?P<io_dtype>[a-z0-9]+) "
+    r"out_dtype=(?P<out_dtype>[a-z0-9]+)) "
     r"batch=(?P<batch>[0-9]+) "
     r"heads=(?P<heads>[0-9]+) "
     r"seq=(?P<seq>[0-9]+) "
     r"head_dim=(?P<head_dim>[0-9]+) "
+    r"(?:q_seq=(?P<q_seq>[0-9]+) )?"
+    r"(?:kv_seq=(?P<kv_seq>[0-9]+) )?"
     r"stats=(?P<stats>[01]) "
+    r"(?:convert_f32_inputs=(?P<convert_f32_inputs>[01]) )?"
     r"mean_ms=(?P<mean>[0-9.]+) "
     r"workspace_bytes=(?P<workspace>[0-9]+)"
 )
@@ -88,6 +94,7 @@ def parse_fattn(paths: list[Path], drop_first_per_shape: bool) -> dict[str, Any]
                     "compute_ms": float(groups["compute"]),
                     "total_ms": float(groups["total"]),
                     "types": groups["types"],
+                    "name": groups.get("name") or "",
                     "source": str(path),
                 }
             )
@@ -102,7 +109,10 @@ def parse_fattn(paths: list[Path], drop_first_per_shape: bool) -> dict[str, Any]
             "total_ms": stats([row["total_ms"] for row in effective]),
             "kernel_ms": stats([row["kernel_ms"] for row in effective]),
             "convert_ms": stats(
-                [row["q_convert_ms"] + row["k_convert_ms"] + row["v_convert_ms"] for row in effective]
+                [
+                    row["q_convert_ms"] + row["k_convert_ms"] + row["v_convert_ms"]
+                    for row in effective
+                ]
             ),
             "types": sorted({row["types"] for row in effective}),
         }
@@ -127,13 +137,20 @@ def parse_cudnn(paths: list[Path]) -> dict[str, Any]:
                 "mean_ms": float(groups["mean"]),
                 "workspace_bytes": int(groups["workspace"]),
                 "stats": groups["stats"] == "1",
+                "convert_f32_inputs": groups.get("convert_f32_inputs") == "1",
+                "io_dtype": groups.get("io_dtype") or "bf16",
+                "out_dtype": groups.get("out_dtype") or "bf16",
+                "q_seq": int(groups["q_seq"] or groups["seq"]),
+                "kv_seq": int(groups["kv_seq"] or groups["seq"]),
                 "source": str(path),
             }
     return result
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Compare ggml FATTN profile logs with cuDNN SDPA head64 bench logs.")
+    parser = argparse.ArgumentParser(
+        description="Compare ggml FATTN profile logs with cuDNN SDPA head64 bench logs."
+    )
     parser.add_argument("--fattn", type=Path, nargs="+", required=True)
     parser.add_argument("--cudnn", type=Path, nargs="+", required=True)
     parser.add_argument("--out", type=Path)
@@ -146,26 +163,53 @@ def main() -> int:
     cudnn = parse_cudnn(args.cudnn)
 
     comparisons: list[dict[str, Any]] = []
-    call_count_by_seq_batch = {(5184, 1): args.global_calls, (576, 9): args.window_calls}
+    call_count_by_seq_batch = {
+        (5184, 1): args.global_calls,
+        (576, 9): args.window_calls,
+    }
     for key, cudnn_row in cudnn.items():
-        shape_match = re.search(r"batch=([0-9]+) heads=([0-9]+) seq=([0-9]+) head_dim=([0-9]+)", key)
+        shape_match = re.search(
+            r"batch=([0-9]+) heads=([0-9]+) seq=([0-9]+) head_dim=([0-9]+)", key
+        )
         if not shape_match:
             continue
         batch = int(shape_match.group(1))
         seq = int(shape_match.group(3))
         calls = call_count_by_seq_batch.get((seq, batch), 0)
         fattn_row = fattn.get(key)
+        effective_calls = (
+            int(fattn_row["total_ms"]["count"])
+            if fattn_row and isinstance(fattn_row.get("total_ms"), dict)
+            else 0
+        )
         comparisons.append(
             {
                 "shape": key,
                 "sam3_vit_calls": calls,
-                "ggml_fattn_total_ms": fattn_row["total_ms"]["sum"] if fattn_row else None,
-                "ggml_fattn_mean_ms": fattn_row["total_ms"]["mean"] if fattn_row else None,
+                "profile_effective_calls": effective_calls,
+                "ggml_fattn_total_ms": fattn_row["total_ms"]["sum"]
+                if fattn_row
+                else None,
+                "ggml_fattn_mean_ms": fattn_row["total_ms"]["mean"]
+                if fattn_row
+                else None,
                 "cudnn_mean_ms": cudnn_row["mean_ms"],
-                "cudnn_projected_total_ms": cudnn_row["mean_ms"] * calls if calls else None,
+                "cudnn_projected_total_ms": cudnn_row["mean_ms"] * calls
+                if calls
+                else None,
+                "cudnn_projected_effective_total_ms": cudnn_row["mean_ms"]
+                * effective_calls
+                if effective_calls
+                else None,
                 "projected_delta_ms": (
                     cudnn_row["mean_ms"] * calls - fattn_row["total_ms"]["sum"]
                     if calls and fattn_row
+                    else None
+                ),
+                "projected_effective_delta_ms": (
+                    cudnn_row["mean_ms"] * effective_calls
+                    - fattn_row["total_ms"]["sum"]
+                    if effective_calls and fattn_row
                     else None
                 ),
             }

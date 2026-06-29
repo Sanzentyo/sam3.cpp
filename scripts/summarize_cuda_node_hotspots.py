@@ -24,8 +24,23 @@ def compact_signature(key: str) -> str:
     return key.removeprefix("op=")
 
 
+def select_profile_log(summary: dict[str, Any], label: str | None) -> dict[str, Any]:
+    logs = summary.get("logs", [])
+    if label:
+        for log in logs:
+            groups_by_label = log.get("cuda_profile_nodes_by_label_signature", {})
+            if groups_by_label.get(label):
+                return log
+
+    for log in logs:
+        if log.get("cuda_profile_nodes_by_signature"):
+            return log
+
+    return logs[0] if logs else {}
+
+
 def hotspot_rows(summary: dict[str, Any], label: str | None, limit: int) -> list[dict[str, Any]]:
-    log = summary["logs"][0]
+    log = select_profile_log(summary, label)
     if label:
         groups = log.get("cuda_profile_nodes_by_label_signature", {}).get(label, {})
     else:
@@ -50,9 +65,44 @@ def hotspot_rows(summary: dict[str, Any], label: str | None, limit: int) -> list
     return rows
 
 
+def selected_log_path(summary: dict[str, Any], label: str | None) -> str | None:
+    log = select_profile_log(summary, label)
+    path = log.get("path")
+    return str(path) if path is not None else None
+
+
 def classify(row: dict[str, Any]) -> str:
     signature = row["signature"]
     op = row["op"]
+    if op == "MUL_MAT" and "dst=f32[3072,5184" in signature:
+        return "sam3-vit: qkv cuBLASLt"
+    if op == "MUL_MAT" and "dst=f32[4736,5184" in signature:
+        return "sam3-vit: mlp fc1 cuBLASLt"
+    if op == "MUL_MAT" and "dst=f32[1024,5184" in signature:
+        return "sam3-vit: mlp fc2 / attn proj cuBLASLt"
+    if op == "FLASH_ATTN_EXT" and "dst=f32[64,16,576,9]" in signature:
+        return "sam3-vit: window FlashAttention head64"
+    if op == "FLASH_ATTN_EXT" and "dst=f32[64,16,5184,1]" in signature:
+        return "sam3-vit: global FlashAttention head64"
+    if op == "CONT" and "dst=f32[1024,576,9,3]" in signature:
+        return "sam3-vit: qkv layout materialization"
+    if op == "CONT" and (
+        "dst=f32[64,576,16,9]" in signature or "dst=f32[64,5184,16,1]" in signature
+    ):
+        return "sam3-vit: q/k contiguous materialization before RoPE"
+    if op == "CPY" and (
+        "dst=bf16[1024,24,24,9]" in signature
+        or "dst=bf16[1024,72,72,1]" in signature
+        or "dst=bf16[64,16,576,9]" in signature
+        or "dst=bf16[64,16,5184,1]" in signature
+    ):
+        return "sam3-vit: BF16 cast bridge"
+    if op == "ADD" and "dst=f32[1024,72,72,1]" in signature:
+        return "sam3-vit: residual / position add"
+    if op in {"NORM", "MUL"} and "dst=f32[1024,72,72,1]" in signature:
+        return "sam3-vit: layernorm affine"
+    if op == "UNARY" and "dst=f32[4736,72,72,1]" in signature:
+        return "sam3-vit: MLP GELU"
     if op == "FLASH_ATTN_EXT" and (
         "f32[56,8,4096,1]" in signature or "f32[56,8,1024,1]" in signature
     ):
@@ -90,17 +140,26 @@ def classify(row: dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("summary", type=Path)
-    parser.add_argument("--label", default="hiera_encode")
+    parser.add_argument(
+        "--label",
+        default=None,
+        help=(
+            "Optional profile label to summarize. When omitted, all CUDA-profiled nodes are "
+            "grouped together; this works for both legacy Hiera and SAM3 profile labels."
+        ),
+    )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
-    rows = hotspot_rows(load_json(args.summary), args.label or None, args.limit)
+    summary = load_json(args.summary)
+    rows = hotspot_rows(summary, args.label, args.limit)
     for row in rows:
         row["priority"] = classify(row)
 
     result = {
         "source": str(args.summary),
+        "selected_log_path": selected_log_path(summary, args.label),
         "label": args.label,
         "note": (
             "GGML_CUDA_PROFILE_NODES synchronizes per node and disables CUDA graphs; "

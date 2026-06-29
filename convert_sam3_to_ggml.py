@@ -306,6 +306,7 @@ def write_header(
     n_tensors: int,
     visual_only: bool = False,
     model_type: int = MODEL_TYPE_SAM3,
+    hparam_overrides: dict[str, int] | None = None,
 ):
     """Write file header: magic, version, ftype, n_tensors, hparams."""
     fout.write(struct.pack("<I", MAGIC))
@@ -317,6 +318,8 @@ def write_header(
     for name, val in HPARAMS_FIELDS:
         if name == "visual_only" and visual_only:
             val = 1
+        if hparam_overrides and name in hparam_overrides:
+            val = hparam_overrides[name]
         fout.write(struct.pack("<i", val))
     fout.write(struct.pack("<i", model_type))
 
@@ -340,6 +343,7 @@ def write_tensor(fout, name: str, data: np.ndarray, ftype: int):
     use_lowp = (ftype in (FTYPE_F16, FTYPE_BF16) and n_dims >= 2
                 and "embed" not in name
                 and "pos_embed" not in name
+                and "reference_points" not in name
                 and "tpos" not in name
                 and "pe_gaussian" not in name
                 and "freqs_cis" not in name
@@ -442,6 +446,14 @@ def main():
                         help="Treat input as SAM3.1 Object Multiplex. Conversion is not implemented yet.")
     parser.add_argument("--sam31-mask-decoder-only", action="store_true",
                         help="For SAM3.1, write only tracker.model.sam_mask_decoder tensors.")
+    parser.add_argument("--sam31-memory-backbone-only", action="store_true",
+                        help="For SAM3.1, write only tracker.model.maskmem_backbone tensors.")
+    parser.add_argument("--sam31-memory-attention-only", action="store_true",
+                        help="For SAM3.1, write only tracker.model.transformer.encoder tensors.")
+    parser.add_argument("--sam31-memory-attention-decoder-only", action="store_true",
+                        help="For SAM3.1, write only memory-attention encoder and mask decoder tensors.")
+    parser.add_argument("--sam31-propagation-features-only", action="store_true",
+                        help="For SAM3.1, write only propagation feature-adapter tensors.")
     parser.add_argument("--inspect-only", action="store_true",
                         help="Print checkpoint summary and exit without writing a ggml file")
     parser.add_argument("--inspect-json",
@@ -531,6 +543,67 @@ def main():
             "SAM3.1 tensors"
         )
 
+    if args.sam31_memory_backbone_only:
+        if not convert_as_sam31:
+            parser.error("--sam31-memory-backbone-only requires --sam31 or a SAM3.1 checkpoint")
+        full_count = len(renamed)
+        renamed = {
+            name: data
+            for name, data in renamed.items()
+            if name.startswith("trk.model.maskmem_backbone.")
+            or name == "trk.model.maskmem_tpos_enc"
+        }
+        print(
+            f"\n--sam31-memory-backbone-only: kept {len(renamed)} of {full_count} "
+            "SAM3.1 tensors"
+        )
+
+    if args.sam31_memory_attention_only:
+        if not convert_as_sam31:
+            parser.error("--sam31-memory-attention-only requires --sam31 or a SAM3.1 checkpoint")
+        full_count = len(renamed)
+        renamed = {
+            name: data
+            for name, data in renamed.items()
+            if name.startswith("trk.model.transformer.encoder.")
+        }
+        print(
+            f"\n--sam31-memory-attention-only: kept {len(renamed)} of {full_count} "
+            "SAM3.1 tensors"
+        )
+
+    if args.sam31_memory_attention_decoder_only:
+        if not convert_as_sam31:
+            parser.error(
+                "--sam31-memory-attention-decoder-only requires --sam31 or a SAM3.1 checkpoint"
+            )
+        full_count = len(renamed)
+        renamed = {
+            name: data
+            for name, data in renamed.items()
+            if name.startswith("trk.model.transformer.encoder.")
+            or name.startswith("trk.model.sam_mask_decoder.")
+        }
+        print(
+            f"\n--sam31-memory-attention-decoder-only: kept {len(renamed)} of {full_count} "
+            "SAM3.1 tensors"
+        )
+
+    if args.sam31_propagation_features_only:
+        if not convert_as_sam31:
+            parser.error("--sam31-propagation-features-only requires --sam31 or a SAM3.1 checkpoint")
+        full_count = len(renamed)
+        renamed = {
+            name: data
+            for name, data in renamed.items()
+            if name.startswith("det.backbone.vision_backbone.propagation_convs.")
+            or name.startswith("trk.model.sam_mask_decoder.conv_s")
+        }
+        print(
+            f"\n--sam31-propagation-features-only: kept {len(renamed)} of {full_count} "
+            "SAM3.1 tensors"
+        )
+
     # ── Visual-only filtering ─────────────────────────────────────────────
     if args.visual_only:
         full_count = len(renamed)
@@ -552,6 +625,9 @@ def main():
 
     # ── Write ─────────────────────────────────────────────────────────────
     print(f"\nWriting {args.output} (ftype={args.ftype}) ...")
+    hparam_overrides = {}
+    if convert_as_sam31:
+        hparam_overrides["mem_out_dim"] = SAM31_CONTRACT["tracker_mem_dim"]
 
     with open(args.output, "wb") as fout:
         write_header(
@@ -560,6 +636,7 @@ def main():
             len(renamed),
             visual_only=args.visual_only or convert_as_sam31,
             model_type=MODEL_TYPE_SAM31 if convert_as_sam31 else MODEL_TYPE_SAM3,
+            hparam_overrides=hparam_overrides,
         )
 
         for i, (name, data) in enumerate(renamed.items()):

@@ -11,8 +11,8 @@ namespace {
 
 struct Args {
     std::string model_path;
-    std::string case_dir = "outputs/sam31-mux-mask-decoder-case";
-    std::string output_dir = "outputs/sam31-mux-mask-decoder-cpp";
+    std::string case_dir = "outputs/sam31-propagation-features-case";
+    std::string output_dir = "outputs/sam31-propagation-features-cpp";
     int threads = 4;
     bool use_gpu = false;
 };
@@ -75,20 +75,19 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (sam3_get_model_type(*model) != SAM3_MODEL_SAM3_1) {
-            std::cerr << std::format("expected SAM3.1 model, got backend {}\n",
-                                     sam3_backend_name(*model));
+            std::cerr << "expected SAM3.1 model\n";
             return 1;
         }
 
-        if (!sam3_test_dump_sam31_mux_mask_decoder_case(
+        if (!sam3_test_dump_sam31_propagation_features_case(
                 *model, args.case_dir, args.output_dir, args.threads)) {
-            std::cerr << "SAM3.1 mux mask decoder case failed\n";
+            std::cerr << "SAM3.1 propagation feature case failed\n";
             return 1;
         }
 
-        std::cout << std::format("wrote SAM3.1 mux mask decoder outputs to {}\n", args.output_dir);
+        std::cout << std::format("wrote SAM3.1 propagation features to {}\n", args.output_dir);
     } catch (const std::exception& ex) {
-        std::cerr << std::format("sam31_mux_mask_decoder_case failed: {}\n", ex.what());
+        std::cerr << std::format("sam31_propagation_features_case failed: {}\n", ex.what());
         return 1;
     }
     return 0;

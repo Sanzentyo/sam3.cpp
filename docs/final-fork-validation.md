@@ -9,8 +9,8 @@ current SAM3/ggml integration branches.
 
 | Repository | Branch | Remote state |
 | --- | --- | --- |
-| `Sanzentyo/sam3.cpp` | `sam3-cuda/ggml-perf-integration` | public fork of `PABannier/sam3.cpp` |
-| `Sanzentyo/ggml` | `sam3-cuda/model-exec-perf` | public fork of `ggml-org/ggml` |
+| `<owner>/sam3.cpp` | `sam3-cuda/ggml-perf-integration` | public fork of `PABannier/sam3.cpp` |
+| `<owner>/ggml` | `sam3-cuda/model-exec-perf` | public fork of `ggml-org/ggml` |
 
 Current `ggml` submodule commit:
 
@@ -111,7 +111,7 @@ outputs/parity-final-fork/shape_fullmask.jsonl
 
 ## Acceptance Criteria
 
-- `sam3.cpp` and `ggml` are both GitHub forks under `Sanzentyo`.
+- `sam3.cpp` and `ggml` are both GitHub forks under the configured repository owner.
 - The `ggml` fork is public and keeps the GitHub fork relationship to
   `ggml-org/ggml`.
 - The current `ggml` optimization branch is present on the new fork.

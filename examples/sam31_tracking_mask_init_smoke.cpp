@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -188,8 +189,18 @@ void write_pgm(const sam3_mask& mask, const std::filesystem::path& path) {
 }
 
 struct RunResult {
+    struct FrameOutput {
+        int frame_index = 0;
+        sam3_detection output;
+        double frame_construct_ms = 0.0;
+        double encode_ms = 0.0;
+        double propagate_encoded_ms = 0.0;
+        double track_step_ms = 0.0;
+    };
+
     int instance_id = -1;
     sam3_detection output;
+    std::vector<FrameOutput> frame_outputs;
     double model_load_ms = 0.0;
     double state_create_ms = 0.0;
     double tracker_create_ms = 0.0;
@@ -259,6 +270,38 @@ struct RunResult {
         return run_required_e2e_ms - required_accounted_ms();
     }
 };
+
+[[nodiscard]] std::string frame_mask_stem(int frame_index) {
+    return std::format("frame{:04d}_mask", frame_index);
+}
+
+void write_frame_outputs(std::ostream& out,
+                         const std::vector<RunResult::FrameOutput>& frames,
+                         bool trailing_comma) {
+    out << "  \"frame_outputs\": [\n";
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const auto& frame = frames[i];
+        out << std::format(
+            "    {{\"frame_index\": {}, \"mask_png\": \"{}.png\", "
+            "\"mask_foreground_pixels\": {}, \"mask_width\": {}, \"mask_height\": {}, "
+            "\"score\": {:.9f}, \"obj_score_logit\": {:.9f}, "
+            "\"selected_mask_index\": {}, \"encode_ms\": {:.6f}, "
+            "\"propagate_encoded_ms\": {:.6f}, \"track_step_ms\": {:.6f}}}{}\n",
+            frame.frame_index,
+            frame_mask_stem(frame.frame_index),
+            count_foreground_pixels(frame.output.mask),
+            frame.output.mask.width,
+            frame.output.mask.height,
+            frame.output.score,
+            frame.output.obj_score_logit,
+            frame.output.selected_mask_index,
+            frame.encode_ms,
+            frame.propagate_encoded_ms,
+            frame.track_step_ms,
+            (i + 1 == frames.size()) ? "" : ",");
+    }
+    out << std::format("  ]{}\n", trailing_comma ? "," : "");
+}
 
 void add_encode_timing(sam3_encode_timing& total, const sam3_encode_timing& timing) {
     total.total_ms += timing.total_ms;
@@ -473,6 +516,9 @@ void write_summary(const std::filesystem::path& path, const Args& args, const Ru
         "  \"run_required_e2e_ms\": {:.6f},\n"
         "  \"one_shot_required_e2e_ms\": {:.6f},\n"
         "  \"mask_foreground_pixels\": {},\n"
+        "  \"frame_output_count\": {},\n"
+        "  \"final_frame_index\": {},\n"
+        "  \"final_mask_foreground_pixels\": {},\n"
         "  \"selected_mask_index\": {},\n"
         "  \"output_write_ms\": {:.6f},\n",
         args.mask_case,
@@ -518,8 +564,13 @@ void write_summary(const std::filesystem::path& path, const Args& args, const Ru
         run.run_required_e2e_ms,
         run.one_shot_required_e2e_ms,
         count_foreground_pixels(run.output.mask),
+        run.frame_outputs.size(),
+        run.frame_outputs.empty() ? -1 : run.frame_outputs.back().frame_index,
+        run.frame_outputs.empty() ? 0
+                                  : count_foreground_pixels(run.frame_outputs.back().output.mask),
         run.output.selected_mask_index,
         run.output_write_ms);
+    write_frame_outputs(f, run.frame_outputs, true);
     write_float_array(f, "decoder_iou_scores", run.output.decoder_iou_scores, true);
     write_encode_timing(f, "frame0_encode_timing", run.frame0_encode_timing, true);
     write_encode_timing(f, "frame1_encode_timing", run.frame1_encode_timing, true);
@@ -653,6 +704,14 @@ int main(int argc, char** argv) {
                     run.frame1_encode_timing = frame_encode_timing;
                     run.propagate_timing = propagate_timing;
                 }
+                run.frame_outputs.push_back({
+                    .frame_index = frame_index,
+                    .output = result.detections.front(),
+                    .frame_construct_ms = frame_construct_ms,
+                    .encode_ms = encode_ms,
+                    .propagate_encoded_ms = propagate_encoded_ms,
+                    .track_step_ms = track_step_ms,
+                });
                 run.propagate_encoded_total_ms += propagate_encoded_ms;
                 run.tail_image_encode_total_ms += encode_ms;
                 add_encode_timing(run.tail_encode_timing_total, frame_encode_timing);
@@ -678,6 +737,12 @@ int main(int argc, char** argv) {
                 (void) sam3_save_mask(run.output.mask, (output_dir / "frame1_mask.png").string());
                 write_pgm(detection.mask, output_dir / "input_mask.pgm");
                 write_pgm(run.output.mask, output_dir / "frame1_mask.pgm");
+                for (const auto& frame : run.frame_outputs) {
+                    const auto stem = frame_mask_stem(frame.frame_index);
+                    (void) sam3_save_mask(frame.output.mask,
+                                          (output_dir / (stem + ".png")).string());
+                    write_pgm(frame.output.mask, output_dir / (stem + ".pgm"));
+                }
                 const auto t_output1 = std::chrono::steady_clock::now();
                 run.output_write_ms =
                     std::chrono::duration<double, std::milli>(t_output1 - t_output0).count();

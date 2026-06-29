@@ -305,6 +305,11 @@ def summarize_sam31_mask_init_audit(mask_init_audit: Any) -> tuple[str, Any]:
                     ),
                     "python_mask_iou_min": default.get("python_mask_iou_min"),
                     "python_mask_xor_max": default.get("python_mask_xor_max"),
+                    "python_frame1_mask_iou_min": default.get("python_frame1_mask_iou_min"),
+                    "python_frame1_mask_xor_max": default.get("python_frame1_mask_xor_max"),
+                    "python_sequence_mask_iou_min": default.get("python_sequence_mask_iou_min"),
+                    "python_sequence_mask_xor_max": default.get("python_sequence_mask_xor_max"),
+                    "sequence_frame_count": default.get("sequence_frame_count"),
                 }
             )
     faster_rows = [
@@ -346,11 +351,24 @@ def summarize_sam31_sequence_quality(
         }
     mask_iou = comparison.get("mask_iou")
     mask_iou = mask_iou if isinstance(mask_iou, dict) else {}
-    iou = mask_iou.get("iou")
-    xor_pixels = mask_iou.get("xor_pixels")
+    sequence = comparison.get("sequence")
+    sequence = sequence if isinstance(sequence, dict) else {}
+    sequence_iou = sequence.get("min_iou")
+    sequence_xor_pixels = sequence.get("max_xor_pixels")
+    iou = sequence_iou if isinstance(sequence_iou, int | float) else mask_iou.get("iou")
+    xor_pixels = (
+        sequence_xor_pixels
+        if isinstance(sequence_xor_pixels, int | float)
+        else mask_iou.get("xor_pixels")
+    )
     cpp_sha = comparison.get("cpp_sha256")
     python_sha = comparison.get("python_sha256")
-    exact = isinstance(cpp_sha, str) and cpp_sha == python_sha
+    sequence_exact = sequence.get("exact_all_mask_hash_equal")
+    exact = (
+        bool(sequence_exact)
+        if isinstance(sequence_exact, bool)
+        else isinstance(cpp_sha, str) and cpp_sha == python_sha
+    )
     quality_pass = (
         isinstance(iou, int | float)
         and isinstance(xor_pixels, int | float)
@@ -368,12 +386,14 @@ def summarize_sam31_sequence_quality(
         "cpp_mask": comparison.get("cpp_mask"),
         "python_mask": comparison.get("python_mask"),
         "python_result": mask_sequence_python.get("result"),
+        "sequence_comparison": sequence or None,
         "precision": mask_sequence_python.get("precision"),
         "tf32_policy": mask_sequence_python.get("tf32_policy"),
         "width": mask_sequence_python.get("width"),
         "height": mask_sequence_python.get("height"),
         "mask_case": mask_sequence_python.get("mask_case"),
         "frame1_offset": mask_sequence_python.get("frame1_offset"),
+        "num_frames": mask_sequence_python.get("num_frames"),
     }
 
 

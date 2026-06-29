@@ -748,6 +748,21 @@ def mask_sha256(mask: np.ndarray) -> str:
     return hashlib.sha256(mask.astype(np.uint8).tobytes()).hexdigest()
 
 
+def frame_mask_stem(frame_idx: int) -> str:
+    return f"frame{frame_idx:04d}_mask"
+
+
+def read_frame_mask(directory: Path, frame_idx: int) -> np.ndarray:
+    path = directory / f"{frame_mask_stem(frame_idx)}.png"
+    if frame_idx == 1 and not path.exists():
+        path = directory / "frame1_mask.png"
+    return read_mask(path)
+
+
+def read_frame_masks(directory: Path, num_frames: int) -> dict[int, np.ndarray]:
+    return {frame_idx: read_frame_mask(directory, frame_idx) for frame_idx in range(1, num_frames)}
+
+
 def mask_iou(a: np.ndarray, b: np.ndarray) -> dict[str, Any]:
     if a.shape != b.shape:
         return {"shape_match": False, "a_shape": list(a.shape), "b_shape": list(b.shape)}
@@ -848,6 +863,7 @@ def python_timing_contract(summary: dict[str, Any]) -> dict[str, float | str | N
     frame0_cache = result_float("frame0_cache_ms")
     add_mask = result_float("add_mask_ms")
     frame1_cache = result_float("frame1_cache_ms")
+    tail_cache = result_float("tail_cache_total_ms")
     propagate = result_float("propagate_ms")
     required_e2e = result_float("required_e2e_ms")
     required_session_setup = result_float("required_session_setup_ms")
@@ -858,12 +874,14 @@ def python_timing_contract(summary: dict[str, Any]) -> dict[str, float | str | N
     required_propagate = result_float("required_propagate_encoded_ms")
     required_accounted = result_float("required_accounted_ms")
     required_remainder = result_float("required_remainder_ms")
-    full_inputs = [frame0_cache, add_mask, frame1_cache, propagate]
+    if tail_cache is None:
+        tail_cache = frame1_cache
+    full_inputs = [frame0_cache, add_mask, tail_cache, propagate]
     full_cache_step = sum(value for value in full_inputs if value is not None)
     if any(value is None for value in full_inputs):
         full_cache_step = None
-    if required_backbone is None and frame0_cache is not None and frame1_cache is not None:
-        required_backbone = frame0_cache + frame1_cache
+    if required_backbone is None and frame0_cache is not None and tail_cache is not None:
+        required_backbone = frame0_cache + tail_cache
     if required_model_execute is None and full_cache_step is not None:
         required_model_execute = full_cache_step
     if required_session_setup is None:
@@ -992,6 +1010,8 @@ def run_python_reference(
         case.mask_case,
         "--frame1-offset",
         str(case.frame1_offset),
+        "--num-frames",
+        str(args.num_frames),
         "--dtype",
         args.python_dtype,
         "--tf32",
@@ -1001,12 +1021,20 @@ def run_python_reference(
     ]
     run_command(command, cwd=root, env=None, log_path=py_dir / "run.log")
     summary = read_json(py_dir / "summary.json")
-    mask = read_mask(py_dir / "frame1_mask.png")
+    mask = read_frame_mask(py_dir, 1)
+    frame_masks = read_frame_masks(py_dir, args.num_frames)
     return {
         "dir": rel(py_dir, root),
         "summary": summary,
         "mask_sha256": mask_sha256(mask),
         "mask_foreground_pixels": int((mask > 127).sum()),
+        "frame_masks": {
+            str(frame_idx): {
+                "mask_sha256": mask_sha256(frame_mask),
+                "mask_foreground_pixels": int((frame_mask > 127).sum()),
+            }
+            for frame_idx, frame_mask in frame_masks.items()
+        },
     }
 
 
@@ -1037,6 +1065,8 @@ def run_cpp_variant(
         case.mask_case,
         "--frame1-offset",
         str(case.frame1_offset),
+        "--num-frames",
+        str(args.num_frames),
         "--warmup-runs",
         str(args.cpp_warmup_runs),
         "--out",
@@ -1044,7 +1074,7 @@ def run_cpp_variant(
     ]
     run_command(command, cwd=root, env=env, log_path=run_dir / "run.log")
     summary = read_json(run_dir / "summary.json")
-    mask = read_mask(run_dir / "frame1_mask.png")
+    mask = read_frame_mask(run_dir, 1)
     return {
         "dir": rel(run_dir, root),
         "summary": summary,
@@ -1180,11 +1210,14 @@ def run_cpp_profile_default(
 def summarize_variant(
     runs: list[dict[str, Any]],
     *,
-    python_mask: np.ndarray,
-    default_mask: np.ndarray | None,
+    python_masks: dict[int, np.ndarray],
+    default_masks: dict[int, np.ndarray] | None,
     python_timing: dict[str, float | str | None],
     root: Path,
+    num_frames: int,
 ) -> dict[str, Any]:
+    python_mask = python_masks[1]
+    default_mask = default_masks.get(1) if default_masks is not None else None
     propagate_encoded = [float(run["summary"]["propagate_encoded_ms"]) for run in runs]
     propagate_total = [float(run["summary"]["propagate_ms"]) for run in runs]
     encode_frame0 = [float(run["summary"]["encode_frame0_ms"]) for run in runs]
@@ -1385,11 +1418,33 @@ def summarize_variant(
     python_backbone = python_timing.get("required_image_encode_or_backbone_ms")
     python_comp = []
     default_comp = []
+    python_sequence_comp: list[dict[str, Any]] = []
+    default_sequence_comp: list[dict[str, Any]] = []
     for run in runs:
-        mask = read_mask(root / run["dir"] / "frame1_mask.png")
+        run_dir = root / run["dir"]
+        mask = read_frame_mask(run_dir, 1)
         python_comp.append(mask_iou(mask, python_mask))
         if default_mask is not None:
             default_comp.append(mask_iou(mask, default_mask))
+        for frame_idx in range(1, num_frames):
+            frame_mask = read_frame_mask(run_dir, frame_idx)
+            py_cmp = mask_iou(frame_mask, python_masks[frame_idx])
+            python_sequence_comp.append({"frame_index": frame_idx, **py_cmp})
+            if default_masks is not None:
+                default_cmp = mask_iou(frame_mask, default_masks[frame_idx])
+                default_sequence_comp.append({"frame_index": frame_idx, **default_cmp})
+    python_sequence_iou = [
+        float(item["iou"]) for item in python_sequence_comp if item.get("shape_match")
+    ]
+    python_sequence_xor = [
+        float(item["xor_pixels"]) for item in python_sequence_comp if item.get("shape_match")
+    ]
+    default_sequence_iou = [
+        float(item["iou"]) for item in default_sequence_comp if item.get("shape_match")
+    ]
+    default_sequence_xor = [
+        float(item["xor_pixels"]) for item in default_sequence_comp if item.get("shape_match")
+    ]
     return {
         "runs": runs,
         "model_load_ms": numeric_summary(model_load),
@@ -1606,10 +1661,15 @@ def summarize_variant(
         "python_xor_pixels": numeric_summary(
             [float(item["xor_pixels"]) for item in python_comp if item["shape_match"]]
         ),
+        "python_sequence_iou": numeric_summary(python_sequence_iou),
+        "python_sequence_xor_pixels": numeric_summary(python_sequence_xor),
+        "python_sequence_frame_count": len(python_masks),
         "default_iou": numeric_summary([float(item["iou"]) for item in default_comp if item["shape_match"]]),
         "default_xor_pixels": numeric_summary(
             [float(item["xor_pixels"]) for item in default_comp if item["shape_match"]]
         ),
+        "default_sequence_iou": numeric_summary(default_sequence_iou),
+        "default_sequence_xor_pixels": numeric_summary(default_sequence_xor),
     }
 
 
@@ -1635,6 +1695,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tf32", choices=("on", "off"), default="on")
     parser.add_argument("--python-warmup-runs", type=int, default=1)
     parser.add_argument("--cpp-warmup-runs", type=int, default=1)
+    parser.add_argument("--num-frames", type=int, default=2)
     parser.add_argument(
         "--profile-default",
         action="store_true",
@@ -1661,6 +1722,8 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit("--repeats must be positive")
     if args.cpp_warmup_runs < 0:
         raise SystemExit("--cpp-warmup-runs must be non-negative")
+    if args.num_frames < 2:
+        raise SystemExit("--num-frames must be >= 2")
     if args.profile_warmup_runs is None:
         args.profile_warmup_runs = args.cpp_warmup_runs
     if args.profile_warmup_runs < 0:
@@ -1686,6 +1749,7 @@ def main() -> int:
         "cases": [case.label for case in args.case],
         "variants": args.variant,
         "repeats": args.repeats,
+        "num_frames": args.num_frames,
         "python": {"dtype": args.python_dtype, "tf32": args.tf32, "warmup_runs": args.python_warmup_runs},
         "cpp": {
             "warmup_runs": args.cpp_warmup_runs,
@@ -1701,17 +1765,17 @@ def main() -> int:
             case_dir = out / size.label / case.label
             python_ref = run_python_reference(args, size, case, root, case_dir)
             python_timing = python_timing_contract(python_ref["summary"])
-            python_mask = read_mask(case_dir / "python" / "frame1_mask.png")
+            python_masks = read_frame_masks(case_dir / "python", args.num_frames)
 
             variant_runs: dict[str, list[dict[str, Any]]] = {variant: [] for variant in args.variant}
-            default_mask: np.ndarray | None = None
+            default_masks: dict[int, np.ndarray] | None = None
             if args.interleave_variants:
                 for repeat in range(args.repeats):
                     for variant in args.variant:
                         run = run_cpp_variant(args, size, case, root, case_dir, variant, repeat + 1)
                         variant_runs[variant].append(run)
                         if variant == "default":
-                            default_mask = read_mask(root / run["dir"] / "frame1_mask.png")
+                            default_masks = read_frame_masks(root / run["dir"], args.num_frames)
             else:
                 for variant in args.variant:
                     runs = [
@@ -1720,7 +1784,7 @@ def main() -> int:
                     ]
                     variant_runs[variant] = runs
                     if variant == "default":
-                        default_mask = read_mask(root / runs[-1]["dir"] / "frame1_mask.png")
+                        default_masks = read_frame_masks(root / runs[-1]["dir"], args.num_frames)
 
             case_item = {
                 "python": python_ref,
@@ -1734,10 +1798,11 @@ def main() -> int:
             for variant, runs in variant_runs.items():
                 case_item["variants"][variant] = summarize_variant(
                     runs,
-                    python_mask=python_mask,
-                    default_mask=default_mask,
+                    python_masks=python_masks,
+                    default_masks=default_masks,
                     python_timing=python_timing,
                     root=root,
+                    num_frames=args.num_frames,
                 )
             size_item["cases"][case.label] = case_item
         report["sizes"][size.label] = size_item

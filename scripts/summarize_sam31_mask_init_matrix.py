@@ -36,6 +36,22 @@ def metric_mean(item: dict[str, Any], name: str) -> float | None:
     return number(metric(item, name).get("mean"))
 
 
+def metric_min_prefer(item: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = number(metric(item, name).get("min"))
+        if value is not None:
+            return value
+    return None
+
+
+def metric_max_prefer(item: dict[str, Any], names: tuple[str, ...]) -> float | None:
+    for name in names:
+        value = number(metric(item, name).get("max"))
+        if value is not None:
+            return value
+    return None
+
+
 def metric_mean_any(item: dict[str, Any], names: str | tuple[str, ...]) -> float | None:
     if isinstance(names, str):
         return metric_mean(item, names)
@@ -163,10 +179,8 @@ def fmt_stage_list(value: Any) -> str:
 
 
 def variant_quality_status(item: dict[str, Any]) -> tuple[bool, dict[str, float | None]]:
-    default_iou = metric(item, "default_iou")
-    default_xor = metric(item, "default_xor_pixels")
-    min_iou = number(default_iou.get("min"))
-    max_xor = number(default_xor.get("max"))
+    min_iou = metric_min_prefer(item, ("default_sequence_iou", "default_iou"))
+    max_xor = metric_max_prefer(item, ("default_sequence_xor_pixels", "default_xor_pixels"))
     same_as_default = (
         min_iou is not None
         and min_iou >= QUALITY_IOU_THRESHOLD
@@ -848,8 +862,25 @@ def summarize_case(
                     python_cached_propagate,
                     prop_encoded,
                 ),
-                "python_mask_iou_min": number(metric(raw_item, "python_iou").get("min")),
-                "python_mask_xor_max": number(metric(raw_item, "python_xor_pixels").get("max")),
+                "python_mask_iou_min": metric_min_prefer(
+                    raw_item,
+                    ("python_sequence_iou", "python_iou"),
+                ),
+                "python_mask_xor_max": metric_max_prefer(
+                    raw_item,
+                    ("python_sequence_xor_pixels", "python_xor_pixels"),
+                ),
+                "python_frame1_mask_iou_min": number(metric(raw_item, "python_iou").get("min")),
+                "python_frame1_mask_xor_max": number(
+                    metric(raw_item, "python_xor_pixels").get("max")
+                ),
+                "python_sequence_mask_iou_min": number(
+                    metric(raw_item, "python_sequence_iou").get("min")
+                ),
+                "python_sequence_mask_xor_max": number(
+                    metric(raw_item, "python_sequence_xor_pixels").get("max")
+                ),
+                "sequence_frame_count": number(raw_item.get("python_sequence_frame_count")),
                 "same_as_default": same_as_default,
                 **quality,
             }

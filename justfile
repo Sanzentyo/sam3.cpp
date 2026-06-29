@@ -224,6 +224,7 @@ SAM31_TRACKING_MASK_INIT_WIDTH := env_var_or_default("SAM31_TRACKING_MASK_INIT_W
 SAM31_TRACKING_MASK_INIT_HEIGHT := env_var_or_default("SAM31_TRACKING_MASK_INIT_HEIGHT", "240")
 SAM31_TRACKING_MASK_INIT_CASE := env_var_or_default("SAM31_TRACKING_MASK_INIT_CASE", "center")
 SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET := env_var_or_default("SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET", "3")
+SAM31_TRACKING_MASK_INIT_NUM_FRAMES := env_var_or_default("SAM31_TRACKING_MASK_INIT_NUM_FRAMES", "2")
 SAM31_TRACKING_MASK_INIT_WARMUP_RUNS := env_var_or_default("SAM31_TRACKING_MASK_INIT_WARMUP_RUNS", "0")
 SAM31_TRACKING_MASK_INIT_OUT := env_var_or_default("SAM31_TRACKING_MASK_INIT_OUT", "outputs/sam31-tracking-mask-init-smoke")
 SAM31_MASK_SEQUENCE_PY_OUT := env_var_or_default("SAM31_MASK_SEQUENCE_PY_OUT", "outputs/sam31-mask-sequence-python")
@@ -1205,6 +1206,7 @@ sam31-tracking-mask-init-smoke out=SAM31_TRACKING_MASK_INIT_OUT: (build-target "
         --height {{ SAM31_TRACKING_MASK_INIT_HEIGHT }} \
         --mask-case {{ SAM31_TRACKING_MASK_INIT_CASE }} \
         --frame1-offset {{ SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET }} \
+        --num-frames {{ SAM31_TRACKING_MASK_INIT_NUM_FRAMES }} \
         --warmup-runs {{ SAM31_TRACKING_MASK_INIT_WARMUP_RUNS }} \
         --out {{ out }} \
         |& tee {{ out }}/summary.log
@@ -1217,10 +1219,12 @@ sam31-mask-sequence-python out=SAM31_MASK_SEQUENCE_PY_OUT: sam31-tracking-mask-i
         --checkpoint {{ SAM31_CONTRACT_SAM31 }} \
         --out {{ out }} \
         --cpp-mask {{ SAM31_TRACKING_MASK_INIT_OUT }}/frame1_mask.png \
+        --cpp-mask-dir {{ SAM31_TRACKING_MASK_INIT_OUT }} \
         --width {{ SAM31_TRACKING_MASK_INIT_WIDTH }} \
         --height {{ SAM31_TRACKING_MASK_INIT_HEIGHT }} \
         --mask-case {{ SAM31_TRACKING_MASK_INIT_CASE }} \
         --frame1-offset {{ SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET }} \
+        --num-frames {{ SAM31_TRACKING_MASK_INIT_NUM_FRAMES }} \
         --dtype {{ SAM31_MASK_SEQUENCE_PY_DTYPE }} \
         --tf32 {{ SAM31_MASK_SEQUENCE_PY_TF32 }} \
         --warmup-runs {{ SAM31_MASK_SEQUENCE_PY_WARMUP_RUNS }}
@@ -1245,6 +1249,7 @@ sam31-mask-init-matrix out=SAM31_MASK_INIT_MATRIX_OUT: (build-target "sam31_trac
         --device {{ SAM31_TRACKING_MASK_INIT_DEVICE }} \
         --python-dtype {{ SAM31_MASK_SEQUENCE_PY_DTYPE }} \
         --tf32 {{ SAM31_MASK_SEQUENCE_PY_TF32 }} \
+        --num-frames {{ SAM31_TRACKING_MASK_INIT_NUM_FRAMES }} \
         --python-warmup-runs {{ SAM31_MASK_INIT_MATRIX_PY_WARMUP_RUNS }} \
         --cpp-warmup-runs {{ SAM31_MASK_INIT_MATRIX_CPP_WARMUP_RUNS }} \
         ${interleave_args} ${profile_args} ${size_args} ${case_args} ${variant_args}

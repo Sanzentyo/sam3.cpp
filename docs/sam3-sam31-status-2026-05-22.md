@@ -11958,6 +11958,57 @@ covered by the same sequence gate. Evidence:
 `outputs/sam31-mask-init-audit-winpart-current-phase3-20260630o/summary.json`,
 and `outputs/e2e-required-audit-sam3-bf16-current-python-parity-20260630n/optimization_targets.json`.
 
+## SAM3.1 four-frame sequence gate
+
+The SAM3.1 mask-init smoke and official Python sequence runner now accept
+`--num-frames`. The C++ smoke keeps the legacy `frame1_mask.png` output and also
+writes per-frame masks as `frame0001_mask.png`, `frame0002_mask.png`, and so on.
+The Python runner now compares every propagated frame when `--cpp-mask-dir` is
+provided, and the matrix/audit summaries promote sequence min-IoU/max-XOR rather
+than silently checking only frame 1.
+
+The first longer same-contract check used BF16, TF32-on, `320x240`,
+`center@3`, `num_frames=4`, C++ warmup `1`, Python warmup `0`, and 3 C++
+default repeats. C++ is faster on the required-E2E denominator, but the sequence
+quality gate fails:
+
+| Metric | Value |
+| --- | ---: |
+| Python required E2E | `1184.161480 ms` |
+| C++ required E2E mean | `735.005063 ms` |
+| Python / C++ required E2E | `1.611093x` |
+| Python model/full-cache over C++ full-frame | `1.561273x` |
+| C++ required image encode mean | `646.765943 ms` |
+| C++ required encoded propagation mean | `50.974431 ms` |
+| Python required image/backbone | `985.482297 ms` |
+| Python required propagation | `104.342331 ms` |
+
+Per-frame C++ versus official Python mask quality:
+
+| Frame | IoU | XOR pixels |
+| ---: | ---: | ---: |
+| 1 | `0.966150936` | `501` |
+| 2 | `0.922506463` | `1139` |
+| 3 | `0.424480123` | `17242` |
+
+The active goal audit therefore remains incomplete under the longer sequence,
+even with the explicit quality-parity contract enabled:
+`official_mask_sequence_quality.status = quality_fail`,
+`sequence.min_iou = 0.42448012283454056`, and
+`sequence.max_xor_pixels = 17242`.
+
+This changes the next SAM3.1 work item: speed is already ahead on this longer
+mask-init sequence, but the C++ runtime propagation state diverges after the
+early frames. The next root fix should focus on SAM3.1 memory/state update
+parity across multiple propagated frames before claiming longer-video coverage.
+
+Evidence:
+`outputs/sam31-tracking-mask-init-smoke-numframes4-20260629a/summary.json`,
+`outputs/sam31-mask-sequence-python-numframes4-20260629d/summary.json`,
+`outputs/sam31-mask-init-matrix-numframes4-default-20260629a/summary.json`,
+`outputs/sam31-mask-init-audit-numframes4-default-20260629a/summary.json`,
+and `outputs/sam3-sam31-goal-audit-numframes4-quality-check-20260629a/summary.json`.
+
 ## SAM3.1 required-E2E split
 
 The SAM3.1 mask-init smoke now writes the process boundaries needed for a

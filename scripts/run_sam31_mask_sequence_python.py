@@ -95,6 +95,10 @@ def write_pgm(path: Path, mask: np.ndarray) -> None:
     )
 
 
+def frame_mask_stem(frame_idx: int) -> str:
+    return f"frame{frame_idx:04d}_mask"
+
+
 def write_raw_tensor(base: Path, name: str, values: np.ndarray) -> None:
     values = values.astype(np.float32, copy=False)
     (base / f"{name}.shape").write_text(
@@ -784,6 +788,7 @@ def main() -> int:
     parser.add_argument("--checkpoint", type=Path, default=Path("models/sam3.1/sam3.1_multiplex.pt"))
     parser.add_argument("--out", type=Path, default=Path("outputs/sam31-mask-sequence-python"))
     parser.add_argument("--cpp-mask", type=Path)
+    parser.add_argument("--cpp-mask-dir", type=Path)
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=240)
     parser.add_argument(
@@ -792,6 +797,7 @@ def main() -> int:
         default="center",
     )
     parser.add_argument("--frame1-offset", type=int, default=3)
+    parser.add_argument("--num-frames", type=int, default=2)
     parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--tf32", choices=("on", "off"), default="on")
     parser.add_argument("--warmup-runs", type=int, default=0)
@@ -800,6 +806,8 @@ def main() -> int:
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required for official SAM3.1 mask sequence")
+    if args.num_frames < 2:
+        raise SystemExit("--num-frames must be >= 2")
     if not args.checkpoint.exists():
         raise SystemExit(f"checkpoint not found: {args.checkpoint}")
 
@@ -846,8 +854,8 @@ def main() -> int:
     def make_run_inputs() -> tuple[list[Image.Image], np.ndarray, float]:
         start = time.perf_counter()
         frames = [
-            make_frame(args.width, args.height, 0),
-            make_frame(args.width, args.height, args.frame1_offset),
+            make_frame(args.width, args.height, args.frame1_offset * frame_idx)
+            for frame_idx in range(args.num_frames)
         ]
         input_mask_np = make_rect_mask(args.width, args.height, args.mask_case)
         return frames, input_mask_np, (time.perf_counter() - start) * 1000.0
@@ -867,6 +875,7 @@ def main() -> int:
 
         with precision_context():
             frame0_cache_ms = run_backbone_cache(model, state, 0)
+            persistent_feature_cache = dict(state["feature_cache"])
 
             start = time.perf_counter()
             tracker_states = model._tracker_add_new_objects(
@@ -881,39 +890,78 @@ def main() -> int:
             )
             torch.cuda.synchronize()
             add_mask_ms = (time.perf_counter() - start) * 1000.0
+            for tracker_state in tracker_states:
+                tracker_state["cached_features"] = persistent_feature_cache
 
-            frame1_cache_ms = run_backbone_cache(model, state, 1)
-            if write_outputs and args.dump_propagation_dir is not None:
-                dump_feature_cache_frame(state, 1, args.dump_propagation_dir)
-                dump_direct_backbone_frame(model, state, 1, args.dump_propagation_dir)
-            start = time.perf_counter()
             frame1_mask = None
             frame1_obj_score = None
-            for frame_idx, _obj_ids, _low_res_masks, video_res_masks, obj_scores in model.tracker.propagate_in_video(
-                tracker_states[0],
-                start_frame_idx=0,
-                max_frame_num_to_track=1,
-                reverse=False,
-                tqdm_disable=True,
-                run_mem_encoder=True,
-            ):
-                if frame_idx == 1:
+            tail_cache_ms_by_frame: dict[int, float] = {}
+            propagate_ms_by_frame: dict[int, float] = {}
+            frame_masks: dict[int, np.ndarray] = {}
+            frame_obj_scores: dict[int, float] = {}
+            for target_frame_idx in range(1, args.num_frames):
+                tail_cache_ms_by_frame[target_frame_idx] = run_backbone_cache(
+                    model,
+                    state,
+                    target_frame_idx,
+                )
+                persistent_feature_cache.update(state["feature_cache"])
+                for tracker_state in tracker_states:
+                    tracker_state["cached_features"] = persistent_feature_cache
+                if (
+                    target_frame_idx == 1
+                    and write_outputs
+                    and args.dump_propagation_dir is not None
+                ):
+                    dump_feature_cache_frame(state, 1, args.dump_propagation_dir)
+                    dump_direct_backbone_frame(model, state, 1, args.dump_propagation_dir)
+
+                start = time.perf_counter()
+                found_target = False
+                for frame_idx, _obj_ids, _low_res_masks, video_res_masks, obj_scores in model.tracker.propagate_in_video(
+                    tracker_states[0],
+                    start_frame_idx=target_frame_idx - 1,
+                    max_frame_num_to_track=1,
+                    reverse=False,
+                    tqdm_disable=True,
+                    run_mem_encoder=True,
+                ):
+                    if frame_idx != target_frame_idx:
+                        continue
                     raw_mask = (video_res_masks[0] > 0).detach().cpu().numpy().astype(np.uint8) * 255
-                    frame1_mask = np.squeeze(raw_mask)
-                    if frame1_mask.ndim != 2:
-                        raise RuntimeError(f"unexpected official frame 1 mask shape: {list(raw_mask.shape)}")
-                    frame1_obj_score = float(obj_scores[0].detach().float().cpu().item())
+                    frame_mask = np.squeeze(raw_mask)
+                    if frame_mask.ndim != 2:
+                        raise RuntimeError(
+                            f"unexpected official frame {frame_idx} mask shape: {list(raw_mask.shape)}"
+                        )
+                    frame_masks[int(frame_idx)] = frame_mask
+                    frame_obj_scores[int(frame_idx)] = float(obj_scores[0].detach().float().cpu().item())
+                    if frame_idx == 1:
+                        frame1_mask = frame_mask
+                        frame1_obj_score = frame_obj_scores[int(frame_idx)]
+                    found_target = True
                     break
-        torch.cuda.synchronize()
-        propagate_ms = (time.perf_counter() - start) * 1000.0
+                torch.cuda.synchronize()
+                propagate_ms_by_frame[target_frame_idx] = (time.perf_counter() - start) * 1000.0
+                if not found_target:
+                    raise RuntimeError(
+                        f"official Python propagation did not produce frame {target_frame_idx}"
+                    )
+        propagate_ms = sum(propagate_ms_by_frame.values())
         run_required_e2e_ms = (time.perf_counter() - run_start) * 1000.0
         if frame1_mask is None:
             raise RuntimeError("official Python propagation did not produce frame 1")
+        missing_frames = [frame_idx for frame_idx in range(1, args.num_frames) if frame_idx not in frame_masks]
+        if missing_frames:
+            raise RuntimeError(f"official Python propagation did not produce frames {missing_frames}")
 
         required_session_setup_ms = init_state_ms
         required_input_prepare_ms = input_prepare_ms + mask_tensor_prepare_ms
-        required_model_execute_ms = frame0_cache_ms + add_mask_ms + frame1_cache_ms + propagate_ms
-        required_image_encode_or_backbone_ms = frame0_cache_ms + frame1_cache_ms
+        tail_cache_total_ms = sum(tail_cache_ms_by_frame.values())
+        tail_cache_avg_ms = tail_cache_total_ms / max(len(tail_cache_ms_by_frame), 1)
+        frame1_cache_ms = tail_cache_ms_by_frame[1]
+        required_model_execute_ms = frame0_cache_ms + add_mask_ms + tail_cache_total_ms + propagate_ms
+        required_image_encode_or_backbone_ms = frame0_cache_ms + tail_cache_total_ms
         required_mask_init_ms = add_mask_ms
         required_propagate_encoded_ms = propagate_ms
         required_accounted_ms = (
@@ -926,6 +974,24 @@ def main() -> int:
             Image.fromarray(frame1_mask, mode="L").save(args.out / "frame1_mask.png")
             write_pgm(args.out / "input_mask.pgm", input_mask_np)
             write_pgm(args.out / "frame1_mask.pgm", frame1_mask)
+            for frame_idx, frame_mask in sorted(frame_masks.items()):
+                stem = frame_mask_stem(frame_idx)
+                Image.fromarray(frame_mask, mode="L").save(args.out / f"{stem}.png")
+                write_pgm(args.out / f"{stem}.pgm", frame_mask)
+
+        per_frame_results = [
+            {
+                "frame_index": frame_idx,
+                "cache_ms": tail_cache_ms_by_frame[frame_idx],
+                "propagate_ms": propagate_ms_by_frame[frame_idx],
+                "mask_width": int(frame_masks[frame_idx].shape[1]),
+                "mask_height": int(frame_masks[frame_idx].shape[0]),
+                "mask_foreground_pixels": int((frame_masks[frame_idx] > 127).sum()),
+                "mask_sha256": mask_sha256(frame_masks[frame_idx]),
+                "obj_score_logit": frame_obj_scores[frame_idx],
+            }
+            for frame_idx in sorted(frame_masks)
+        ]
 
         return {
             "input_prepare_ms": input_prepare_ms,
@@ -934,6 +1000,8 @@ def main() -> int:
             "frame0_cache_ms": frame0_cache_ms,
             "add_mask_ms": add_mask_ms,
             "frame1_cache_ms": frame1_cache_ms,
+            "tail_cache_total_ms": tail_cache_total_ms,
+            "tail_cache_avg_ms": tail_cache_avg_ms,
             "propagate_ms": propagate_ms,
             "required_session_setup_ms": required_session_setup_ms,
             "required_input_prepare_ms": required_input_prepare_ms,
@@ -944,12 +1012,16 @@ def main() -> int:
             "required_accounted_ms": required_accounted_ms,
             "required_e2e_ms": run_required_e2e_ms,
             "required_remainder_ms": run_required_e2e_ms - required_accounted_ms,
+            "num_frames": args.num_frames,
+            "propagated_frames": len(frame_masks),
+            "per_frame_results": per_frame_results,
             "frame1_obj_score_logit": frame1_obj_score,
             "mask_width": int(frame1_mask.shape[1]),
             "mask_height": int(frame1_mask.shape[0]),
             "mask_foreground_pixels": int((frame1_mask > 127).sum()),
             "mask_sha256": mask_sha256(frame1_mask),
             "mask": frame1_mask if write_outputs else None,
+            "frame_masks": frame_masks if write_outputs else None,
         }
 
     for _ in range(args.warmup_runs):
@@ -965,6 +1037,7 @@ def main() -> int:
         for restore in reversed(restore_dump_hooks):
             restore()
     mask = result.pop("mask")
+    frame_masks = result.pop("frame_masks")
     comparison = None
     if args.cpp_mask:
         cpp = read_mask(args.cpp_mask)
@@ -975,6 +1048,77 @@ def main() -> int:
             "python_sha256": mask_sha256(mask),
             "mask_iou": mask_iou(cpp, mask),
         }
+    if args.cpp_mask_dir:
+        cpp_frame_comparisons = []
+        for frame_idx in range(1, args.num_frames):
+            cpp_path = args.cpp_mask_dir / f"{frame_mask_stem(frame_idx)}.png"
+            if frame_idx == 1 and not cpp_path.exists():
+                cpp_path = args.cpp_mask_dir / "frame1_mask.png"
+            if not cpp_path.exists():
+                cpp_frame_comparisons.append(
+                    {
+                        "frame_index": frame_idx,
+                        "status": "missing_cpp_mask",
+                        "cpp_mask": str(cpp_path),
+                    }
+                )
+                continue
+            cpp = read_mask(cpp_path)
+            py_mask = frame_masks[frame_idx]
+            item = {
+                "frame_index": frame_idx,
+                "status": "ok",
+                "cpp_mask": str(cpp_path),
+                "python_mask": str(args.out / f"{frame_mask_stem(frame_idx)}.png"),
+                "cpp_sha256": mask_sha256(cpp),
+                "python_sha256": mask_sha256(py_mask),
+                "mask_iou": mask_iou(cpp, py_mask),
+            }
+            cpp_frame_comparisons.append(item)
+        ok_items = [item for item in cpp_frame_comparisons if item.get("status") == "ok"]
+        ious = [
+            float(item["mask_iou"]["iou"])
+            for item in ok_items
+            if isinstance(item.get("mask_iou"), dict) and item["mask_iou"].get("shape_match")
+        ]
+        xors = [
+            int(item["mask_iou"]["xor_pixels"])
+            for item in ok_items
+            if isinstance(item.get("mask_iou"), dict) and item["mask_iou"].get("shape_match")
+        ]
+        exact_all = bool(ok_items) and len(ok_items) == args.num_frames - 1 and all(
+            item.get("cpp_sha256") == item.get("python_sha256") for item in ok_items
+        )
+        sequence = {
+            "num_frames": args.num_frames,
+            "propagated_frames": args.num_frames - 1,
+            "compared_frames": len(ok_items),
+            "missing_frames": [
+                item["frame_index"]
+                for item in cpp_frame_comparisons
+                if item.get("status") != "ok"
+            ],
+            "min_iou": min(ious) if ious else None,
+            "max_xor_pixels": max(xors) if xors else None,
+            "exact_all_mask_hash_equal": exact_all,
+            "frames": cpp_frame_comparisons,
+        }
+        if comparison is None:
+            frame1 = next(
+                (item for item in cpp_frame_comparisons if item.get("frame_index") == 1),
+                None,
+            )
+            if isinstance(frame1, dict) and frame1.get("status") == "ok":
+                comparison = {
+                    "cpp_mask": frame1.get("cpp_mask"),
+                    "python_mask": frame1.get("python_mask"),
+                    "cpp_sha256": frame1.get("cpp_sha256"),
+                    "python_sha256": frame1.get("python_sha256"),
+                    "mask_iou": frame1.get("mask_iou"),
+                }
+        if comparison is None:
+            comparison = {}
+        comparison["sequence"] = sequence
 
     summary = {
         "status": "ok",
@@ -985,6 +1129,7 @@ def main() -> int:
         "height": args.height,
         "mask_case": args.mask_case,
         "frame1_offset": args.frame1_offset,
+        "num_frames": args.num_frames,
         "warmup_runs": args.warmup_runs,
         "torch": {
             "version": torch.__version__,

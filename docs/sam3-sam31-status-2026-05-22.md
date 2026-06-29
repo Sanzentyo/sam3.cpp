@@ -353,6 +353,69 @@ current baseline (`2.169 ms` versus about `2.109 ms`). That path is useful
 implementation groundwork, but it is not an accepted speed candidate without
 the flat-chain dataflow.
 
+### Clean HEAD validation
+
+After committing the implementation, the accepted candidate state was remeasured
+from clean `HEAD` with the same env:
+
+```text
+SAM3_ENABLE_VIT_MLP_FLAT_CHAIN=1
+SAM3_BF16_VIT_MLP_CHAIN=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16_UNSAFE_RUN=1
+```
+
+Evidence:
+`outputs/e2e-required-measure-sam3-bf16-cudnn-mlp-flat-bf16-clean-20260629a/`.
+
+The clean run confirms the same direction:
+
+| Metric | Mean |
+| --- | ---: |
+| Required E2E | `916.059 ms` |
+| Model E2E | `903.240 ms` |
+| Required core compute | `766.434 ms` |
+| Tail image encode total | `577.190 ms` |
+| Tail image encode graph compute | `572.730 ms` |
+| Frame0 image encode graph compute | `152.799 ms` |
+| Official Python session E2E | `1136.673 ms` |
+| Official Python model E2E | `1021.301 ms` |
+
+Quality parity against official Python remains within the final tolerance gate:
+`5 / 5` rows compared, `tolerance_diff_rows=0`, min bbox IoU `0.979`, max bbox
+delta `2.537 px`, max score delta `0.016`, min mask IoU `0.985`, and max mask
+XOR `483`. Mask hashes are not expected to match official Python bit-for-bit
+under this gate.
+
+The only remaining Python/C++ speed gap is still the tail image encoder:
+
+| Process | C++ | Python diagnostic | Gap |
+| --- | ---: | ---: | ---: |
+| Tail image encode / backbone | `577.190 ms` | `525.669 ms` | `+51.521 ms` |
+| Tail image encode graph compute | `572.730 ms` | `525.669 ms` | `+47.061 ms` |
+
+The implementation budget after the accepted candidate is:
+
+| Group | Required image budget | Tail graph budget |
+| --- | ---: | ---: |
+| ViT MLP matmul | `290.325 ms` | `246.192 ms` |
+| ViT QKV matmul | `99.447 ms` | `81.461 ms` |
+| ViT attention | `96.896 ms` | `79.361 ms` |
+| Neck | `76.908 ms` | `45.560 ms` |
+| ViT layout/rope/copy | `43.578 ms` | `39.973 ms` |
+
+The clean cuBLASLt attribution shows FC2 and QKV are already on cached
+cuBLASLt bias plans (`vit_mlp_fc2` mean `0.951 ms`, `vit_qkv` mean
+`0.617 ms`, `vit_attn_proj` mean `0.228 ms`). The next accepted change should
+therefore either reduce the actual MLP/QKV/attention kernel time, or attack the
+neck graph if it can produce a full required-E2E win. Another measurement-only
+or heuristic-only toggle is not enough.
+
+During this validation, `e2e-required-measure` was also fixed so the
+`e2e-required-python-parity` child inherits the split C++ env through
+`E2E_REQUIRED_MEASURE_PYTHON_PARITY_CPP_ENV`. This avoids mixing a candidate
+speed split with default-C++ parity output.
+
 ## SAM3 Required E2E Deep Split 2026-06-29
 
 The SAM3 BF16 required-E2E bundle now separates the optimization denominator

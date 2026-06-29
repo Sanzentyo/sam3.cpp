@@ -394,6 +394,31 @@ The only remaining Python/C++ speed gap is still the tail image encoder:
 | Tail image encode / backbone | `577.190 ms` | `525.669 ms` | `+51.521 ms` |
 | Tail image encode graph compute | `572.730 ms` | `525.669 ms` | `+47.061 ms` |
 
+The same clean candidate state now has a cumulative ViT block sweep, using the
+same extracted frame and `repeats=5`:
+`outputs/e2e-required-vit-block-sweep-sam3-bf16-cudnn-mlp-flat-bf16-clean-r5-20260629a/`.
+
+| Slice | Mean/frame | Median/frame | Increment mean | Increment median |
+| --- | ---: | ---: | ---: | ---: |
+| prefix only | `0.551 ms` | `0.551 ms` | `0.551 ms` | `0.551 ms` |
+| after block 0 | `4.222 ms` | `4.213 ms` | `3.671 ms` | `3.661 ms` |
+| after block 1 | `7.952 ms` | `7.966 ms` | `3.730 ms` | `3.754 ms` |
+| after blocks 2-3 | `15.603 ms` | `15.646 ms` | `7.651 ms` | `7.680 ms` |
+| after blocks 4-7 | `32.257 ms` | `32.233 ms` | `16.654 ms` | `16.587 ms` |
+| after blocks 8-11 | `46.991 ms` | `46.769 ms` | `14.733 ms` | `14.537 ms` |
+| after blocks 12-15 | `63.354 ms` | `63.007 ms` | `16.364 ms` | `16.237 ms` |
+| after blocks 16-19 | `77.959 ms` | `77.943 ms` | `14.605 ms` | `14.936 ms` |
+| after blocks 20-23 | `94.339 ms` | `94.450 ms` | `16.380 ms` | `16.507 ms` |
+| after blocks 24-27 | `111.264 ms` | `109.442 ms` | `16.925 ms` | `14.991 ms` |
+| full ViT through block 31 | `133.223 ms` | `126.095 ms` | `21.958 ms` | `16.653 ms` |
+| full ViT + tracker neck | `146.927 ms` | `137.387 ms` | `13.704 ms` | `11.292 ms` |
+
+This keeps the accepted-candidate target focused on the image encoder rather
+than cached-tail placement. The tracker neck is measurable, but the remaining
+gap against the Python tail-backbone diagnostic is larger than a realistic neck
+cleanup alone, so the next root target remains ViT internals: FC2/QKV GEMM
+dataflow and layout/RoPE/attention fusion.
+
 The implementation budget after the accepted candidate is:
 
 | Group | Required image budget | Tail graph budget |

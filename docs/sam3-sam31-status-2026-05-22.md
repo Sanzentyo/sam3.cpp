@@ -315,6 +315,25 @@ FC2 block, but it slowed the FC2 GEMM group (`0.976 ms` to `1.103 ms` mean),
 so it is rejected before full required-E2E A/B. Evidence:
 `outputs/e2e-required-mulmat-profile-sam3-bf16-cudnn-mlp-flat-bf16-residual-r5-20260629a/cublaslt_bias_by_group.json`.
 
+A candidate-state cuBLASLt shape-algo pre-gate was also run after enabling the
+accepted cuDNN MLP flat-chain path. The serial isolated ViT+tracker-neck bench
+kept the same frame, model, and candidate env, then changed only the FC2/QKV
+heuristic override:
+
+| Probe | Mean/frame | Median/frame | Delta mean | Decision |
+| --- | ---: | ---: | ---: | --- |
+| candidate baseline | `146.561 ms` | `144.539 ms` | `0.000 ms` | reference |
+| `VIT_MLP_FC2=1` | `148.423 ms` | `146.626 ms` | `+1.861 ms` | reject |
+| `VIT_MLP_FC2=2` | `149.470 ms` | `147.597 ms` | `+2.909 ms` | reject |
+| `VIT_QKV=1` | `148.518 ms` | `146.991 ms` | `+1.957 ms` | reject |
+| `VIT_QKV=1,VIT_MLP_FC2=1` | `150.469 ms` | `149.000 ms` | `+3.908 ms` | reject |
+
+This rejects another cuBLASLt heuristic-selection pass under the accepted
+candidate state. FC2/QKV remain the next targets, but the fix needs to change
+the actual dataflow/kernel behavior rather than selecting a different returned
+cuBLASLt algorithm. Evidence:
+`outputs/e2e-required-vit-bench-cudnn-mlp-flat-bf16-algo-pregate-20260629a/`.
+
 The isolated MLP stage checks agree with the E2E direction:
 
 | Representative block | Baseline steady ms | Candidate steady ms | Delta | Projected tail E2E delta |

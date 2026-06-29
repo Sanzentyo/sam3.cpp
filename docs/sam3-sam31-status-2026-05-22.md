@@ -259,6 +259,29 @@ and tail graph `z=-2.953`. Candidate parity is exact against the C++ baseline
 for the compared JSONL rows (`diff_rows=0`), so this optimization does not
 change the selected-target outputs covered by that contract.
 
+A repeat-5 rerun confirms the same decision with lower acceptance risk:
+
+- required E2E A/B:
+  `outputs/e2e-required-ab-sam3-bf16-cudnn-mlp-flat-bf16-r5-20260629a/optimization_targets.md`
+- C++ candidate parity:
+  `outputs/e2e-required-ab-sam3-bf16-cudnn-mlp-flat-bf16-r5-20260629a/parity/compare.json`
+
+| Metric | Baseline | Candidate | Delta | z / n |
+| --- | ---: | ---: | ---: | ---: |
+| `required_e2e_ms` | `939.657` | `929.182` | `-10.475` | `z=-3.777`, `n=5` |
+| `model_e2e_ms` | `926.904` | `916.337` | `-10.567` | `n=5` |
+| `required_core_compute_ms` | `784.578` | `773.333` | `-11.244` | - |
+| `tail_encode_graph_compute_ms` | `583.073` | `576.373` | `-6.700` | `z=-4.546`, `n=5` |
+| `frame0_encode_graph_compute_ms` | `159.433` | `155.154` | `-4.279` | `n=5` |
+
+The repeat-5 run again reports `candidate_speedup`, exact C++ parity
+(`diff_rows=0`), and contract compatibility. The formal session denominator is
+still faster than official Python under the same contract (`929.182 ms` C++
+candidate versus `1145.230 ms` Python), but the tail image-encode diagnostic is
+not yet faster (`576.373 ms` C++ candidate tail graph versus `525.015 ms`
+Python diagnostic). This keeps the next root work focused on image-encode graph
+compute rather than cached-tail placement.
+
 The isolated MLP stage checks agree with the E2E direction:
 
 | Representative block | Baseline steady ms | Candidate steady ms | Delta | Projected tail E2E delta |

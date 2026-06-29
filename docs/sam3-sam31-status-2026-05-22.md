@@ -89,16 +89,24 @@ encode graph compute: C++ spends `629.928 ms` of the `783.482 ms` required E2E
 there, so further speedups should reduce that formal row rather than only move
 cached-tail placement or reporting overhead.
 
-The current whole-goal audit is:
-`outputs/sam3-sam31-goal-audit-current-20260629b/summary.json`.
-It reports `complete=false`. The remaining explicit missing criterion is SAM3:
-C++ must beat official Python under the same input, precision, and TF32
-contract. Current SAM3 BF16 evidence has `required_session_e2e` faster
-(`592.421 ms` C++ versus `635.364 ms` Python, `1.072x`) and quality passing
-(min mask IoU `0.984548`), but `model_e2e` is still slightly behind
-(`584.315 ms` C++ versus `584.124 ms` Python, Python/C++ `0.999672x`). The next
-SAM3 optimization therefore still needs to reduce the formal model/required E2E
-rows, primarily the image-encode graph compute path documented below.
+The current whole-goal audit baseline is:
+`outputs/sam3-sam31-goal-audit-current-20260629b/summary.json`. That older
+summary reported SAM3 BF16 as the remaining explicit missing criterion because
+`model_e2e` was still slightly behind official Python. The newer SAM3 BF16
+tracker-PE shared-cache audit supersedes that local SAM3 row:
+`outputs/e2e-required-measure-sam3-bf16-tracker-pe-shared-cache-20260629a/audit/optimization_targets.md`.
+
+Under the same three-frame selected-target BF16+TF32 contract, C++ now beats
+official Python at both formal wall levels: `required_session_e2e` is
+`592.471 ms` C++ versus `651.842 ms` Python (`1.100x` Python/C++), and
+`model_e2e` is `584.355 ms` C++ versus `586.219 ms` Python (`1.003x`).
+Quality still passes against official Python: min mask IoU `0.984548`, max XOR
+pixels `497`, min bbox IoU `0.979372`. This closes the previous formal SAM3
+BF16 model-wall miss for this slice, but it does not mean the root image
+encoder is solved: the tail image encode/backbone diagnostic is still slower
+than Python (`285.431 ms` C++ versus `167.203 ms` Python). Further SAM3
+optimization should still target the image-encode graph compute path documented
+below.
 
 ## SAM3 Required Work Classes 2026-06-29
 
@@ -12628,17 +12636,18 @@ This keeps formal C++ required work, Python session wall timing, and Python hook
 diagnostics in separate columns so cached-tail placement cannot be mistaken for
 skipped work.
 
-The current SAM3 BF16 smoke map for three frames shows that C++ still wins the
-formal session denominator, but the actual tail image encoder graph is slower
-than the official Python timed-tail backbone hook:
+The current SAM3 BF16 smoke map for three frames shows that C++ wins both
+formal wall rows after sharing tracker PE CPU caches at the model level, but the
+actual tail image encoder graph is still slower than the official Python
+timed-tail backbone hook:
 
 | Process | C++ ms | Python ms | C++ - Python | Contract role |
 | --- | ---: | ---: | ---: | --- |
-| `required_session_e2e` | `592.421` | `635.364` | `-42.943` | formal denominator |
-| `model_e2e` | `584.315` | `584.124` | `+0.191` | formal subtotal |
-| `tail_image_encode_or_backbone` | `284.144` | `167.175` | `+116.969` | diagnostic hook |
-| `tail_image_encode.graph_compute` | `282.341` | `167.175` | `+115.166` | primary root target |
-| `tail_propagate_or_tracker` | `25.356` | `42.661` | `-17.305` | diagnostic hook |
+| `required_session_e2e` | `592.471` | `651.842` | `-59.370` | formal denominator |
+| `model_e2e` | `584.355` | `586.219` | `-1.864` | formal subtotal |
+| `tail_image_encode_or_backbone` | `285.431` | `167.203` | `+118.229` | diagnostic hook |
+| `tail_image_encode.graph_compute` | `283.600` | `167.203` | `+116.397` | primary root target |
+| `tail_propagate_or_tracker` | `26.208` | `42.400` | `-16.193` | diagnostic hook |
 
 The same report projects the required image graph budget to
 `image.vit.mlp_matmul = 141.117 ms`, `image.neck = 65.668 ms`,

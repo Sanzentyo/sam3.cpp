@@ -1220,6 +1220,17 @@ struct sam3_mask_input_obj_ptr_graph_cache {
     }
 };
 
+struct sam3_tracker_pe_cpu_cache {
+    bool valid = false;
+    int feat_size = 0;
+    std::vector<float> sinpe_256;
+    std::vector<float> sinpe_64;
+    std::vector<float> axial_cis_reord;
+    std::vector<float> axial_cis_head_reord;
+    std::vector<float> axial_cis_k16_reord;
+    std::vector<float> perceiver_pe_64;
+};
+
 struct sam3_model {
     sam3_hparams hparams;
     ggml_type weight_type = GGML_TYPE_F16;
@@ -1306,6 +1317,8 @@ struct sam3_model {
     mutable GgmlBackendBufferHandle sam3_neck_pe_buffer;
     mutable std::array<int, 4> sam3_neck_pe_size = {};
     mutable int sam3_neck_pe_dim = 0;
+    mutable std::mutex tracker_pe_cpu_cache_mutex;
+    mutable std::shared_ptr<const sam3_tracker_pe_cpu_cache> tracker_pe_cpu_cache;
     mutable bool prompt_pe_cache_valid = false;
     mutable int prompt_pe_cache_d = 0;
     mutable int prompt_pe_cache_h = 0;
@@ -1950,6 +1963,7 @@ struct sam3_tracker {
     // EdgeTAM-specific: RoPE for 16x16 grid (cross-attn K on perceiver 2D latents)
     std::vector<float> cached_axial_cis_k16_reord;  // [2, 128, 256] for 16x16 grid
     std::vector<float> cached_perceiver_pe_64;      // [64, 512] = 1D zeros + 16x16 PE
+    std::shared_ptr<const sam3_tracker_pe_cpu_cache> shared_pe_cpu_cache;
 
     struct ggml_context* pe_backend_ctx = nullptr;
     ggml_backend_buffer_t pe_backend_buf = nullptr;
@@ -20692,34 +20706,59 @@ struct sam3_prop_output {
     int mask_w = 0;
 };
 
-// Lazily compute and cache PE/RoPE data that is identical across all propagation calls.
-static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
-                                          const sam3_hparams& hp,
-                                          int eff_feat_size = 0) {
-    const int H = (eff_feat_size > 0) ? eff_feat_size : hp.feat_size();
-    if (tracker.pe_caches_valid && tracker.cached_pe_feat_size == H)
-        return;
+static const std::vector<float>& sam3_tracker_sinpe_256(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->sinpe_256
+                                       : tracker.cached_sinpe_256;
+}
 
-    tracker.cached_pe_feat_size = H;
+static const std::vector<float>& sam3_tracker_sinpe_64(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->sinpe_64
+                                       : tracker.cached_sinpe_64;
+}
 
+static const std::vector<float>& sam3_tracker_axial_cis_reord(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->axial_cis_reord
+                                       : tracker.cached_axial_cis_reord;
+}
+
+static const std::vector<float>& sam3_tracker_axial_cis_head_reord(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->axial_cis_head_reord
+                                       : tracker.cached_axial_cis_head_reord;
+}
+
+static const std::vector<float>& sam3_tracker_axial_cis_k16_reord(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->axial_cis_k16_reord
+                                       : tracker.cached_axial_cis_k16_reord;
+}
+
+static const std::vector<float>& sam3_tracker_perceiver_pe_64(const sam3_tracker& tracker) {
+    return tracker.shared_pe_cpu_cache ? tracker.shared_pe_cpu_cache->perceiver_pe_64
+                                       : tracker.cached_perceiver_pe_64;
+}
+
+static void sam3_build_tracker_pe_cpu_cache(sam3_tracker_pe_cpu_cache& cache,
+                                            const sam3_hparams& hp,
+                                            int H) {
     const int D = hp.neck_dim;      // 256
     const int MD = hp.mem_out_dim;  // 64
     const int N = static_cast<int>(sam3_count_mul(H, H));
     const int half_d = D / 2;  // 128
 
-    tracker.cached_sinpe_256 = sam3_sinusoidal_pe_2d(H, H, D);
-    tracker.cached_sinpe_64 = sam3_sinusoidal_pe_2d(H, H, MD);
+    cache = {};
+    cache.feat_size = H;
+    cache.sinpe_256 = sam3_sinusoidal_pe_2d(H, H, D);
+    cache.sinpe_64 = sam3_sinusoidal_pe_2d(H, H, MD);
 
     // Compute axial CIS and reorder to [2, half_d, N] layout
     std::vector<float> rope_raw(sam3_count_mul(N, D));
     sam3_compute_axial_cis(rope_raw.data(), D, H, H, 10000.0f, 1.0f);
-    tracker.cached_axial_cis_reord.resize(sam3_count_mul(2, half_d, N));
+    cache.axial_cis_reord.resize(sam3_count_mul(2, half_d, N));
     for (int n = 0; n < N; ++n) {
         for (int i = 0; i < half_d; ++i) {
-            tracker.cached_axial_cis_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, D)] =
+            cache.axial_cis_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, D)] =
                 rope_raw[sam3_count_mul(n, D) + sam3_count_mul(i, 2)];
-            tracker.cached_axial_cis_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
-                                           sam3_count_mul(n, D)] =
+            cache.axial_cis_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                                  sam3_count_mul(n, D)] =
                 rope_raw[sam3_count_mul(n, D) + sam3_count_mul(i, 2) + static_cast<size_t>(1)];
         }
     }
@@ -20729,13 +20768,13 @@ static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
     const int half_head_d = head_d / 2;
     std::vector<float> rope_head_raw(sam3_count_mul(N, head_d));
     sam3_compute_axial_cis(rope_head_raw.data(), head_d, H, H, 10000.0f, 1.0f);
-    tracker.cached_axial_cis_head_reord.resize(sam3_count_mul(2, half_head_d, N));
+    cache.axial_cis_head_reord.resize(sam3_count_mul(2, half_head_d, N));
     for (int n = 0; n < N; ++n) {
         for (int i = 0; i < half_head_d; ++i) {
-            tracker.cached_axial_cis_head_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, head_d)] =
+            cache.axial_cis_head_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, head_d)] =
                 rope_head_raw[sam3_count_mul(n, head_d) + sam3_count_mul(i, 2)];
-            tracker.cached_axial_cis_head_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
-                                                sam3_count_mul(n, head_d)] =
+            cache.axial_cis_head_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                                       sam3_count_mul(n, head_d)] =
                 rope_head_raw[sam3_count_mul(n, head_d) + sam3_count_mul(i, 2) +
                               static_cast<size_t>(1)];
         }
@@ -20747,13 +20786,13 @@ static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
         const int NK = static_cast<int>(sam3_count_mul(K16, K16));  // 256 tokens
         std::vector<float> rope_k16_raw(sam3_count_mul(NK, D));
         sam3_compute_axial_cis(rope_k16_raw.data(), D, K16, K16, 10000.0f, 1.0f);
-        tracker.cached_axial_cis_k16_reord.resize(sam3_count_mul(2, half_d, NK));
+        cache.axial_cis_k16_reord.resize(sam3_count_mul(2, half_d, NK));
         for (int n = 0; n < NK; ++n) {
             for (int i = 0; i < half_d; ++i) {
-                tracker.cached_axial_cis_k16_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, D)] =
+                cache.axial_cis_k16_reord[sam3_count_mul(i, 2) + sam3_count_mul(n, D)] =
                     rope_k16_raw[sam3_count_mul(n, D) + sam3_count_mul(i, 2)];
-                tracker.cached_axial_cis_k16_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
-                                                   sam3_count_mul(n, D)] =
+                cache.axial_cis_k16_reord[static_cast<size_t>(1) + sam3_count_mul(i, 2) +
+                                          sam3_count_mul(n, D)] =
                     rope_k16_raw[sam3_count_mul(n, D) + sam3_count_mul(i, 2) +
                                  static_cast<size_t>(1)];
             }
@@ -20761,25 +20800,78 @@ static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
         SAM3_LOG(2,
                  "%s: EdgeTAM K16 RoPE cache: %zu floats\n",
                  __func__,
-                 tracker.cached_axial_cis_k16_reord.size());
+                 cache.axial_cis_k16_reord.size());
 
         const int N_1d = hp.perceiver_n_latents_1d;
         const int N_2d = hp.perceiver_n_latents_2d;
-        tracker.cached_perceiver_pe_64.assign(sam3_count_mul(MD, N_1d + N_2d), 0.0f);
+        cache.perceiver_pe_64.assign(sam3_count_mul(MD, N_1d + N_2d), 0.0f);
         auto pe_2d = sam3_sinusoidal_pe_2d(K16, K16, MD);
-        std::copy_n(pe_2d.data(),
-                    sam3_count_mul(MD, N_2d),
-                    tracker.cached_perceiver_pe_64.data() +
-                        static_cast<ptrdiff_t>(sam3_count_mul(MD, N_1d)));
+        std::copy_n(
+            pe_2d.data(),
+            sam3_count_mul(MD, N_2d),
+            cache.perceiver_pe_64.data() + static_cast<ptrdiff_t>(sam3_count_mul(MD, N_1d)));
     }
+    cache.valid = true;
+}
 
+static void sam3_apply_tracker_pe_cpu_cache(sam3_tracker& tracker,
+                                            const sam3_tracker_pe_cpu_cache& cache) {
+    tracker.cached_pe_feat_size = cache.feat_size;
+    tracker.cached_sinpe_256 = cache.sinpe_256;
+    tracker.cached_sinpe_64 = cache.sinpe_64;
+    tracker.cached_axial_cis_reord = cache.axial_cis_reord;
+    tracker.cached_axial_cis_head_reord = cache.axial_cis_head_reord;
+    tracker.cached_axial_cis_k16_reord = cache.axial_cis_k16_reord;
+    tracker.cached_perceiver_pe_64 = cache.perceiver_pe_64;
+    tracker.shared_pe_cpu_cache.reset();
     tracker.pe_caches_valid = true;
+}
+
+static void sam3_apply_tracker_pe_cpu_cache(
+    sam3_tracker& tracker, std::shared_ptr<const sam3_tracker_pe_cpu_cache> cache) {
+    tracker.cached_pe_feat_size = cache->feat_size;
+    tracker.shared_pe_cpu_cache = std::move(cache);
+    tracker.pe_caches_valid = true;
+}
+
+// Lazily compute and cache PE/RoPE data that is identical across all propagation calls.
+static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
+                                          const sam3_hparams& hp,
+                                          int eff_feat_size = 0) {
+    const int H = (eff_feat_size > 0) ? eff_feat_size : hp.feat_size();
+    if (tracker.pe_caches_valid && tracker.cached_pe_feat_size == H)
+        return;
+
+    sam3_tracker_pe_cpu_cache cache;
+    sam3_build_tracker_pe_cpu_cache(cache, hp, H);
+    sam3_apply_tracker_pe_cpu_cache(tracker, cache);
     SAM3_LOG(2,
              "%s: tracker PE caches populated (%.1f KB)\n",
              __func__,
              (tracker.cached_sinpe_256.size() + tracker.cached_sinpe_64.size() +
               tracker.cached_axial_cis_reord.size() + tracker.cached_axial_cis_head_reord.size()) *
                  sizeof(float) / 1024.0f);
+}
+
+static void sam3_ensure_tracker_pe_caches(sam3_tracker& tracker,
+                                          const sam3_model& model,
+                                          int eff_feat_size = 0) {
+    const int H = (eff_feat_size > 0) ? eff_feat_size : model.hparams.feat_size();
+    if (tracker.pe_caches_valid && tracker.cached_pe_feat_size == H) {
+        return;
+    }
+
+    std::shared_ptr<const sam3_tracker_pe_cpu_cache> cache;
+    {
+        std::lock_guard cache_lock(model.tracker_pe_cpu_cache_mutex);
+        if (!model.tracker_pe_cpu_cache || model.tracker_pe_cpu_cache->feat_size != H) {
+            auto next = std::make_shared<sam3_tracker_pe_cpu_cache>();
+            sam3_build_tracker_pe_cpu_cache(*next, model.hparams, H);
+            model.tracker_pe_cpu_cache = next;
+        }
+        cache = model.tracker_pe_cpu_cache;
+    }
+    sam3_apply_tracker_pe_cpu_cache(tracker, std::move(cache));
 }
 
 static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
@@ -20809,7 +20901,7 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     const int head_d = D / sam31_num_heads;
     const int half_head_d = head_d / 2;
 
-    sam3_ensure_tracker_pe_caches(tracker, hp, H);
+    sam3_ensure_tracker_pe_caches(tracker, model, H);
 
     sam3_reset_backend_buffer(tracker.pe_backend_buf);
     sam3_reset_context(tracker.pe_backend_ctx);
@@ -20863,7 +20955,7 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
         if (hp.has_perceiver) {
             const int N_1d = hp.perceiver_n_latents_1d;
             const int N_2d = hp.perceiver_n_latents_2d;
-            const auto& rope_k16 = tracker.cached_axial_cis_k16_reord;
+            const auto& rope_k16 = sam3_tracker_axial_cis_k16_reord(tracker);
             for (int s = 0; s < rope_k_slots; ++s) {
                 float* dst = rope_k_cache.data() +
                              static_cast<ptrdiff_t>(sam3_count_mul(s, D, rope_k_tokens_per_slot));
@@ -20878,26 +20970,26 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
                 std::copy_n(rope_k16.data(), sam3_count_mul(D, N_2d), dst_2d);
             }
         } else {
+            const auto& axial_cis = sam3_tracker_axial_cis_reord(tracker);
             for (int s = 0; s < rope_k_slots; ++s) {
-                std::copy_n(tracker.cached_axial_cis_reord.data(),
+                std::copy_n(axial_cis.data(),
                             sam3_count_mul(D, N),
                             rope_k_cache.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, D, N)));
             }
         }
     }
 
-    ggml_backend_tensor_set(tracker.cached_src_pos_tensor,
-                            tracker.cached_sinpe_256.data(),
-                            0,
-                            tracker.cached_sinpe_256.size() * sizeof(float));
-    ggml_backend_tensor_set(tracker.cached_rope_q_tensor,
-                            tracker.cached_axial_cis_reord.data(),
-                            0,
-                            tracker.cached_axial_cis_reord.size() * sizeof(float));
+    const auto& sinpe_256 = sam3_tracker_sinpe_256(tracker);
+    const auto& axial_cis = sam3_tracker_axial_cis_reord(tracker);
+    const auto& axial_cis_head = sam3_tracker_axial_cis_head_reord(tracker);
+    ggml_backend_tensor_set(
+        tracker.cached_src_pos_tensor, sinpe_256.data(), 0, sinpe_256.size() * sizeof(float));
+    ggml_backend_tensor_set(
+        tracker.cached_rope_q_tensor, axial_cis.data(), 0, axial_cis.size() * sizeof(float));
     ggml_backend_tensor_set(tracker.cached_rope_head_q_tensor,
-                            tracker.cached_axial_cis_head_reord.data(),
+                            axial_cis_head.data(),
                             0,
-                            tracker.cached_axial_cis_head_reord.size() * sizeof(float));
+                            axial_cis_head.size() * sizeof(float));
     if (rope_k_backend_cache_enabled && tracker.cached_rope_k_tensor != nullptr) {
         ggml_backend_tensor_set(tracker.cached_rope_k_tensor,
                                 rope_k_cache.data(),
@@ -21140,7 +21232,7 @@ static sam3_prop_output sam31_propagate_single(
     std::vector<float> precomputed_spatial_k_pos_delta(
         static_cast<size_t>(D) * precomputed_spatial_kv_slots.size(), 0.0f);
 
-    const auto& rope_q_data = tracker.cached_axial_cis_head_reord;
+    const auto& rope_q_data = sam3_tracker_axial_cis_head_reord(tracker);
     if (rope_q_data.size() != sam3_count_mul(2, half_head, N)) {
         std::println(stderr, "{}: SAM3.1 per-head RoPE cache has unexpected size", __func__);
         return output;
@@ -21178,7 +21270,7 @@ static sam3_prop_output sam31_propagate_single(
             }
             const auto& slot_pos = slot.image_pe_cpu.size() == slot_count
                                        ? slot.image_pe_cpu
-                                       : tracker.cached_sinpe_256;
+                                       : sam3_tracker_sinpe_256(tracker);
             const size_t dst = sam3_count_mul(s, D, N);
             std::copy_n(slot.image_feats_cpu.data(), slot_count, memory_image.data() + dst);
             std::copy_n(slot.spatial_feats_cpu.data(), slot_count, memory.data() + dst);
@@ -22011,9 +22103,9 @@ static sam3_prop_output sam3_propagate_single(
             sam3_ensure_tracker_pe_caches(tracker, hp, H);
             if (use_perceiver) {
                 // For perceiver: zeros for 1D tokens, sinusoidal for 2D tokens
-                slot_pes[s] = &tracker.cached_perceiver_pe_64;
+                slot_pes[s] = &sam3_tracker_perceiver_pe_64(tracker);
             } else {
-                slot_pes[s] = &tracker.cached_sinpe_64;
+                slot_pes[s] = &sam3_tracker_sinpe_64(tracker);
             }
         }
         spatial_tpos[s] = mem_bank[sel[s]].is_cond_frame ? 0 : (n_sel - s);
@@ -22091,7 +22183,7 @@ static sam3_prop_output sam3_propagate_single(
     SAM3_PROFILE_CPU_END(prop_rope_cache);
     sam3_add_propagate_timing(&sam3_propagate_timing::rope_cache_ms, prop_rope_cache_t0);
     const int half_d = D / 2;  // 128
-    const auto& rope_q_reord = tracker.cached_axial_cis_reord;
+    const auto& rope_q_reord = sam3_tracker_axial_cis_reord(tracker);
     const bool use_cached_rope_k =
         sam3_prop_rope_k_backend_cache_enabled() && pd.M_spatial > 0 &&
         tracker.cached_rope_k_tensor != nullptr &&
@@ -22109,9 +22201,9 @@ static sam3_prop_output sam3_propagate_single(
             // EdgeTAM perceiver: each frame has N_per_slot=512 tokens.
             // First 256 (1D latents): identity RoPE (cos=1, sin=0).
             // Last 256 (2D latents): 16x16 RoPE from cached_axial_cis_k16_reord.
-            const int N_1d = hp.perceiver_n_latents_1d;                 // 256
-            const int N_2d = hp.perceiver_n_latents_2d;                 // 256
-            const auto& rope_k16 = tracker.cached_axial_cis_k16_reord;  // [2, 128, 256]
+            const int N_1d = hp.perceiver_n_latents_1d;                        // 256
+            const int N_2d = hp.perceiver_n_latents_2d;                        // 256
+            const auto& rope_k16 = sam3_tracker_axial_cis_k16_reord(tracker);  // [2, 128, 256]
             for (int s = 0; s < n_sel; ++s) {
                 float* dst =
                     rope_k_data.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, D, N_per_slot));
@@ -22403,10 +22495,8 @@ static sam3_prop_output sam3_propagate_single(
                                   upload_constant_t0);
     } else if (upload_src_pos) {
         const int64_t upload_constant_t0 = ggml_time_us();
-        ggml_backend_tensor_set(src_pos_t,
-                                tracker.cached_sinpe_256.data(),
-                                0,
-                                tracker.cached_sinpe_256.size() * sizeof(float));
+        const auto& sinpe_256 = sam3_tracker_sinpe_256(tracker);
+        ggml_backend_tensor_set(src_pos_t, sinpe_256.data(), 0, sinpe_256.size() * sizeof(float));
         sam3_add_propagate_timing(&sam3_propagate_timing::input_constant_upload_ms,
                                   upload_constant_t0);
     }
@@ -23230,7 +23320,7 @@ static bool sam31_encode_memory(sam3_tracker& tracker,
             state.neck_trk_pe[2], image_pos.data(), static_cast<int64_t>(image_pos.size()));
     } else {
         sam3_ensure_tracker_pe_caches(tracker, hp, H);
-        image_pos = tracker.cached_sinpe_256;
+        image_pos = sam3_tracker_sinpe_256(tracker);
     }
     std::vector<float> memory_pos;
     SAM3_PROFILE_CPU_END(sam31_mem_image_pos_prepare);
@@ -23548,8 +23638,10 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
         sam3_ensure_tracker_pe_caches(tracker, hp, H);
         sam3_dump_f32_tensor_if_requested(
             "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_feats", md, memory_shape);
-        sam3_dump_f32_tensor_if_requested(
-            "SAM3_DUMP_MEM_SLOT_DIR", "stored_spatial_pe", tracker.cached_sinpe_64, memory_shape);
+        sam3_dump_f32_tensor_if_requested("SAM3_DUMP_MEM_SLOT_DIR",
+                                          "stored_spatial_pe",
+                                          sam3_tracker_sinpe_64(tracker),
+                                          memory_shape);
 
         std::vector<float> image_features;
         if (!memory_image_features_ref_cpu.empty()) {
@@ -23589,7 +23681,7 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
     if (hp.has_perceiver) {
         // Compute sinusoidal PE for memory features (needed as perceiver input)
         sam3_ensure_tracker_pe_caches(tracker, hp, H);
-        const auto& mem_pos = tracker.cached_sinpe_64;
+        const auto& mem_pos = sam3_tracker_sinpe_64(tracker);
 
         std::vector<float> perc_latents;
         std::vector<float> perc_pos;
@@ -23704,7 +23796,7 @@ sam3_tracker_ptr sam3_create_tracker(const sam3_model& model, const sam3_video_p
     }
     sam3_tracker_ptr tracker{std::make_unique<sam3_tracker>().release()};
     tracker->params = params;
-    sam3_ensure_tracker_pe_caches(*tracker, model.hparams);
+    sam3_ensure_tracker_pe_caches(*tracker, model);
     fprintf(stderr,
             "%s: tracker created (hotstart=%d, max_keep_alive=%d)\n",
             __func__,
@@ -24421,7 +24513,7 @@ sam3_tracker_ptr sam3_create_visual_tracker(const sam3_model& model,
     vp.bbox_only = params.bbox_only;
     sam3_tracker_ptr tracker{std::make_unique<sam3_tracker>().release()};
     tracker->params = vp;
-    sam3_ensure_tracker_pe_caches(*tracker, model.hparams);
+    sam3_ensure_tracker_pe_caches(*tracker, model);
     sam3_ensure_tracker_pe_backend_caches(*tracker, model);
     if (!sam31_warmup_interactive_mask_head(model, 4)) {
         std::println(stderr, "{}: SAM3.1 interactive mask-head warmup failed", __func__);

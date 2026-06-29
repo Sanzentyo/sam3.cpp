@@ -221,6 +221,55 @@ matmul dataflow. A candidate is not accepted unless it lowers
 `required_e2e_ms` and `tail_image_encode.graph_compute` under the same contract,
 then passes exact C++ parity and the official-Python quality gate.
 
+### SAM3 BF16 current tail profile refresh 2026-06-29
+
+A fresh node-profile run under the current accepted BF16 pre-gate environment:
+
+```text
+SAM3_ENABLE_VIT_MLP_FLAT_CHAIN=1
+SAM3_BF16_VIT_MLP_CHAIN=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16_UNSAFE_RUN=1
+```
+
+keeps the steady tracking encode target concentrated in the same graph-compute
+groups. The first profiled `sam3_encode` call still contains lazy initialization
+effects, so the tracking calls are the useful local ranking:
+
+| Tail stage group | Call 2 sum | Call 3 sum | Current interpretation |
+| --- | ---: | ---: | --- |
+| `sam3-vit:mlp-fc2-matmul` | `29.822 ms` | `30.240 ms` | largest repeated GEMM body |
+| `sam3-vit:mlp-fc1-matmul` | `28.356 ms` | `28.744 ms` | FC1+GELU cuDNN path is active, still a top budget |
+| `sam3-vit:qkv-matmul` | `19.266 ms` | `19.590 ms` | secondary repeated GEMM body |
+| `sam3-vit:window-attn` | `11.658 ms` | `11.802 ms` | window attention is still meaningful but smaller than MLP |
+| `sam3-vit:global-attn` | `7.199 ms` | `7.234 ms` | dominated by the FATTN kernel body |
+| `sam3-neck:*` top-level stage | `10.941 ms` | `10.929 ms` | per-tail tracker neck cost |
+| `sam3-vit:qk-layout-rope` | `4.655 ms` | `4.650 ms` | existing `CONT_ROPE_PAIR` fusion is firing |
+
+Evidence:
+`outputs/e2e-required-profile-sam3-bf16-current-node-20260629b/node_names_split.json`
+and
+`outputs/e2e-required-profile-sam3-bf16-current-node-20260629b/stage_profile.json`.
+
+Two quick same-pre-gate sanity checks were also rerun and rejected:
+
+| Probe | Mean | Median | Decision |
+| --- | ---: | ---: | --- |
+| current baseline, r10 | `140.055 ms` | `133.923 ms` | reference only |
+| `GGML_CUDA_ENABLE_CUBLASLT_BIAS_FUSION=0` | `170.168 ms` | `168.356 ms` | reject; cuBLASLt bias fusion remains required |
+| `GGML_CUDA_ENABLE_CUDNN_CONV2D_F32_LOWP=1` | `140.070 ms` | `134.057 ms` | reject/neutral |
+
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-baseline-r10-20260629b/vit_bench.json`,
+`outputs/e2e-required-vit-bench-sam3-bf16-no-cublaslt-bias-r10-20260629b/vit_bench.json`,
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-cudnn-conv-lowp-r10-20260629b/vit_bench.json`.
+
+Conclusion: do not spend the next iteration on disabling cuBLASLt bias fusion,
+cuBLASLt heuristic selection, or the existing cuDNN conv low-precision toggle.
+The remaining useful implementation work should be a real CUDA dataflow/kernel
+change for the repeated ViT MLP/QKV/attention groups.
+
 ## SAM3 cuDNN MLP Candidate 2026-06-29
 
 The first MLP dataflow candidate that passes the required-E2E A/B gate combines

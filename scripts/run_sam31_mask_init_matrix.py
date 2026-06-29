@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -793,6 +794,47 @@ def numeric_summary(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
+def summary_number(summary: dict[str, Any], key: str) -> float | None:
+    value = summary.get(key)
+    return float(value) if isinstance(value, int | float) else None
+
+
+def summary_count(summary: dict[str, Any]) -> int | None:
+    value = summary.get("count")
+    return int(value) if isinstance(value, int | float) else None
+
+
+def mean_delta_signal(
+    baseline: dict[str, Any] | None,
+    candidate: dict[str, Any] | None,
+) -> dict[str, float | None]:
+    if baseline is None or candidate is None:
+        return {"delta_ms": None, "signal": None}
+    baseline_mean = summary_number(baseline, "mean")
+    candidate_mean = summary_number(candidate, "mean")
+    baseline_stdev = summary_number(baseline, "stdev")
+    candidate_stdev = summary_number(candidate, "stdev")
+    baseline_count = summary_count(baseline)
+    candidate_count = summary_count(candidate)
+    if baseline_mean is None or candidate_mean is None:
+        return {"delta_ms": None, "signal": None}
+    delta_ms = baseline_mean - candidate_mean
+    if (
+        baseline_stdev is None
+        or candidate_stdev is None
+        or baseline_count is None
+        or candidate_count is None
+        or baseline_count <= 0
+        or candidate_count <= 0
+    ):
+        return {"delta_ms": delta_ms, "signal": None}
+    stderr = math.sqrt(
+        (baseline_stdev * baseline_stdev / baseline_count)
+        + (candidate_stdev * candidate_stdev / candidate_count)
+    )
+    return {"delta_ms": delta_ms, "signal": delta_ms / stderr if stderr > 0.0 else None}
+
+
 def ratio(numerator: float | None, denominator: float | None) -> float | None:
     if numerator is None or denominator is None or denominator == 0.0:
         return None
@@ -930,12 +972,41 @@ def python_timing_contract(summary: dict[str, Any]) -> dict[str, float | str | N
         "required_remainder_ms": required_remainder,
         "note": (
             "Official Python prefetches the next frame in the frame0 cache step on the "
-            "two-frame, single-GPU contract, so compare this full_cache_step_ms with "
+            "single-GPU sequence contract, so compare this full_cache_step_ms with "
             "C++ full_frame_step_ms. For required E2E, compare required_e2e_ms with "
             "C++ run_required_e2e_ms; it includes Python init_state, input construction, "
             "mask tensor preparation, backbone/cache, mask init, and cached propagation."
         ),
     }
+
+
+def summarize_python_timing_refs(
+    refs: list[dict[str, Any]],
+) -> tuple[dict[str, float | str | None], dict[str, dict[str, float | int | None]]]:
+    timings = [
+        python_timing_contract(ref["summary"])
+        for ref in refs
+        if isinstance(ref.get("summary"), dict)
+    ]
+    if not timings:
+        return {}, {}
+
+    timing_summary: dict[str, dict[str, float | int | None]] = {}
+    timing_mean: dict[str, float | str | None] = {}
+    for key in timings[0]:
+        if key == "note":
+            continue
+        values = [
+            float(value)
+            for timing in timings
+            if isinstance((value := timing.get(key)), int | float)
+        ]
+        if values:
+            stat = numeric_summary(values)
+            timing_summary[key] = stat
+            timing_mean[key] = stat["mean"]
+    timing_mean["note"] = timings[0].get("note")
+    return timing_mean, timing_summary
 
 
 def run_command(
@@ -987,9 +1058,16 @@ def cpp_tf32_policy_env(tf32: str) -> dict[str, str | None]:
 
 
 def run_python_reference(
-    args: argparse.Namespace, size: Size, case: Case, root: Path, case_dir: Path
+    args: argparse.Namespace,
+    size: Size,
+    case: Case,
+    root: Path,
+    case_dir: Path,
+    repeat: int | None,
 ) -> dict[str, Any]:
     py_dir = case_dir / "python"
+    if repeat is not None:
+        py_dir = py_dir / f"r{repeat:02d}"
     command = [
         "uv",
         "run",
@@ -1025,6 +1103,7 @@ def run_python_reference(
     frame_masks = read_frame_masks(py_dir, args.num_frames)
     return {
         "dir": rel(py_dir, root),
+        "repeat": repeat,
         "summary": summary,
         "mask_sha256": mask_sha256(mask),
         "mask_foreground_pixels": int((mask > 127).sum()),
@@ -1067,6 +1146,8 @@ def run_cpp_variant(
         str(case.frame1_offset),
         "--num-frames",
         str(args.num_frames),
+        "--recondition-every",
+        str(args.recondition_every),
         "--warmup-runs",
         str(args.cpp_warmup_runs),
         "--out",
@@ -1149,6 +1230,10 @@ def run_cpp_profile_default(
         case.mask_case,
         "--frame1-offset",
         str(case.frame1_offset),
+        "--num-frames",
+        str(args.num_frames),
+        "--recondition-every",
+        str(args.recondition_every),
         "--warmup-runs",
         str(args.profile_warmup_runs),
         "--out",
@@ -1213,6 +1298,7 @@ def summarize_variant(
     python_masks: dict[int, np.ndarray],
     default_masks: dict[int, np.ndarray] | None,
     python_timing: dict[str, float | str | None],
+    python_timing_stats: dict[str, dict[str, float | int | None]],
     root: Path,
     num_frames: int,
 ) -> dict[str, Any]:
@@ -1411,7 +1497,10 @@ def summarize_variant(
     selected_mask_indices = summary_values(runs, "selected_mask_index")
     decoder_iou_score_rows = summary_array_values(runs, "decoder_iou_scores")
     full_summary = numeric_summary(full_frame_step)
-    encoded_prop_summary = numeric_summary(propagate_encoded)
+    required_e2e_summary = numeric_summary(run_required_e2e)
+    required_model_execute_summary = numeric_summary(required_model_execute)
+    required_image_encode_summary = numeric_summary(required_image_encode)
+    required_propagate_encoded_summary = numeric_summary(required_propagate_encoded)
     python_full = python_timing.get("full_cache_step_ms")
     python_cached_prop = python_timing.get("cached_propagate_ms")
     python_required = python_timing.get("required_e2e_ms")
@@ -1470,12 +1559,12 @@ def summarize_variant(
         "track_step_total_ms": numeric_summary(track_step_total),
         "track_step_ms": numeric_summary(track_step_avg),
         "full_frame_step_ms": full_summary,
-        "run_required_e2e_ms": numeric_summary(run_required_e2e),
+        "run_required_e2e_ms": required_e2e_summary,
         "one_shot_required_e2e_ms": numeric_summary(one_shot_required_e2e),
         "required_session_setup_ms": numeric_summary(required_session_setup),
         "required_input_prepare_ms": numeric_summary(required_input_prepare),
-        "required_model_execute_ms": numeric_summary(required_model_execute),
-        "required_image_encode_ms": numeric_summary(required_image_encode),
+        "required_model_execute_ms": required_model_execute_summary,
+        "required_image_encode_ms": required_image_encode_summary,
         "required_image_encode_graph_compute_ms": numeric_summary(
             required_image_encode_graph_compute
         ),
@@ -1483,7 +1572,7 @@ def summarize_variant(
             required_image_encode_non_compute
         ),
         "required_mask_init_ms": numeric_summary(required_mask_init),
-        "required_propagate_encoded_ms": numeric_summary(required_propagate_encoded),
+        "required_propagate_encoded_ms": required_propagate_encoded_summary,
         "required_model_accounted_ms": numeric_summary(required_model_accounted),
         "required_model_remainder_ms": numeric_summary(required_model_remainder),
         "required_core_compute_ms": numeric_summary(required_core_compute),
@@ -1518,7 +1607,25 @@ def summarize_variant(
         ),
         "python_cached_propagate_over_cpp_encoded_ratio": ratio(
             python_cached_prop if isinstance(python_cached_prop, float) else None,
-            encoded_prop_summary["mean"] if isinstance(encoded_prop_summary["mean"], float) else None,
+            required_propagate_encoded_summary["mean"]
+            if isinstance(required_propagate_encoded_summary["mean"], float)
+            else None,
+        ),
+        "python_required_e2e_minus_cpp_required_e2e": mean_delta_signal(
+            python_timing_stats.get("required_e2e_ms"),
+            required_e2e_summary,
+        ),
+        "python_model_minus_cpp_model": mean_delta_signal(
+            python_timing_stats.get("required_model_execute_ms"),
+            required_model_execute_summary,
+        ),
+        "python_backbone_minus_cpp_image_encode": mean_delta_signal(
+            python_timing_stats.get("required_image_encode_or_backbone_ms"),
+            required_image_encode_summary,
+        ),
+        "python_propagate_minus_cpp_encoded": mean_delta_signal(
+            python_timing_stats.get("required_propagate_encoded_ms"),
+            required_propagate_encoded_summary,
         ),
         "frame0_encode_timing_total_ms": numeric_summary(
             summary_values(runs, "frame0_encode_timing", "total_ms")
@@ -1693,9 +1800,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", choices=("gpu", "cpu"), default="gpu")
     parser.add_argument("--python-dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
     parser.add_argument("--tf32", choices=("on", "off"), default="on")
+    parser.add_argument("--python-repeats", type=int, default=1)
     parser.add_argument("--python-warmup-runs", type=int, default=1)
     parser.add_argument("--cpp-warmup-runs", type=int, default=1)
     parser.add_argument("--num-frames", type=int, default=2)
+    parser.add_argument("--recondition-every", type=int, default=1)
     parser.add_argument(
         "--profile-default",
         action="store_true",
@@ -1720,10 +1829,14 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.repeats <= 0:
         raise SystemExit("--repeats must be positive")
+    if args.python_repeats <= 0:
+        raise SystemExit("--python-repeats must be positive")
     if args.cpp_warmup_runs < 0:
         raise SystemExit("--cpp-warmup-runs must be non-negative")
     if args.num_frames < 2:
         raise SystemExit("--num-frames must be >= 2")
+    if args.recondition_every <= 0:
+        raise SystemExit("--recondition-every must be positive")
     if args.profile_warmup_runs is None:
         args.profile_warmup_runs = args.cpp_warmup_runs
     if args.profile_warmup_runs < 0:
@@ -1750,9 +1863,16 @@ def main() -> int:
         "variants": args.variant,
         "repeats": args.repeats,
         "num_frames": args.num_frames,
-        "python": {"dtype": args.python_dtype, "tf32": args.tf32, "warmup_runs": args.python_warmup_runs},
+        "recondition_every": args.recondition_every,
+        "python": {
+            "dtype": args.python_dtype,
+            "tf32": args.tf32,
+            "repeats": args.python_repeats,
+            "warmup_runs": args.python_warmup_runs,
+        },
         "cpp": {
             "warmup_runs": args.cpp_warmup_runs,
+            "recondition_every": args.recondition_every,
             "tf32": args.tf32,
             "tf32_policy_env": cpp_tf32_policy_env(args.tf32),
             "profile_default": args.profile_default,
@@ -1763,9 +1883,20 @@ def main() -> int:
         size_item: dict[str, Any] = {"cases": {}}
         for case in args.case:
             case_dir = out / size.label / case.label
-            python_ref = run_python_reference(args, size, case, root, case_dir)
-            python_timing = python_timing_contract(python_ref["summary"])
-            python_masks = read_frame_masks(case_dir / "python", args.num_frames)
+            python_refs = [
+                run_python_reference(
+                    args,
+                    size,
+                    case,
+                    root,
+                    case_dir,
+                    None if args.python_repeats == 1 else repeat + 1,
+                )
+                for repeat in range(args.python_repeats)
+            ]
+            python_ref = python_refs[0]
+            python_timing, python_timing_stats = summarize_python_timing_refs(python_refs)
+            python_masks = read_frame_masks(root / python_ref["dir"], args.num_frames)
 
             variant_runs: dict[str, list[dict[str, Any]]] = {variant: [] for variant in args.variant}
             default_masks: dict[int, np.ndarray] | None = None
@@ -1788,7 +1919,9 @@ def main() -> int:
 
             case_item = {
                 "python": python_ref,
+                "python_runs": python_refs,
                 "python_timing": python_timing,
+                "python_timing_stats": python_timing_stats,
                 "variants": {},
             }
             if args.profile_default:
@@ -1801,6 +1934,7 @@ def main() -> int:
                     python_masks=python_masks,
                     default_masks=default_masks,
                     python_timing=python_timing,
+                    python_timing_stats=python_timing_stats,
                     root=root,
                     num_frames=args.num_frames,
                 )

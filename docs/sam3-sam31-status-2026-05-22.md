@@ -25,8 +25,10 @@ used before treating this repository as a Rust-wrapper baseline.
 - SAM3.1 C++ is partial. The repository now has SAM3.1 GGML v4 loading,
   multiplex tensor registration, memory-backbone, propagation-feature,
   memory-attention, memory-attention-to-decoder slice parity, and a full-model
-  mask-init smoke. End-to-end C++ versus official Python tracking parity is not
-  met yet.
+  mask-init smoke. The local 320x240 four-frame mask-init sequence gate now
+  passes same-contract BF16+TF32 quality and speed versus official Python, but
+  all-model/all-precision validation and broader tracking coverage are still
+  separate acceptance items.
 
 ## Benchmark Contract
 
@@ -43,6 +45,60 @@ Speed and quality claims are valid only when the compared rows use:
 Rows that intentionally vary source resolution, encode size, precision, or
 prompt are scaling or coverage rows. They must not be used as direct C++ versus
 official Python win/loss evidence.
+
+## SAM3.1 Four-Frame Mask-Init Gate 2026-06-29
+
+The SAM3.1 mask-init matrix runner now supports repeating official Python runs
+with `SAM31_MASK_INIT_MATRIX_PY_REPEATS` and records
+`python_timing_stats`. Variant summaries also include Python-minus-C++ mean
+delta and Welch-style signal for the required E2E, model, image-encode, and
+propagation totals. The C++ matrix path forwards
+`SAM31_TRACKING_MASK_INIT_RECONDITION_EVERY`, so matrix measurements can match
+the official Python sequence cadence instead of accidentally using the older C++
+default.
+
+Latest same-contract evidence:
+
+- matrix:
+  `outputs/sam31-mask-init-matrix-recond1-numframes4-py3-cpp3-20260629c/summary.json`
+- audit:
+  `outputs/sam31-mask-init-audit-recond1-numframes4-py3-cpp3-20260629c/optimization_targets.md`
+
+Contract: SAM3.1 multiplex BF16 GGML versus official SAM3.1 PyTorch BF16,
+TF32 on, 320x240 synthetic `center@3`, `num_frames=4`,
+`recondition_every=1`, Python repeats `3`, C++ repeats `3`, warmup `1` each.
+
+| Metric | Official Python mean +/- sd | C++ mean +/- sd | Python/C++ | delta ms | signal |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| required E2E | `1008.912 +/- 27.411` | `783.482 +/- 1.439` | `1.288x` | `225.430` | `14.22` |
+| required model execute | `934.706 +/- 1.563` | `767.371 +/- 2.772` | `1.218x` | `167.335` | `91.08` |
+| required image encode/backbone | `811.551 +/- 5.991` | `639.714 +/- 2.779` | `1.269x` | `171.837` | `45.07` |
+| required encoded propagation | `113.158 +/- 4.705` | `105.883 +/- 0.179` | `1.069x` | `7.275` | `2.68` |
+
+Quality gate for the propagated sequence passes the current acceptance
+thresholds: min Python/C++ mask IoU `0.966151` versus threshold `0.95`, max XOR
+pixels `501` versus threshold `1000`. C++ repeat-to-repeat default masks are
+exact for this slice (`default_sequence_iou` min `1.0`, XOR max `0`).
+
+This result means the current SAM3.1 synthetic four-frame mask-init sequence is
+already faster than official Python under the same precision/TF32/input
+contract. It does not complete the repository-level goal: the remaining broad
+work is full model/precision coverage, more real video/prompt coverage, and
+SAM3 full-model acceptance. For this SAM3.1 slice the root target is still image
+encode graph compute: C++ spends `629.928 ms` of the `783.482 ms` required E2E
+there, so further speedups should reduce that formal row rather than only move
+cached-tail placement or reporting overhead.
+
+The current whole-goal audit is:
+`outputs/sam3-sam31-goal-audit-current-20260629b/summary.json`.
+It reports `complete=false`. The remaining explicit missing criterion is SAM3:
+C++ must beat official Python under the same input, precision, and TF32
+contract. Current SAM3 BF16 evidence has `required_session_e2e` faster
+(`592.421 ms` C++ versus `635.364 ms` Python, `1.072x`) and quality passing
+(min mask IoU `0.984548`), but `model_e2e` is still slightly behind
+(`584.315 ms` C++ versus `584.124 ms` Python, Python/C++ `0.999672x`). The next
+SAM3 optimization therefore still needs to reduce the formal model/required E2E
+rows, primarily the image-encode graph compute path documented below.
 
 ## SAM3 Required Work Classes 2026-06-29
 

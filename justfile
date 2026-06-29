@@ -237,6 +237,7 @@ SAM31_MASK_INIT_MATRIX_SIZES := env_var_or_default("SAM31_MASK_INIT_MATRIX_SIZES
 SAM31_MASK_INIT_MATRIX_CASES := env_var_or_default("SAM31_MASK_INIT_MATRIX_CASES", "center@3")
 SAM31_MASK_INIT_MATRIX_VARIANTS := env_var_or_default("SAM31_MASK_INIT_MATRIX_VARIANTS", "default,all,sa123")
 SAM31_MASK_INIT_MATRIX_REPEATS := env_var_or_default("SAM31_MASK_INIT_MATRIX_REPEATS", "3")
+SAM31_MASK_INIT_MATRIX_PY_REPEATS := env_var_or_default("SAM31_MASK_INIT_MATRIX_PY_REPEATS", "3")
 SAM31_MASK_INIT_MATRIX_PY_WARMUP_RUNS := env_var_or_default("SAM31_MASK_INIT_MATRIX_PY_WARMUP_RUNS", "1")
 SAM31_MASK_INIT_MATRIX_CPP_WARMUP_RUNS := env_var_or_default("SAM31_MASK_INIT_MATRIX_CPP_WARMUP_RUNS", "1")
 SAM31_MASK_INIT_MATRIX_INTERLEAVE := env_var_or_default("SAM31_MASK_INIT_MATRIX_INTERLEAVE", "1")
@@ -1252,6 +1253,8 @@ sam31-mask-init-matrix out=SAM31_MASK_INIT_MATRIX_OUT: (build-target "sam31_trac
         --python-dtype {{ SAM31_MASK_SEQUENCE_PY_DTYPE }} \
         --tf32 {{ SAM31_MASK_SEQUENCE_PY_TF32 }} \
         --num-frames {{ SAM31_TRACKING_MASK_INIT_NUM_FRAMES }} \
+        --recondition-every {{ SAM31_TRACKING_MASK_INIT_RECONDITION_EVERY }} \
+        --python-repeats {{ SAM31_MASK_INIT_MATRIX_PY_REPEATS }} \
         --python-warmup-runs {{ SAM31_MASK_INIT_MATRIX_PY_WARMUP_RUNS }} \
         --cpp-warmup-runs {{ SAM31_MASK_INIT_MATRIX_CPP_WARMUP_RUNS }} \
         ${interleave_args} ${profile_args} ${size_args} ${case_args} ${variant_args}

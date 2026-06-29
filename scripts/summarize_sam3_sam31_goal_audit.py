@@ -275,7 +275,7 @@ def summarize_sam31_mask_init_audit(mask_init_audit: Any) -> tuple[str, Any]:
             "missing",
             (
                 "No SAM3.1 mask-init E2E split audit is attached. Run "
-                "sam31-mask-init-audit to measure the Python/C++ two-frame "
+                "sam31-mask-init-audit to measure the Python/C++ "
                 "mask-init contract and variant decisions."
             ),
         )

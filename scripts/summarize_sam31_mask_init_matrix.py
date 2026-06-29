@@ -236,7 +236,7 @@ def process_split_rows(variant_item: dict[str, Any]) -> list[dict[str, Any]]:
             "metric": "full_frame_step_ms",
             "mean_ms": denominator,
             "full_frame_step_pct": 100.0 if denominator is not None else None,
-            "note": "E2E denominator for this two-frame mask-init contract",
+            "note": "E2E denominator for this mask-init sequence contract",
         }
     ]
     for process, key, note in components:
@@ -339,7 +339,7 @@ def required_e2e_split_rows(variant_item: dict[str, Any]) -> list[dict[str, Any]
             "metric": "run_required_e2e_ms",
             "mean_ms": denominator,
             "e2e_pct": 100.0,
-            "note": "steady-state required E2E for this two-frame mask-init contract",
+            "note": "steady-state required E2E for this mask-init sequence contract",
         }
     ]
     for process, key, note in components:
@@ -447,7 +447,7 @@ def python_required_e2e_split_rows(python_timing: dict[str, Any]) -> list[dict[s
             "metric": "required_e2e_ms",
             "mean_ms": denominator,
             "e2e_pct": 100.0,
-            "note": "official Python required E2E for the same two-frame mask-init contract",
+            "note": "official Python required E2E for the same mask-init sequence contract",
         }
     ]
     for process, key, note in components:

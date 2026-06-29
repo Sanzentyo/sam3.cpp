@@ -225,6 +225,7 @@ SAM31_TRACKING_MASK_INIT_HEIGHT := env_var_or_default("SAM31_TRACKING_MASK_INIT_
 SAM31_TRACKING_MASK_INIT_CASE := env_var_or_default("SAM31_TRACKING_MASK_INIT_CASE", "center")
 SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET := env_var_or_default("SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET", "3")
 SAM31_TRACKING_MASK_INIT_NUM_FRAMES := env_var_or_default("SAM31_TRACKING_MASK_INIT_NUM_FRAMES", "2")
+SAM31_TRACKING_MASK_INIT_RECONDITION_EVERY := env_var_or_default("SAM31_TRACKING_MASK_INIT_RECONDITION_EVERY", "1")
 SAM31_TRACKING_MASK_INIT_WARMUP_RUNS := env_var_or_default("SAM31_TRACKING_MASK_INIT_WARMUP_RUNS", "0")
 SAM31_TRACKING_MASK_INIT_OUT := env_var_or_default("SAM31_TRACKING_MASK_INIT_OUT", "outputs/sam31-tracking-mask-init-smoke")
 SAM31_MASK_SEQUENCE_PY_OUT := env_var_or_default("SAM31_MASK_SEQUENCE_PY_OUT", "outputs/sam31-mask-sequence-python")
@@ -1207,6 +1208,7 @@ sam31-tracking-mask-init-smoke out=SAM31_TRACKING_MASK_INIT_OUT: (build-target "
         --mask-case {{ SAM31_TRACKING_MASK_INIT_CASE }} \
         --frame1-offset {{ SAM31_TRACKING_MASK_INIT_FRAME1_OFFSET }} \
         --num-frames {{ SAM31_TRACKING_MASK_INIT_NUM_FRAMES }} \
+        --recondition-every {{ SAM31_TRACKING_MASK_INIT_RECONDITION_EVERY }} \
         --warmup-runs {{ SAM31_TRACKING_MASK_INIT_WARMUP_RUNS }} \
         --out {{ out }} \
         |& tee {{ out }}/summary.log

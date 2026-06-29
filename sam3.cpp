@@ -20969,9 +20969,69 @@ static int sam31_maskmem_tpos_v2(const sam3_model& model,
         return (tpos <= 0 || tpos >= num_maskmem) ? 0 : tpos;
     };
     if (slot.frame_index >= 0) {
-        return normalize(tracker.frame_index - slot.frame_index);
+        const int frame_delta = tracker.frame_index - slot.frame_index;
+        if (slot.is_cond_frame) {
+            return normalize(frame_delta);
+        }
+        if (frame_delta > 0 && frame_delta < num_maskmem) {
+            return num_maskmem - frame_delta;
+        }
+        return 0;
     }
     return normalize(fallback_tpos);
+}
+
+static std::vector<int> sam31_select_obj_ptr_frames(
+    const sam3_tracker& tracker,
+    const sam3_hparams& hp,
+    const std::vector<sam3_memory_slot>& mem_bank,
+    const std::vector<std::pair<int, struct ggml_tensor*>>& ptr_bank) {
+    std::vector<int> cond_ptrs;
+    std::vector<int> non_cond_ptrs;
+    cond_ptrs.reserve(ptr_bank.size());
+    non_cond_ptrs.reserve(ptr_bank.size());
+
+    const auto frame_has_cond_memory = [&mem_bank](int frame_idx) {
+        return std::ranges::any_of(mem_bank, [frame_idx](const sam3_memory_slot& slot) {
+            return slot.frame_index == frame_idx && slot.is_cond_frame;
+        });
+    };
+
+    for (int i = 0; i < static_cast<int>(ptr_bank.size()); ++i) {
+        const int ptr_frame = ptr_bank[static_cast<size_t>(i)].first;
+        if (ptr_frame > tracker.frame_index) {
+            continue;
+        }
+        if (frame_has_cond_memory(ptr_frame)) {
+            cond_ptrs.push_back(i);
+        } else if (ptr_frame < tracker.frame_index) {
+            non_cond_ptrs.push_back(i);
+        }
+    }
+
+    std::ranges::sort(cond_ptrs, [&ptr_bank](int a, int b) {
+        return ptr_bank[static_cast<size_t>(a)].first < ptr_bank[static_cast<size_t>(b)].first;
+    });
+    std::ranges::sort(non_cond_ptrs, [&ptr_bank](int a, int b) {
+        return ptr_bank[static_cast<size_t>(a)].first > ptr_bank[static_cast<size_t>(b)].first;
+    });
+
+    std::vector<int> selected;
+    selected.reserve(
+        static_cast<size_t>(std::min(static_cast<int>(ptr_bank.size()), hp.max_obj_ptrs)));
+    for (int idx : cond_ptrs) {
+        if (static_cast<int>(selected.size()) >= hp.max_obj_ptrs) {
+            return selected;
+        }
+        selected.push_back(idx);
+    }
+    for (int idx : non_cond_ptrs) {
+        if (static_cast<int>(selected.size()) >= hp.max_obj_ptrs) {
+            return selected;
+        }
+        selected.push_back(idx);
+    }
+    return selected;
 }
 
 static sam3_prop_output sam31_propagate_single(
@@ -21026,16 +21086,16 @@ static sam3_prop_output sam31_propagate_single(
     const int n_sel = static_cast<int>(sel.size());
     const int spatial_memory_tokens = N * n_sel;
     std::vector<std::pair<int, std::vector<float>>> ptr_inputs;
-    ptr_inputs.reserve(
-        static_cast<size_t>(std::min(static_cast<int>(ptr_bank.size()), hp.max_obj_ptrs)));
+    const auto ptr_indices = sam31_select_obj_ptr_frames(tracker, hp, mem_bank, ptr_bank);
+    ptr_inputs.reserve(ptr_indices.size());
     SAM3_PROFILE_CPU_START(sam31_prop_ptr_read);
     const int64_t sam31_prop_ptr_read_t0 = ggml_time_us();
-    for (int p = 0; p < static_cast<int>(ptr_bank.size()) && p < hp.max_obj_ptrs; ++p) {
+    for (int ptr_index : ptr_indices) {
         std::vector<float> ptr(D);
-        ggml_backend_tensor_get(
-            ptr_bank[p].second, ptr.data(), 0, static_cast<size_t>(D) * sizeof(float));
+        const auto& [ptr_frame, ptr_tensor] = ptr_bank[static_cast<size_t>(ptr_index)];
+        ggml_backend_tensor_get(ptr_tensor, ptr.data(), 0, static_cast<size_t>(D) * sizeof(float));
         if (std::ranges::any_of(ptr, [](float value) { return std::abs(value) > 1.0e-8f; })) {
-            ptr_inputs.emplace_back(ptr_bank[p].first, std::move(ptr));
+            ptr_inputs.emplace_back(ptr_frame, std::move(ptr));
         }
     }
     SAM3_PROFILE_CPU_END(sam31_prop_ptr_read);

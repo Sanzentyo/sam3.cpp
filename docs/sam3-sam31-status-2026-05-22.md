@@ -12474,3 +12474,31 @@ Conclusion: the current optimization path should move to explicit CUDA/ggml
 implementation work inside the image graph. The highest-value areas are a
 same-output ViT MLP/QKV epilogue or fused attention/layout kernels that keep the
 default mask parity while reducing `tail_image_encode.graph_compute`.
+
+### SAM3 BF16 Redundant ViT Cast Cleanup
+
+The BF16 cuDNN MLP flat-chain candidate left a same-type materialization before
+FC2: `sam3_vit_block_*_mlp_gelu_flat (copy)` copied BF16 to BF16 for every ViT
+block. `sam3_cast_if_needed` now skips `ggml_cast` when the tensor already has
+the target type and is contiguous. This keeps non-contiguous layout fixes intact
+while removing the redundant hot-path copy.
+
+Pre-gate result on the same tail image-encoder contract:
+
+| Run | Mean | Median | SD | Evidence |
+| --- | ---: | ---: | ---: | --- |
+| clean cuDNN MLP flat-chain | `147.991 ms` | `146.240 ms` | `8.921 ms` | `outputs/e2e-required-measure-sam3-bf16-cudnn-mlp-flat-bf16-clean-20260629a/vit-bench/vit_bench.json` |
+| skip redundant cast | `142.374 ms` | `138.321 ms` | `9.644 ms` | `outputs/e2e-required-vit-bench-sam3-bf16-cudnn-mlp-flat-bf16-skip-redundant-cast-r20-20260629a/vit_bench.json` |
+
+Node-profile attribution also matches the expected mechanism: the clean profile
+contains 160 `mlp_gelu_flat (copy)` nodes totaling `24.502 ms`, while the
+candidate profile contains zero such nodes. Evidence:
+`outputs/e2e-required-measure-sam3-bf16-cudnn-mlp-flat-bf16-clean-20260629a/profile/profile.log`
+and
+`outputs/e2e-required-profile-sam3-bf16-cudnn-mlp-flat-bf16-skip-redundant-cast-20260629a/profile.log`.
+
+The artifact parity gate is exact against the clean C++ output:
+`diff_rows=0`, `tolerance_diff_rows=0`, `mask_hash_equal_rows=5`,
+`max_bbox_delta_px=0`, `max_score_abs_delta=0`, and `max_mask_pixel_xor=0`.
+Evidence:
+`outputs/e2e-required-cpp-parity-sam3-bf16-skip-redundant-cast-20260629a/compare.json`.

@@ -3665,6 +3665,15 @@ static ggml_type sam3_vit_linear_output_type(const ggml_tensor* weight,
     return GGML_TYPE_F32;
 }
 
+static struct ggml_tensor* sam3_cast_if_needed(struct ggml_context* ctx,
+                                               struct ggml_tensor* input,
+                                               ggml_type target_type) {
+    if (input->type == target_type && ggml_is_contiguous(input)) {
+        return input;
+    }
+    return ggml_cast(ctx, input, target_type);
+}
+
 static struct ggml_tensor* sam3_vit_linear_bias(struct ggml_context* ctx,
                                                 struct ggml_tensor* weight,
                                                 struct ggml_tensor* input,
@@ -7366,7 +7375,7 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
 
     if (!is_global) {
         if (use_bf16_qkv_input && sam3_bf16_vit_window_part_input_enabled()) {
-            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+            x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
             sam3_set_name(x,
                           std::format("sam3_vit_block_{:02d}_window_part_input_bf16", block_idx));
         }
@@ -7375,9 +7384,9 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         sam3_set_name(x, std::format("sam3_vit_block_{:02d}_window_part", block_idx));
     }
     if (sam3_fast_f16_vit_attention_enabled() && blk.qkv_w->type == GGML_TYPE_F16) {
-        x = ggml_cast(ctx, x, GGML_TYPE_F16);
+        x = sam3_cast_if_needed(ctx, x, GGML_TYPE_F16);
     } else if (use_bf16_qkv_input && x->type != GGML_TYPE_BF16) {
-        x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+        x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
     }
 
     const int64_t W_cur = x->ne[1];
@@ -7531,9 +7540,9 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
     sam3_set_name(x, std::format("sam3_vit_block_{:02d}_norm2", block_idx));
 
     if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
-        x = ggml_cast(ctx, x, GGML_TYPE_F16);
+        x = sam3_cast_if_needed(ctx, x, GGML_TYPE_F16);
     } else if (sam3_bf16_vit_linear_inputs_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
-        x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+        x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
     }
     if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
         const int64_t w = x->ne[1];
@@ -7554,9 +7563,9 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         x = sam3_vit_mlp_gelu(ctx, x, block_idx);
         sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_gelu_flat", block_idx));
         if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
-            x = ggml_cast(ctx, x, GGML_TYPE_F16);
+            x = sam3_cast_if_needed(ctx, x, GGML_TYPE_F16);
         } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
-            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+            x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
         }
         const auto fc2_name = std::format("sam3_vit_block_{:02d}_mlp_fc2", block_idx);
         x = sam3_vit_linear_bias(
@@ -7585,9 +7594,9 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         x = sam3_vit_mlp_gelu(ctx, x, block_idx);
         sam3_set_name(x, std::format("sam3_vit_block_{:02d}_mlp_gelu", block_idx));
         if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
-            x = ggml_cast(ctx, x, GGML_TYPE_F16);
+            x = sam3_cast_if_needed(ctx, x, GGML_TYPE_F16);
         } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
-            x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+            x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
         }
         const auto fc2_name = std::format("sam3_vit_block_{:02d}_mlp_fc2", block_idx);
         x = sam3_vit_linear_bias_flat_batch(
@@ -12420,9 +12429,9 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_QKV_PROJ:
             if (sam3_fast_f16_vit_attention_enabled() && blk.qkv_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_linear_inputs_enabled() && blk.qkv_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             return sam3_vit_linear_bias_flat_batch(
                 ctx,
@@ -12446,10 +12455,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_ATTN_PROJ:
             if (sam3_fast_f16_vit_attn_proj_input_enabled() && blk.proj_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_attn_proj_input_enabled() &&
                        blk.proj_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             return sam3_vit_linear_bias_flat_batch(
                 ctx,
@@ -12470,10 +12479,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_MLP_FC1:
             if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_linear_inputs_enabled() &&
                        blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             return sam3_vit_linear_bias_flat_batch(
                 ctx,
@@ -12489,10 +12498,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_MLP_FC1_GELU: {
             if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_linear_inputs_enabled() &&
                        blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             struct ggml_tensor* x = sam3_vit_linear_bias_flat_batch(
                 ctx,
@@ -12507,9 +12516,9 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_MLP_FC2:
             if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             return sam3_vit_linear_bias_flat_batch(
                 ctx,
@@ -12522,10 +12531,10 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
 
         case SAM3_VIT_BLOCK_STAGE_MLP: {
             if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc1_w->type == GGML_TYPE_F16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_F16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_linear_inputs_enabled() &&
                        blk.mlp_fc1_w->type == GGML_TYPE_BF16) {
-                input = ggml_cast(ctx, input, GGML_TYPE_BF16);
+                input = sam3_cast_if_needed(ctx, input, GGML_TYPE_BF16);
             }
             const int64_t w = input->ne[1];
             const int64_t h = input->ne[2];
@@ -12553,9 +12562,9 @@ static struct ggml_tensor* sam3_build_vit_block_stage_from_input(struct ggml_con
             }
             x = sam3_vit_mlp_gelu(ctx, x, block_idx);
             if (sam3_fast_f16_vit_mlp_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_F16) {
-                x = ggml_cast(ctx, x, GGML_TYPE_F16);
+                x = sam3_cast_if_needed(ctx, x, GGML_TYPE_F16);
             } else if (sam3_bf16_vit_fc2_input_enabled() && blk.mlp_fc2_w->type == GGML_TYPE_BF16) {
-                x = ggml_cast(ctx, x, GGML_TYPE_BF16);
+                x = sam3_cast_if_needed(ctx, x, GGML_TYPE_BF16);
             }
             if (sam3_vit_mlp_flat_chain_enabled(block_idx)) {
                 x = sam3_vit_linear_bias(

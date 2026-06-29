@@ -282,6 +282,39 @@ not yet faster (`576.373 ms` C++ candidate tail graph versus `525.015 ms`
 Python diagnostic). This keeps the next root work focused on image-encode graph
 compute rather than cached-tail placement.
 
+Candidate-state profiling was regenerated from the same r5 frame set:
+
+- audit:
+  `outputs/e2e-required-audit-cudnn-mlp-flat-bf16-r5-profile-20260629a/optimization_targets.md`
+- CUDA node profile:
+  `outputs/e2e-required-profile-sam3-bf16-cudnn-mlp-flat-bf16-r5-20260629a/node_names_split.json`
+- GEMM profile:
+  `outputs/e2e-required-mulmat-profile-sam3-bf16-cudnn-mlp-flat-bf16-r5-20260629a/cublaslt_bias_by_group.json`
+
+The remaining tail graph budget after this candidate is still dominated by ViT
+matrix dataflow:
+
+| Tail budget group | Required budget ms | Required E2E share |
+| --- | ---: | ---: |
+| `image.vit.mlp_matmul` | `249.743` | `26.6%` |
+| `image.vit.qkv_matmul` | `82.701` | `8.8%` |
+| `image.vit.attention` | `80.755` | `8.6%` |
+| `image.neck` | `46.780` | `5.0%` |
+| `image.vit.layout_rope_copy` | `41.014` | `4.4%` |
+
+The atomic tail-stage budget splits MLP into FC2 `128.086 ms` and FC1
+`121.657 ms`; FC1 is already going through the cuDNN FC1+GELU path, while FC2
+still runs as cuBLASLt bias GEMM. The GEMM profile reports `vit_mlp_fc2`
+`0.976 ms` mean, `vit_qkv` `0.631 ms`, and `vit_attn_proj` `0.234 ms`. That
+makes FC2 and QKV the next root targets; attention-only work is now below the
+combined MLP matmul target.
+
+An FC2 residual-add fusion pre-gate was also tested by adding
+`GGML_CUDA_ENABLE_CUBLASLT_BIAS_RESIDUAL_FUSION=1`. It did fire for every ViT
+FC2 block, but it slowed the FC2 GEMM group (`0.976 ms` to `1.103 ms` mean),
+so it is rejected before full required-E2E A/B. Evidence:
+`outputs/e2e-required-mulmat-profile-sam3-bf16-cudnn-mlp-flat-bf16-residual-r5-20260629a/cublaslt_bias_by_group.json`.
+
 The isolated MLP stage checks agree with the E2E direction:
 
 | Representative block | Baseline steady ms | Candidate steady ms | Delta | Projected tail E2E delta |

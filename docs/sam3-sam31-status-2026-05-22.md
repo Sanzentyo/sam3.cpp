@@ -12599,3 +12599,40 @@ Conclusion: residual epilogue scoping and BF16 deconv do not close the remaining
 Python tail-backbone gap. The next root candidate should be a true MLP/QKV
 compute-path improvement or a faster attention/layout kernel, not another
 residual-add or deconv-weight materialization toggle.
+
+### SAM3 BF16 Upstream ggml PDL Recheck
+
+I integrated ggml upstream commit `7b28f950` programmatic dependent launch support
+into the CUDA submodule candidate and resolved it against the local SAM3 CUDA
+changes. The build gate passed:
+
+- `just build-target sam3_vit_batch_bench`
+- `just e2e-required-parity` with baseline `GGML_CUDA_PDL=0` and candidate PDL
+  default-on
+
+PDL is correctness-neutral for the required C++ artifact contract:
+`diff_rows=0`, `tolerance_diff_rows=0`, `mask_hash_equal_rows=5`,
+`max_bbox_delta_px=0`, `max_score_abs_delta=0`, and `max_mask_pixel_xor=0`.
+Evidence:
+`outputs/e2e-required-parity-sam3-bf16-pdl-on-vs-off-20260629a/compare.json`.
+
+It is not an accepted SAM3 VIT speedup. With the normal SAM3 execution contract
+where CUDA graphs are disabled unless explicitly enabled, a repeat-20 isolated
+VIT+tracker-neck A/B shows no useful signal:
+
+| Variant | Mean | Median | SD | CI95 | Delta vs PDL off | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `GGML_CUDA_PDL=0` | `152.050 ms` | `149.003 ms` | `9.496 ms` | `4.162 ms` | `0.000 ms` | baseline |
+| PDL default-on | `152.077 ms` | `149.154 ms` | `9.288 ms` | `4.071 ms` | `+0.027 ms` | reject/no signal |
+
+The paired index difference is `+0.027 ms` with paired CI95 `0.327 ms`
+(`+0.018%`), so the observed delta is noise-level and slightly slower by mean.
+Evidence:
+`outputs/e2e-required-vit-bench-sam3-bf16-pdl-off-r20-20260629a/vit_bench.json`
+and
+`outputs/e2e-required-vit-bench-sam3-bf16-pdl-on-r20-20260629a/vit_bench.json`.
+
+Conclusion: PDL can remain as a safe upstream CUDA launch-path capability, but it
+does not move the current SAM3/SAM3.1 Python-closing objective. The next accepted
+optimization still needs to reduce the actual ViT MLP/QKV/attention compute
+budget rather than kernel-launch scheduling overhead.

@@ -221,6 +221,63 @@ matmul dataflow. A candidate is not accepted unless it lowers
 `required_e2e_ms` and `tail_image_encode.graph_compute` under the same contract,
 then passes exact C++ parity and the official-Python quality gate.
 
+## SAM3 cuDNN MLP Candidate 2026-06-29
+
+The first MLP dataflow candidate that passes the required-E2E A/B gate combines
+the flat ViT MLP chain with BF16 MLP tensors and a cuDNN FC1+GELU path:
+
+```text
+SAM3_ENABLE_VIT_MLP_FLAT_CHAIN=1
+SAM3_BF16_VIT_MLP_CHAIN=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16=1
+GGML_CUDA_ENABLE_CUDNN_MLP_FC1_GELU_BF16_UNSAFE_RUN=1
+```
+
+Evidence:
+
+- required E2E A/B:
+  `outputs/e2e-required-ab-sam3-bf16-cudnn-mlp-flat-bf16-r3-20260629a/optimization_targets.md`
+- C++ candidate parity:
+  `outputs/e2e-required-ab-sam3-bf16-cudnn-mlp-flat-bf16-r3-20260629a/parity/compare.json`
+- block0 stage A/B:
+  `outputs/e2e-required-vit-stage-ab-cudnn-mlp-flat-bf16-b0-20260629a/stage_ab.md`
+- block7 stage A/B:
+  `outputs/e2e-required-vit-stage-ab-cudnn-mlp-flat-bf16-b7-20260629a/stage_ab.md`
+
+The required-E2E A/B promotes the candidate:
+
+| Metric | Baseline | Candidate | Delta |
+| --- | ---: | ---: | ---: |
+| `required_e2e_ms` | `938.987` | `924.919` | `-14.068` |
+| `model_e2e_ms` | `926.231` | `912.171` | `-14.060` |
+| `required_core_compute_ms` | `786.218` | `774.750` | `-11.468` |
+| `tail_encode_graph_compute_ms` | `583.159` | `577.255` | `-5.904` |
+| `frame0_encode_graph_compute_ms` | `161.027` | `155.794` | `-5.233` |
+
+The statistical signals are also in the right direction: required E2E `z=-6.723`
+and tail graph `z=-2.953`. Candidate parity is exact against the C++ baseline
+for the compared JSONL rows (`diff_rows=0`), so this optimization does not
+change the selected-target outputs covered by that contract.
+
+The isolated MLP stage checks agree with the E2E direction:
+
+| Representative block | Baseline steady ms | Candidate steady ms | Delta | Projected tail E2E delta |
+| --- | ---: | ---: | ---: | ---: |
+| block0 window | `2.110` | `1.954` | `-0.156` | `-9.926` |
+| block7 global | `2.109` | `1.984` | `-0.125` | `-7.966` |
+
+This should be treated as an accepted candidate, not the final state. The
+Python tail image-encode diagnostic is still faster than C++ for the same
+contract (`524.812 ms` Python diagnostic versus `577.255 ms` candidate C++
+tail graph), so the next root targets remain FC2/QKV dataflow and reducing the
+remaining image-encode graph gap.
+
+A separate no-flat BF16+cuDNN probe now reaches the cuDNN FC1+GELU path through
+reshape/view look-through, but its full MLP stage is still slower than the
+current baseline (`2.169 ms` versus about `2.109 ms`). That path is useful
+implementation groundwork, but it is not an accepted speed candidate without
+the flat-chain dataflow.
+
 ## SAM3 Required E2E Deep Split 2026-06-29
 
 The SAM3 BF16 required-E2E bundle now separates the optimization denominator

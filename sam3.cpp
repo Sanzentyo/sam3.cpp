@@ -3518,7 +3518,7 @@ static bool sam3_vit_mlp_flat_chain_enabled(const sam3_hparams& hp,
     return sam3_vit_mlp_flat_chain_default_enabled(hp, fc1_weight_type);
 }
 
-static bool sam3_vit_direct_qkv_views_enabled(const sam3_hparams& hp, ggml_type qkv_weight_type) {
+static bool sam3_vit_direct_qkv_views_enabled(const sam3_hparams& hp) {
     static const std::optional<bool> env_override = [] -> std::optional<bool> {
         const char* disable_env = std::getenv("SAM3_DISABLE_VIT_DIRECT_QKV_VIEWS");
         if (disable_env != nullptr && disable_env[0] != '0') {
@@ -3530,10 +3530,7 @@ static bool sam3_vit_direct_qkv_views_enabled(const sam3_hparams& hp, ggml_type 
         }
         return std::nullopt;
     }();
-    const bool sam3_f16_or_bf16_default =
-        hp.model_type == SAM3_MODEL_SAM3 &&
-        (qkv_weight_type == GGML_TYPE_F16 || qkv_weight_type == GGML_TYPE_BF16);
-    return env_override.value_or(hp.is_sam3_1() || sam3_f16_or_bf16_default);
+    return env_override.value_or(hp.is_sam3_1() || hp.model_type == SAM3_MODEL_SAM3);
 }
 
 static bool sam3_prop_rope_k_backend_cache_enabled() {
@@ -3544,12 +3541,24 @@ static bool sam3_prop_rope_k_backend_cache_enabled() {
     return enabled;
 }
 
-static bool sam3_vit_contiguous_attention_v_enabled() {
-    static const bool enabled = [] {
+static bool sam3_vit_contiguous_attention_v_enabled(const sam3_hparams& hp,
+                                                    ggml_type qkv_weight_type,
+                                                    bool direct_qkv_views) {
+    static const std::optional<bool> env_override = [] -> std::optional<bool> {
+        const char* disable_env = std::getenv("SAM3_DISABLE_VIT_CONTIGUOUS_ATTENTION_V");
+        if (disable_env != nullptr && disable_env[0] != '0') {
+            return false;
+        }
         const char* env = std::getenv("SAM3_ENABLE_VIT_CONTIGUOUS_ATTENTION_V");
-        return env != nullptr && env[0] != '0';
+        if (env != nullptr) {
+            return env[0] != '0';
+        }
+        return std::nullopt;
     }();
-    return enabled;
+    const bool sam3_non_low_precision_default =
+        direct_qkv_views && hp.model_type == SAM3_MODEL_SAM3 && qkv_weight_type != GGML_TYPE_F16 &&
+        qkv_weight_type != GGML_TYPE_BF16;
+    return env_override.value_or(sam3_non_low_precision_default);
 }
 
 static bool sam3_bf16_vit_attn_proj_input_enabled() {
@@ -7499,7 +7508,8 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
         struct ggml_tensor* Q = nullptr;
         struct ggml_tensor* K = nullptr;
         struct ggml_tensor* V = nullptr;
-        if (sam3_vit_direct_qkv_views_enabled(hp, blk.qkv_w->type)) {
+        const bool direct_qkv_views = sam3_vit_direct_qkv_views_enabled(hp);
+        if (direct_qkv_views) {
             cur = ggml_reshape_3d(ctx, cur, 3 * E, W_cur * H_cur, B_cur);
             const size_t qkv_stride = static_cast<size_t>(E) * cur->nb[0];
             Q = ggml_view_4d(
@@ -7549,7 +7559,7 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
 
         V = ggml_permute(
             ctx, V, 0, 2, 1, 3);  // [HD, N, NH, B_cur] non-contiguous view; flash_attn uses strides
-        if (sam3_vit_contiguous_attention_v_enabled()) {
+        if (sam3_vit_contiguous_attention_v_enabled(hp, blk.qkv_w->type, direct_qkv_views)) {
             V = ggml_cont(ctx, V);
             sam3_set_name(
                 V,
@@ -12409,7 +12419,8 @@ static struct ggml_tensor* sam3_build_vit_qkv_attn_from_qkv(struct ggml_context*
     struct ggml_tensor* Q = nullptr;
     struct ggml_tensor* K = nullptr;
     struct ggml_tensor* V = nullptr;
-    if (sam3_vit_direct_qkv_views_enabled(hp, blk.qkv_w->type)) {
+    const bool direct_qkv_views = sam3_vit_direct_qkv_views_enabled(hp);
+    if (direct_qkv_views) {
         cur = ggml_reshape_3d(ctx, cur, 3 * E, W_cur * H_cur, B_cur);
         const size_t qkv_stride = static_cast<size_t>(E) * cur->nb[0];
         Q = ggml_view_4d(
@@ -12454,7 +12465,7 @@ static struct ggml_tensor* sam3_build_vit_qkv_attn_from_qkv(struct ggml_context*
     K = ggml_reshape_3d(ctx, K, HD, W_cur * H_cur, NH * B_cur);
 
     V = ggml_permute(ctx, V, 0, 2, 1, 3);
-    if (sam3_vit_contiguous_attention_v_enabled()) {
+    if (sam3_vit_contiguous_attention_v_enabled(hp, blk.qkv_w->type, direct_qkv_views)) {
         V = ggml_cont(ctx, V);
     }
 

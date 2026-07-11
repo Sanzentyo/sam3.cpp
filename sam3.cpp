@@ -15467,6 +15467,8 @@ static struct ggml_tensor* sam3_pixel_decoder(
 {
     const auto& seg = model.seg_head;
     const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
+    const bool broadcast_affine =
+        !sam3_getenv("SAM3_DISABLE_PCS_PIXEL_DECODER_BCAST_AFFINE").has_value();
 
     // Start from lowest resolution
     auto* feat = fpn_feats[2];  // [D, 72, 72, B]
@@ -15482,15 +15484,15 @@ static struct ggml_tensor* sam3_pixel_decoder(
     prev = ggml_conv_2d_s1_ph(ctx, seg.up_conv_w[0], prev);
     {
         auto* b3d = ggml_reshape_3d(ctx, seg.up_conv_b[0], 1, 1, seg.up_conv_b[0]->ne[0]);
-        prev = ggml_add(ctx, prev, ggml_repeat(ctx, b3d, prev));
+        prev = ggml_add(ctx, prev, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, prev));
     }
     // GroupNorm(8, 256) then ReLU — prev is [W, H, D, B] with D in ne[2]
     prev = ggml_group_norm(ctx, prev, 8, 1e-5f);
     {
         auto* w3d = ggml_reshape_3d(ctx, seg.up_norm_w[0], 1, 1, seg.up_norm_w[0]->ne[0]);
-        prev = ggml_mul(ctx, prev, ggml_repeat(ctx, w3d, prev));
+        prev = ggml_mul(ctx, prev, broadcast_affine ? w3d : ggml_repeat(ctx, w3d, prev));
         auto* bn3d = ggml_reshape_3d(ctx, seg.up_norm_b[0], 1, 1, seg.up_norm_b[0]->ne[0]);
-        prev = ggml_add(ctx, prev, ggml_repeat(ctx, bn3d, prev));
+        prev = ggml_add(ctx, prev, broadcast_affine ? bn3d : ggml_repeat(ctx, bn3d, prev));
     }
     prev = ggml_relu(ctx, prev);
     ggml_set_name(prev, "seg_pixel_dec_stage0");
@@ -15506,15 +15508,15 @@ static struct ggml_tensor* sam3_pixel_decoder(
     prev = ggml_conv_2d_s1_ph(ctx, seg.up_conv_w[1], prev);
     {
         auto* b3d = ggml_reshape_3d(ctx, seg.up_conv_b[1], 1, 1, seg.up_conv_b[1]->ne[0]);
-        prev = ggml_add(ctx, prev, ggml_repeat(ctx, b3d, prev));
+        prev = ggml_add(ctx, prev, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, prev));
     }
     // GroupNorm(8, 256) then ReLU
     prev = ggml_group_norm(ctx, prev, 8, 1e-5f);
     {
         auto* w3d = ggml_reshape_3d(ctx, seg.up_norm_w[1], 1, 1, seg.up_norm_w[1]->ne[0]);
-        prev = ggml_mul(ctx, prev, ggml_repeat(ctx, w3d, prev));
+        prev = ggml_mul(ctx, prev, broadcast_affine ? w3d : ggml_repeat(ctx, w3d, prev));
         auto* bn3d = ggml_reshape_3d(ctx, seg.up_norm_b[1], 1, 1, seg.up_norm_b[1]->ne[0]);
-        prev = ggml_add(ctx, prev, ggml_repeat(ctx, bn3d, prev));
+        prev = ggml_add(ctx, prev, broadcast_affine ? bn3d : ggml_repeat(ctx, bn3d, prev));
     }
     prev = ggml_relu(ctx, prev);
     ggml_set_name(prev, "seg_pixel_dec_stage1");
@@ -15556,6 +15558,8 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
     const int64_t D = enc_hidden->ne[0];  // 256
     const int64_t B = enc_hidden->ne[2];  // 1
     const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
+    const bool broadcast_affine =
+        !sam3_getenv("SAM3_DISABLE_PCS_PIXEL_DECODER_BCAST_AFFINE").has_value();
 
     auto* enc = enc_hidden;
     if (text_features) {
@@ -15632,7 +15636,7 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
                                     1,
                                     1,
                                     tensors.at("seg.instance_seg_head.bias")->ne[0]);
-        pf_conv = ggml_add(ctx, pf_conv, ggml_repeat(ctx, b3d, pf_conv));
+        pf_conv = ggml_add(ctx, pf_conv, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, pf_conv));
     }
     auto* pixel_embed = ggml_cont(ctx, ggml_permute(ctx, pf_conv, 1, 2, 0, 3));  // [D, W, H, B]
     ggml_set_name(pixel_embed, "seg_instance_embed");

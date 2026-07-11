@@ -15491,6 +15491,9 @@ static struct ggml_tensor* sam3_pixel_decoder(
     const bool direct_conv3x3 =
         direct_conv3x3_cuda && !sam3_getenv("SAM3_DISABLE_PCS_DIRECT_PIXEL_CONV3X3").has_value() &&
         (direct_conv3x3_default || sam3_getenv("SAM3_ENABLE_PCS_DIRECT_PIXEL_CONV3X3").has_value());
+    const bool fuse_upscale_add =
+        direct_conv3x3_cuda && !dump_inner &&
+        !sam3_getenv("SAM3_DISABLE_PCS_PIXEL_UPSCALE_ADD_FUSION").has_value();
     auto conv3x3 = [&](ggml_tensor* weight, ggml_tensor* input) {
         const bool direct_type = input->type == GGML_TYPE_F32 &&
                                  (weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16 ||
@@ -15498,6 +15501,26 @@ static struct ggml_tensor* sam3_pixel_decoder(
         return direct_conv3x3 && direct_type
                    ? ggml_conv_2d_direct(ctx, weight, input, 1, 1, 1, 1, 1, 1)
                    : ggml_conv_2d_s1_ph(ctx, weight, input);
+    };
+    auto merge_upsampled = [&](ggml_tensor* high, ggml_tensor* low) {
+        const bool compatible = high->type == GGML_TYPE_F32 && high->type == low->type &&
+                                ggml_is_contiguous(high) && ggml_is_contiguous(low) &&
+                                high->ne[0] == low->ne[0] * 2 && high->ne[1] == low->ne[1] * 2 &&
+                                high->ne[2] == low->ne[2] && high->ne[3] == low->ne[3];
+        if (!fuse_upscale_add || !compatible) {
+            return ggml_add(ctx, high, ggml_upscale(ctx, low, 2, GGML_SCALE_MODE_NEAREST));
+        }
+
+        // Re-express 2x nearest replication as broadcasting on the two
+        // interleaved spatial axes, then preserve the original high + low
+        // operand order. This removes the standalone UPSCALE materialization.
+        const int64_t folded_rows = ggml_nelements(low) / low->ne[0];
+        auto* low_folded = ggml_reshape_4d(ctx, low, 1, low->ne[0], 1, folded_rows);
+        auto* high_folded = ggml_reshape_4d(ctx, high, 2, low->ne[0], 2, folded_rows);
+        // Both callers pass a private CONT result for high. Reusing it avoids
+        // retaining a second full-resolution merge tensor in the graph arena.
+        auto* merged = ggml_add_inplace(ctx, high_folded, low_folded);
+        return ggml_reshape_4d(ctx, merged, high->ne[0], high->ne[1], high->ne[2], high->ne[3]);
     };
 
     // Start from lowest resolution
@@ -15507,9 +15530,8 @@ static struct ggml_tensor* sam3_pixel_decoder(
     // prev_fpn = FPN[1] + upsample(prev_fpn)
     // Permute to [W, H, D, B] for conv operations
     auto* prev = ggml_cont(ctx, ggml_permute(ctx, feat, 2, 0, 1, 3));          // [72, 72, D, B]
-    prev = ggml_upscale(ctx, prev, 2, GGML_SCALE_MODE_NEAREST);                // [144, 144, D, B]
     auto* fpn1 = ggml_cont(ctx, ggml_permute(ctx, fpn_feats[1], 2, 0, 1, 3));  // [144, 144, D, B]
-    prev = ggml_add(ctx, fpn1, prev);                                          // merged
+    prev = merge_upsampled(fpn1, prev);                                        // [144, 144, D, B]
     // Conv 3x3 on the MERGED result (not individual FPN feat)
     prev = conv3x3(seg.up_conv_w[0], prev);
     {
@@ -15531,9 +15553,8 @@ static struct ggml_tensor* sam3_pixel_decoder(
     }
 
     // Iteration 1: merge with FPN[0] (288x288)
-    prev = ggml_upscale(ctx, prev, 2, GGML_SCALE_MODE_NEAREST);                // [288, 288, D, B]
     auto* fpn0 = ggml_cont(ctx, ggml_permute(ctx, fpn_feats[0], 2, 0, 1, 3));  // [288, 288, D, B]
-    prev = ggml_add(ctx, fpn0, prev);                                          // merged
+    prev = merge_upsampled(fpn0, prev);                                        // [288, 288, D, B]
     // Conv 3x3 on the MERGED result
     prev = conv3x3(seg.up_conv_w[1], prev);
     {

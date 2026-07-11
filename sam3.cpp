@@ -15447,7 +15447,7 @@ static sam3_ddec_output sam3_build_ddec_graph(
 // fpn_feats[0]: [D, 288, 288, B] (highest res)
 // fpn_feats[1]: [D, 144, 144, B]
 // fpn_feats[2]: [D,  72,  72, B] (lowest res)
-// Returns: [D, 288, 288, B] pixel features
+// Returns: [288, 288, D, B] pixel features in the convolution-native WHCB layout
 //
 // Python PixelDecoder.forward:
 //   prev_fpn = backbone_feats[-1]  (lowest res)
@@ -15523,8 +15523,7 @@ static struct ggml_tensor* sam3_pixel_decoder(
     // Python PixelDecoder allocates 3 conv layers but only uses 2 (one per
     // upsample step). The 3rd conv (up_conv_w[2]) is unused.
 
-    auto* out = ggml_cont(ctx, ggml_permute(ctx, prev, 1, 2, 0, 3));  // [D, 288, 288, B]
-    return out;
+    return prev;
 }
 
 // Build the full segmentation head graph.
@@ -15548,7 +15547,8 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
     struct ggml_tensor* fpn_feats[3],   // FPN features at 3 scales
     struct ggml_tensor* query_outputs,  // [D, N, B]
     struct ggml_tensor* text_features,  // [D, T, B] (for cross-attn, can be nullptr)
-    struct ggml_tensor* text_attn_bias = nullptr) {
+    struct ggml_tensor* text_attn_bias = nullptr,
+    bool direct_pixel_decoder_whcb = false) {
     const auto& seg = model.seg_head;
     const auto& tensors = model.tensors;
     const int64_t D = enc_hidden->ne[0];  // 256
@@ -15602,21 +15602,27 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
         enc_spatial,  // replaces original lowest-res FPN
     };
 
-    auto* pixel_feats = sam3_pixel_decoder(ctx, model, modified_fpn);
-    ggml_set_name(pixel_feats, "seg_pixel_decoder_out");
-    if (dump_inner) {
-        ggml_set_output(pixel_feats);
-    }
-#ifndef NDEBUG
-    auto* pixel_feats_dbg = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
-    ggml_set_name(pixel_feats_dbg, "seg_pixel_decoder_out_visual");
-#endif
-
-    const int64_t W = pixel_feats->ne[1];  // 288
-    const int64_t H = pixel_feats->ne[2];  // 288
+    auto* pixel_feats_whcb = sam3_pixel_decoder(ctx, model, modified_fpn);
+    const int64_t W = pixel_feats_whcb->ne[0];  // 288
+    const int64_t H = pixel_feats_whcb->ne[1];  // 288
+    GGML_ASSERT(pixel_feats_whcb->ne[2] == D);
+    GGML_ASSERT(ggml_is_contiguous(pixel_feats_whcb));
 
     // Instance segmentation head (Conv1x1)
-    auto* pf_conv = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
+    const bool use_direct_whcb = direct_pixel_decoder_whcb && !dump_inner;
+    auto* pf_conv = pixel_feats_whcb;
+    if (!use_direct_whcb) {
+        auto* pixel_feats = ggml_cont(ctx, ggml_permute(ctx, pixel_feats_whcb, 1, 2, 0, 3));
+        ggml_set_name(pixel_feats, "seg_pixel_decoder_out");
+        if (dump_inner) {
+            ggml_set_output(pixel_feats);
+        }
+#ifndef NDEBUG
+        auto* pixel_feats_dbg = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
+        ggml_set_name(pixel_feats_dbg, "seg_pixel_decoder_out_visual");
+#endif
+        pf_conv = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
+    }
     pf_conv = ggml_conv_2d_sk_p0(ctx, tensors.at("seg.instance_seg_head.weight"), pf_conv);
     {
         auto* b3d = ggml_reshape_3d(ctx,
@@ -17531,6 +17537,10 @@ static bool sam3_pcs_premask_nms_enabled() {
     return !sam3_getenv("SAM3_DISABLE_PCS_PREMASK_NMS").has_value();
 }
 
+static bool sam3_pcs_direct_pixel_decoder_whcb_enabled() {
+    return !sam3_getenv("SAM3_DISABLE_PCS_DIRECT_PIXEL_DECODER_WHCB").has_value();
+}
+
 [[nodiscard]] static bool sam3_should_alias_pcs_fpn_inputs(ggml_backend_t backend) {
     if (sam3_getenv("SAM3_DISABLE_PCS_FPN_ALIAS_INPUTS").has_value()) {
         return false;
@@ -18556,6 +18566,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const size_t mask_elements = sam3_count_mul(mask_hw, mask_hw);
     const size_t mask_bytes = mask_elements * sizeof(float);
     const bool use_pcs_premask_nms = sam3_pcs_premask_nms_enabled() && !pcs_dump_dir;
+    const bool use_pcs_direct_pixel_decoder_whcb =
+        sam3_pcs_direct_pixel_decoder_whcb_enabled() && !pcs_dump_dir;
     const bool use_pcs_fpn_cpu_copy = sam3_getenv("SAM3_DISABLE_PCS_FPN_GPU_COPY").has_value();
     const bool use_pcs_fpn_alias = !pcs_dump_dir && !use_pcs_fpn_cpu_copy &&
                                    state.backend == model.backend &&
@@ -18625,7 +18637,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_set_name(tab, "seg_bias");
         ggml_set_input(tab);
 
-        auto* out = sam3_build_seg_head_graph(ctx.get(), model, enc_h, fpn_feats, oq, txt, tab);
+        auto* out = sam3_build_seg_head_graph(
+            ctx.get(), model, enc_h, fpn_feats, oq, txt, tab, use_pcs_direct_pixel_decoder_whcb);
         ggml_set_output(out);
 
         auto* graph = ggml_new_graph_custom(ctx.get(), 32768, false);
@@ -26038,8 +26051,14 @@ bool sam3_test_dump_phase5(const sam3_model& model,
                                      1 * ddec_out.queries->nb[1]);
     obj_queries = ggml_cont(ctx0.get(), obj_queries);
 
-    auto* mask_logits = sam3_build_seg_head_graph(
-        ctx0.get(), model, conditioned, fpn_feats, obj_queries, text_features, text_attn_bias);
+    auto* mask_logits = sam3_build_seg_head_graph(ctx0.get(),
+                                                  model,
+                                                  conditioned,
+                                                  fpn_feats,
+                                                  obj_queries,
+                                                  text_features,
+                                                  text_attn_bias,
+                                                  false);
     ggml_set_name(mask_logits, "seg_mask_logits");
 
     struct named_tensor {
@@ -26338,8 +26357,14 @@ bool sam3_test_dump_phase5_from_ref_inputs(const sam3_model& model,
                                      1 * ddec_out.queries->nb[1]);
     obj_queries = ggml_cont(ctx0.get(), obj_queries);
 
-    auto* mask_logits = sam3_build_seg_head_graph(
-        ctx0.get(), model, conditioned, fpn_feats, obj_queries, text_features, text_attn_bias);
+    auto* mask_logits = sam3_build_seg_head_graph(ctx0.get(),
+                                                  model,
+                                                  conditioned,
+                                                  fpn_feats,
+                                                  obj_queries,
+                                                  text_features,
+                                                  text_attn_bias,
+                                                  false);
     ggml_set_name(mask_logits, "seg_mask_logits");
 
     struct named_tensor {

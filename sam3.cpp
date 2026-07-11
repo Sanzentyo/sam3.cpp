@@ -15811,15 +15811,25 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
                   ? ggml_conv_2d_direct(ctx, instance_weight, pf_conv, 1, 1, 0, 0, 1, 1)
                   : ggml_conv_2d_sk_p0(ctx, instance_weight, pf_conv);
     ggml_set_name(pf_conv, "seg_instance_conv");
-    {
-        auto* b3d = ggml_reshape_3d(ctx,
-                                    tensors.at("seg.instance_seg_head.bias"),
-                                    1,
-                                    1,
-                                    tensors.at("seg.instance_seg_head.bias")->ne[0]);
+    auto* instance_bias = tensors.at("seg.instance_seg_head.bias");
+    const bool use_instance_bias_after_cont =
+        use_direct_instance_conv1x1 && broadcast_affine && instance_bias->type == GGML_TYPE_F32 &&
+        ggml_is_contiguous(instance_bias) && instance_bias->ne[0] == D &&
+        instance_bias->ne[1] == 1 && instance_bias->ne[2] == 1 && instance_bias->ne[3] == 1 &&
+        !sam3_getenv("SAM3_DISABLE_PCS_INSTANCE_BIAS_AFTER_CONT").has_value();
+    if (sam3_getenv("SAM3_PROFILE_PCS_INSTANCE_BIAS_AFTER_CONT").has_value()) {
+        fprintf(stderr,
+                "SAM3_PROFILE_PCS_INSTANCE_BIAS_AFTER_CONT selected=%s\n",
+                use_instance_bias_after_cont ? "post_cont" : "legacy");
+    }
+    if (!use_instance_bias_after_cont) {
+        auto* b3d = ggml_reshape_3d(ctx, instance_bias, 1, 1, instance_bias->ne[0]);
         pf_conv = ggml_add(ctx, pf_conv, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, pf_conv));
     }
     auto* pixel_embed = ggml_cont(ctx, ggml_permute(ctx, pf_conv, 1, 2, 0, 3));  // [D, W, H, B]
+    if (use_instance_bias_after_cont) {
+        pixel_embed = ggml_add_inplace(ctx, pixel_embed, instance_bias);
+    }
     ggml_set_name(pixel_embed, "seg_instance_embed");
     if (dump_inner) {
         ggml_set_output(pixel_embed);

@@ -15469,6 +15469,29 @@ static struct ggml_tensor* sam3_pixel_decoder(
     const bool dump_inner = sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
     const bool broadcast_affine =
         !sam3_getenv("SAM3_DISABLE_PCS_PIXEL_DECODER_BCAST_AFFINE").has_value();
+    bool direct_conv3x3_cuda = false;
+    bool direct_conv3x3_default = false;
+#ifdef GGML_USE_CUDA
+    direct_conv3x3_cuda = ggml_backend_is_cuda(model.backend);
+    direct_conv3x3_default = direct_conv3x3_cuda && ggml_backend_cuda_has_cudnn(model.backend) &&
+                             !sam3_getenv("GGML_CUDA_DISABLE_CUDNN_CONV2D").has_value() &&
+                             !sam3_getenv("GGML_CUDA_CUDNN_CONV2D_ALGO").has_value() &&
+                             !sam3_getenv("GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F").has_value() &&
+                             !sam3_getenv("GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F").has_value() &&
+                             seg.up_conv_w[0]->type == GGML_TYPE_F32 &&
+                             seg.up_conv_w[1]->type == GGML_TYPE_F32;
+#endif
+    const bool direct_conv3x3 =
+        direct_conv3x3_cuda && !sam3_getenv("SAM3_DISABLE_PCS_DIRECT_PIXEL_CONV3X3").has_value() &&
+        (direct_conv3x3_default || sam3_getenv("SAM3_ENABLE_PCS_DIRECT_PIXEL_CONV3X3").has_value());
+    auto conv3x3 = [&](ggml_tensor* weight, ggml_tensor* input) {
+        const bool direct_type = input->type == GGML_TYPE_F32 &&
+                                 (weight->type == GGML_TYPE_F32 || weight->type == GGML_TYPE_F16 ||
+                                  weight->type == GGML_TYPE_BF16);
+        return direct_conv3x3 && direct_type
+                   ? ggml_conv_2d_direct(ctx, weight, input, 1, 1, 1, 1, 1, 1)
+                   : ggml_conv_2d_s1_ph(ctx, weight, input);
+    };
 
     // Start from lowest resolution
     auto* feat = fpn_feats[2];  // [D, 72, 72, B]
@@ -15481,7 +15504,7 @@ static struct ggml_tensor* sam3_pixel_decoder(
     auto* fpn1 = ggml_cont(ctx, ggml_permute(ctx, fpn_feats[1], 2, 0, 1, 3));  // [144, 144, D, B]
     prev = ggml_add(ctx, fpn1, prev);                                          // merged
     // Conv 3x3 on the MERGED result (not individual FPN feat)
-    prev = ggml_conv_2d_s1_ph(ctx, seg.up_conv_w[0], prev);
+    prev = conv3x3(seg.up_conv_w[0], prev);
     {
         auto* b3d = ggml_reshape_3d(ctx, seg.up_conv_b[0], 1, 1, seg.up_conv_b[0]->ne[0]);
         prev = ggml_add(ctx, prev, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, prev));
@@ -15505,7 +15528,7 @@ static struct ggml_tensor* sam3_pixel_decoder(
     auto* fpn0 = ggml_cont(ctx, ggml_permute(ctx, fpn_feats[0], 2, 0, 1, 3));  // [288, 288, D, B]
     prev = ggml_add(ctx, fpn0, prev);                                          // merged
     // Conv 3x3 on the MERGED result
-    prev = ggml_conv_2d_s1_ph(ctx, seg.up_conv_w[1], prev);
+    prev = conv3x3(seg.up_conv_w[1], prev);
     {
         auto* b3d = ggml_reshape_3d(ctx, seg.up_conv_b[1], 1, 1, seg.up_conv_b[1]->ne[0]);
         prev = ggml_add(ctx, prev, broadcast_affine ? b3d : ggml_repeat(ctx, b3d, prev));

@@ -775,7 +775,11 @@ def main() -> int:
         "memory": {
             "metrics": [
                 *(MEMORY_METRICS if args.track_memory else ()),
-                *((EXTERNAL_MEMORY_METRIC,) if timing_perturbed else ()),
+                *(
+                    (EXTERNAL_MEMORY_METRIC,)
+                    if args.nvidia_smi_sample_interval_ms is not None
+                    else ()
+                ),
             ],
             "accept_metrics": (
                 list(memory_accept_metrics) if memory_budget_bytes is not None else []

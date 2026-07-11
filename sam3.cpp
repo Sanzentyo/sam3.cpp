@@ -3489,7 +3489,9 @@ static bool sam3_vit_mlp_approx_gelu_enabled(int block_idx) {
 
 static bool sam3_vit_mlp_flat_chain_default_enabled(const sam3_hparams& hp,
                                                     ggml_type fc1_weight_type) {
-    return hp.model_type == SAM3_MODEL_SAM3 && fc1_weight_type == GGML_TYPE_BF16;
+    return hp.model_type == SAM3_MODEL_SAM3 &&
+           (fc1_weight_type == GGML_TYPE_BF16 || fc1_weight_type == GGML_TYPE_Q4_1 ||
+            fc1_weight_type == GGML_TYPE_Q8_0);
 }
 
 static bool sam3_vit_mlp_flat_chain_enabled(const sam3_hparams& hp,

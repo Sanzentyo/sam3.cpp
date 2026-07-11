@@ -17531,6 +17531,21 @@ static bool sam3_pcs_premask_nms_enabled() {
     return !sam3_getenv("SAM3_DISABLE_PCS_PREMASK_NMS").has_value();
 }
 
+[[nodiscard]] static bool sam3_should_alias_pcs_fpn_inputs(ggml_backend_t backend) {
+    if (sam3_getenv("SAM3_DISABLE_PCS_FPN_ALIAS_INPUTS").has_value()) {
+        return false;
+    }
+    if (sam3_getenv("SAM3_ENABLE_PCS_FPN_ALIAS_INPUTS").has_value()) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    return ggml_backend_is_cuda(backend);
+#else
+    GGML_UNUSED(backend);
+    return false;
+#endif
+}
+
 // Bilinear interpolation of a flat mask [H_in * W_in] to [H_out * W_out].
 // Uses double for coordinate math to match PyTorch F.interpolate precision.
 static std::vector<float> sam3_bilinear_interpolate(
@@ -17896,7 +17911,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     //   4. Mark outputs (ggml_set_output)
     //   5. Allocate → set input data → compute → read output data
     //   6. Free allocator + context
-    // This ensures ZERO buffer sharing between stages.
+    // Scratch storage remains stage-local. Immutable state inputs may use fresh
+    // leaf metadata that aliases their longer-lived backend buffers.
 
     // ── Pre-compute shared CPU data used by multiple stages ─────────────
     const int n_boxes = static_cast<int>(params.pos_exemplars.size() + params.neg_exemplars.size());
@@ -18540,6 +18556,10 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const size_t mask_elements = sam3_count_mul(mask_hw, mask_hw);
     const size_t mask_bytes = mask_elements * sizeof(float);
     const bool use_pcs_premask_nms = sam3_pcs_premask_nms_enabled() && !pcs_dump_dir;
+    const bool use_pcs_fpn_cpu_copy = sam3_getenv("SAM3_DISABLE_PCS_FPN_GPU_COPY").has_value();
+    const bool use_pcs_fpn_alias = !pcs_dump_dir && !use_pcs_fpn_cpu_copy &&
+                                   state.backend == model.backend &&
+                                   sam3_should_alias_pcs_fpn_inputs(model.backend);
     std::vector<float> all_masks(use_pcs_premask_nms ? 0 : sam3_count_mul(NQ, mask_elements));
     std::vector<sam3_detection> premask_dets;
     std::vector<int> premask_query_indices;
@@ -18561,17 +18581,35 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_set_name(enc_h, "seg_enc");
         ggml_set_input(enc_h);
 
-        // FPN features at 3 scales — create fresh inputs
+        // FPN features at 3 scales. The two live high-resolution inputs can use
+        // fresh leaf metadata over the immutable state buffers.
         const int H0 = H * 4;
         const int H1 = H * 2;
-        auto* fpn0 = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H0, H0, 1);
-        ggml_set_name(fpn0, "seg_fpn0");
-        ggml_set_input(fpn0);
-        auto* fpn1 = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H1, H1, 1);
-        ggml_set_name(fpn1, "seg_fpn1");
-        ggml_set_input(fpn1);
+        auto alias_fpn =
+            [&](const ggml_tensor* src, std::string_view name, int64_t side) -> ggml_tensor* {
+            if (!use_pcs_fpn_alias || src == nullptr || src->type != GGML_TYPE_F32 ||
+                src->ne[0] != D || src->ne[1] != side || src->ne[2] != side || src->ne[3] != 1 ||
+                !ggml_is_contiguous(src)) {
+                return nullptr;
+            }
+            return sam3_alias_tensor(ctx.get(), src, name);
+        };
+        auto make_fpn_input = [&](ggml_tensor*& tensor, std::string_view name, int64_t side) {
+            if (tensor != nullptr) {
+                return false;
+            }
+            tensor = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, side, side, 1);
+            sam3_set_name(tensor, name);
+            ggml_set_input(tensor);
+            return true;
+        };
+
+        auto* fpn0 = alias_fpn(state.neck_det[0], "seg_fpn0", H0);
+        const bool upload_fpn0 = make_fpn_input(fpn0, "seg_fpn0", H0);
+        auto* fpn1 = alias_fpn(state.neck_det[1], "seg_fpn1", H1);
+        const bool upload_fpn1 = make_fpn_input(fpn1, "seg_fpn1", H1);
         auto* fpn2 = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H, H, 1);
-        ggml_set_name(fpn2, "seg_fpn2");
+        sam3_set_name(fpn2, "seg_fpn2");
         ggml_set_input(fpn2);
         struct ggml_tensor* fpn_feats[3] = {fpn0, fpn1, fpn2};
 
@@ -18611,15 +18649,19 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             ggml_backend_tensor_get(src, buffer.data(), 0, bytes);
             ggml_backend_tensor_set(dst, buffer.data(), 0, bytes);
         };
-        if (sam3_getenv("SAM3_DISABLE_PCS_FPN_GPU_COPY")) {
-            upload_fpn_cpu(state.neck_det[0], fpn0, sam3_count_mul(D, H0, H0) * sizeof(float));
-            upload_fpn_cpu(state.neck_det[1], fpn1, sam3_count_mul(D, H1, H1) * sizeof(float));
+        if (use_pcs_fpn_cpu_copy) {
+            if (upload_fpn0) {
+                upload_fpn_cpu(state.neck_det[0], fpn0, sam3_count_mul(D, H0, H0) * sizeof(float));
+            }
+            if (upload_fpn1) {
+                upload_fpn_cpu(state.neck_det[1], fpn1, sam3_count_mul(D, H1, H1) * sizeof(float));
+            }
             upload_fpn_cpu(state.neck_det[2], fpn2, sam3_count_mul(D, H, H) * sizeof(float));
         } else {
-            if (fpn0->buffer) {
+            if (upload_fpn0 && fpn0->buffer) {
                 sam3_backend_tensor_copy_async(model.backend, state.neck_det[0], fpn0);
             }
-            if (fpn1->buffer) {
+            if (upload_fpn1 && fpn1->buffer) {
                 sam3_backend_tensor_copy_async(model.backend, state.neck_det[1], fpn1);
             }
             if (fpn2->buffer) {

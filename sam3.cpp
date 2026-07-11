@@ -1973,6 +1973,8 @@ struct sam3_tracker {
     ggml_backend_buffer_t pe_backend_buf = nullptr;
     int cached_pe_backend_feat_size = 0;
     struct ggml_tensor* cached_src_pos_tensor = nullptr;
+    struct ggml_tensor* cached_mem_prompt_pos_tensor = nullptr;
+    const sam3_model* cached_mem_prompt_pos_model = nullptr;
     struct ggml_tensor* cached_rope_q_tensor = nullptr;
     struct ggml_tensor* cached_rope_head_q_tensor = nullptr;
     struct ggml_tensor* cached_rope_k_tensor = nullptr;
@@ -19967,6 +19969,12 @@ struct sam31_mux_dec_result {
 #endif
 }
 
+[[nodiscard]] static bool sam3_should_stage_prop_prompt_on_device(ggml_backend_t backend) {
+    return sam3_should_alias_prop_inputs(backend,
+                                         "SAM3_ENABLE_PROP_PROMPT_DEVICE_STAGING",
+                                         "SAM3_DISABLE_PROP_PROMPT_DEVICE_STAGING");
+}
+
 [[nodiscard]] static ggml_tensor* sam3_sam_dec_1x1_project_whcb(struct ggml_context* ctx,
                                                                 ggml_tensor* feat_cwhb,
                                                                 ggml_tensor* weight,
@@ -21598,10 +21606,18 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     const int rope_k_tokens_per_slot =
         hp.has_perceiver ? (hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d) : N;
     const int rope_k_slots = std::max(1, hp.num_maskmem);
+    const bool memory_prompt_pos_cache_enabled =
+        hp.model_type == SAM3_MODEL_SAM3 && !hp.has_perceiver &&
+        sam3_should_stage_prop_prompt_on_device(model.backend);
+    const bool memory_prompt_pos_cache_matches =
+        memory_prompt_pos_cache_enabled ? tracker.cached_mem_prompt_pos_tensor != nullptr &&
+                                              tracker.cached_mem_prompt_pos_model == &model
+                                        : tracker.cached_mem_prompt_pos_tensor == nullptr &&
+                                              tracker.cached_mem_prompt_pos_model == nullptr;
 
     if (tracker.pe_backend_ctx && tracker.pe_backend_buf && tracker.cached_src_pos_tensor &&
         tracker.cached_rope_q_tensor && tracker.cached_rope_head_q_tensor &&
-        tracker.cached_pe_backend_feat_size == H &&
+        tracker.cached_pe_backend_feat_size == H && memory_prompt_pos_cache_matches &&
         (!rope_k_backend_cache_enabled ||
          (tracker.cached_rope_k_tensor &&
           tracker.cached_rope_k_tokens_per_slot == rope_k_tokens_per_slot &&
@@ -21620,6 +21636,8 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     sam3_reset_backend_buffer(tracker.pe_backend_buf);
     sam3_reset_context(tracker.pe_backend_ctx);
     tracker.cached_src_pos_tensor = nullptr;
+    tracker.cached_mem_prompt_pos_tensor = nullptr;
+    tracker.cached_mem_prompt_pos_model = nullptr;
     tracker.cached_rope_q_tensor = nullptr;
     tracker.cached_rope_head_q_tensor = nullptr;
     tracker.cached_rope_k_tensor = nullptr;
@@ -21639,6 +21657,11 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     tracker.cached_src_pos_tensor =
         ggml_new_tensor_3d(tracker.pe_backend_ctx, GGML_TYPE_F32, D, N, 1);
     ggml_set_name(tracker.cached_src_pos_tensor, "tracker_src_pos_cache");
+    if (memory_prompt_pos_cache_enabled) {
+        tracker.cached_mem_prompt_pos_tensor = ggml_new_tensor_3d(
+            tracker.pe_backend_ctx, GGML_TYPE_F32, hp.mem_out_dim, N, hp.num_maskmem);
+        ggml_set_name(tracker.cached_mem_prompt_pos_tensor, "tracker_mem_prompt_pos_cache");
+    }
     tracker.cached_rope_q_tensor =
         ggml_new_tensor_3d(tracker.pe_backend_ctx, GGML_TYPE_F32, 2, half_d, N);
     ggml_set_name(tracker.cached_rope_q_tensor, "tracker_rope_q_cache");
@@ -21646,17 +21669,20 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
         ggml_new_tensor_3d(tracker.pe_backend_ctx, GGML_TYPE_F32, 2, half_head_d, N);
     ggml_set_name(tracker.cached_rope_head_q_tensor, "tracker_rope_head_q_cache");
     if (rope_k_backend_cache_enabled) {
-        tracker.cached_rope_k_tensor = ggml_new_tensor_3d(tracker.pe_backend_ctx,
-                                                          GGML_TYPE_F32,
-                                                          2,
-                                                          half_d,
-                                                          rope_k_tokens_per_slot * rope_k_slots);
+        tracker.cached_rope_k_tensor =
+            ggml_new_tensor_3d(tracker.pe_backend_ctx,
+                               GGML_TYPE_F32,
+                               2,
+                               half_d,
+                               sam3_dim_mul(rope_k_tokens_per_slot, rope_k_slots));
         ggml_set_name(tracker.cached_rope_k_tensor, "tracker_rope_k_cache");
     }
 
     tracker.pe_backend_buf = ggml_backend_alloc_ctx_tensors(tracker.pe_backend_ctx, model.backend);
     if (!tracker.pe_backend_buf) {
         tracker.cached_src_pos_tensor = nullptr;
+        tracker.cached_mem_prompt_pos_tensor = nullptr;
+        tracker.cached_mem_prompt_pos_model = nullptr;
         tracker.cached_rope_q_tensor = nullptr;
         tracker.cached_rope_head_q_tensor = nullptr;
         tracker.cached_rope_k_tensor = nullptr;
@@ -21698,6 +21724,32 @@ static void sam3_ensure_tracker_pe_backend_caches(sam3_tracker& tracker,
     const auto& axial_cis_head = sam3_tracker_axial_cis_head_reord(tracker);
     ggml_backend_tensor_set(
         tracker.cached_src_pos_tensor, sinpe_256.data(), 0, sinpe_256.size() * sizeof(float));
+    if (memory_prompt_pos_cache_enabled && tracker.cached_mem_prompt_pos_tensor != nullptr) {
+        if (sam3_ensure_prompt_pos_cpu_cache(model)) {
+            const int MD = hp.mem_out_dim;
+            const auto& sinpe_64 = sam3_tracker_sinpe_64(tracker);
+            std::vector<float> memory_prompt_pos(sam3_count_mul(MD, N));
+            const size_t prompt_pos_slice_bytes = memory_prompt_pos.size() * sizeof(float);
+            for (int tpos_idx = 0; tpos_idx < hp.num_maskmem; ++tpos_idx) {
+                const int enc_idx = hp.num_maskmem - tpos_idx - 1;
+                const float* tpos = model.mem_tpos_cpu.data() + sam3_count_mul(enc_idx, MD);
+                for (int n = 0; n < N; ++n) {
+                    for (int d = 0; d < MD; ++d) {
+                        const size_t idx = static_cast<size_t>(d) + sam3_count_mul(n, MD);
+                        memory_prompt_pos[idx] = sinpe_64[idx] + tpos[d];
+                    }
+                }
+                ggml_backend_tensor_set(tracker.cached_mem_prompt_pos_tensor,
+                                        memory_prompt_pos.data(),
+                                        static_cast<size_t>(tpos_idx) * prompt_pos_slice_bytes,
+                                        prompt_pos_slice_bytes);
+            }
+            tracker.cached_mem_prompt_pos_model = &model;
+        } else {
+            tracker.cached_mem_prompt_pos_tensor = nullptr;
+            tracker.cached_mem_prompt_pos_model = nullptr;
+        }
+    }
     ggml_backend_tensor_set(
         tracker.cached_rope_q_tensor, axial_cis.data(), 0, axial_cis.size() * sizeof(float));
     ggml_backend_tensor_set(tracker.cached_rope_head_q_tensor,
@@ -21933,7 +21985,7 @@ static sam3_prop_output sam31_propagate_single(
             }
         }
         if (!can_use_all_selected_slots ||
-            static_cast<int>(precomputed_spatial_kv_slots.size()) != n_sel) {
+            precomputed_spatial_kv_slots.size() != static_cast<size_t>(n_sel)) {
             precomputed_spatial_kv_slots.clear();
         }
     }
@@ -22788,41 +22840,85 @@ static sam3_prop_output sam3_propagate_single(
         use_perceiver ? (hp.perceiver_n_latents_1d + hp.perceiver_n_latents_2d) : N;
 
     const int n_sel = static_cast<int>(sel.size());
-    std::vector<std::vector<float>> slot_feats_storage(n_sel);
-    std::vector<std::vector<float>> slot_pes_storage(n_sel);
-    std::vector<const std::vector<float>*> slot_feats(n_sel, nullptr);
-    std::vector<const std::vector<float>*> slot_pes(n_sel, nullptr);
-    std::vector<int> spatial_tpos(n_sel, 1);  // default t_pos=1 for non-cond
+    std::vector<int> spatial_tpos(static_cast<size_t>(n_sel), 1);
+    for (int s = 0; s < n_sel; ++s) {
+        spatial_tpos[static_cast<size_t>(s)] =
+            mem_bank[sel[static_cast<size_t>(s)]].is_cond_frame ? 0 : (n_sel - s);
+    }
+
+    // Populate immutable positional tensors before choosing how to stage the memory prompt.
+    SAM3_PROFILE_CPU_START(prop_rope_cache);
+    const int64_t prop_rope_cache_t0 = ggml_time_us();
+    sam3_ensure_tracker_pe_caches(tracker, hp, H);
+    sam3_ensure_tracker_pe_backend_caches(tracker, model, H);
+    SAM3_PROFILE_CPU_END(prop_rope_cache);
+    sam3_add_propagate_timing(&sam3_propagate_timing::rope_cache_ms, prop_rope_cache_t0);
+
+    const auto valid_device_spatial_slot = [MD, H](const sam3_memory_slot& slot) {
+        const auto* tensor = slot.spatial_feats;
+        return tensor != nullptr && tensor->data != nullptr && tensor->buffer != nullptr &&
+               tensor->type == GGML_TYPE_F32 && tensor->ne[0] == MD && tensor->ne[1] == H &&
+               tensor->ne[2] == H && tensor->ne[3] == 1 && ggml_is_contiguous(tensor) &&
+               slot.spatial_pe == nullptr && slot.spatial_pe_cpu.empty();
+    };
+    const bool device_prompt_staging_requested =
+        hp.model_type == SAM3_MODEL_SAM3 && !use_perceiver &&
+        sam3_should_stage_prop_prompt_on_device(model.backend);
+    const bool use_device_prompt_staging =
+        device_prompt_staging_requested && tracker.cached_mem_prompt_pos_tensor != nullptr &&
+        tracker.cached_mem_prompt_pos_model == &model &&
+        tracker.cached_mem_prompt_pos_tensor->data != nullptr &&
+        tracker.cached_mem_prompt_pos_tensor->buffer != nullptr &&
+        tracker.cached_mem_prompt_pos_tensor->type == GGML_TYPE_F32 &&
+        tracker.cached_mem_prompt_pos_tensor->ne[0] == MD &&
+        tracker.cached_mem_prompt_pos_tensor->ne[1] == N &&
+        tracker.cached_mem_prompt_pos_tensor->ne[2] == hp.num_maskmem &&
+        std::ranges::all_of(
+            spatial_tpos,
+            [&](int tpos_idx) { return tpos_idx >= 0 && tpos_idx < hp.num_maskmem; }) &&
+        std::ranges::all_of(sel, [&](int slot_idx) {
+            return valid_device_spatial_slot(mem_bank[static_cast<size_t>(slot_idx)]);
+        });
+
+    const int host_prompt_slot_count = use_device_prompt_staging ? 0 : n_sel;
+    std::vector<std::vector<float>> slot_feats_storage(static_cast<size_t>(host_prompt_slot_count));
+    std::vector<std::vector<float>> slot_pes_storage(static_cast<size_t>(host_prompt_slot_count));
+    std::vector<const std::vector<float>*> slot_feats(static_cast<size_t>(host_prompt_slot_count),
+                                                      nullptr);
+    std::vector<const std::vector<float>*> slot_pes(static_cast<size_t>(host_prompt_slot_count),
+                                                    nullptr);
     SAM3_PROFILE_CPU_START(prop_memory_slot_read);
     const int64_t prop_memory_slot_read_t0 = ggml_time_us();
-    for (int s = 0; s < n_sel; ++s) {
+    for (int s = 0; s < host_prompt_slot_count; ++s) {
         const size_t slot_count = sam3_count_mul(MD, N_per_slot);
-        const auto& slot = mem_bank[sel[s]];
+        const auto& slot = mem_bank[sel[static_cast<size_t>(s)]];
         if (slot.spatial_feats_cpu.size() == slot_count) {
-            slot_feats[s] = &slot.spatial_feats_cpu;
+            slot_feats[static_cast<size_t>(s)] = &slot.spatial_feats_cpu;
         } else {
-            slot_feats_storage[s].resize(slot_count);
-            ggml_backend_tensor_get(
-                slot.spatial_feats, slot_feats_storage[s].data(), 0, slot_count * sizeof(float));
-            slot_feats[s] = &slot_feats_storage[s];
+            slot_feats_storage[static_cast<size_t>(s)].resize(slot_count);
+            ggml_backend_tensor_get(slot.spatial_feats,
+                                    slot_feats_storage[static_cast<size_t>(s)].data(),
+                                    0,
+                                    slot_count * sizeof(float));
+            slot_feats[static_cast<size_t>(s)] = &slot_feats_storage[static_cast<size_t>(s)];
         }
         if (slot.spatial_pe_cpu.size() == slot_count) {
-            slot_pes[s] = &slot.spatial_pe_cpu;
+            slot_pes[static_cast<size_t>(s)] = &slot.spatial_pe_cpu;
         } else if (slot.spatial_pe) {
-            slot_pes_storage[s].resize(slot_count);
-            ggml_backend_tensor_get(
-                slot.spatial_pe, slot_pes_storage[s].data(), 0, slot_count * sizeof(float));
-            slot_pes[s] = &slot_pes_storage[s];
+            slot_pes_storage[static_cast<size_t>(s)].resize(slot_count);
+            ggml_backend_tensor_get(slot.spatial_pe,
+                                    slot_pes_storage[static_cast<size_t>(s)].data(),
+                                    0,
+                                    slot_count * sizeof(float));
+            slot_pes[static_cast<size_t>(s)] = &slot_pes_storage[static_cast<size_t>(s)];
         } else {
-            sam3_ensure_tracker_pe_caches(tracker, hp, H);
             if (use_perceiver) {
                 // For perceiver: zeros for 1D tokens, sinusoidal for 2D tokens
-                slot_pes[s] = &sam3_tracker_perceiver_pe_64(tracker);
+                slot_pes[static_cast<size_t>(s)] = &sam3_tracker_perceiver_pe_64(tracker);
             } else {
-                slot_pes[s] = &sam3_tracker_sinpe_64(tracker);
+                slot_pes[static_cast<size_t>(s)] = &sam3_tracker_sinpe_64(tracker);
             }
         }
-        spatial_tpos[s] = mem_bank[sel[s]].is_cond_frame ? 0 : (n_sel - s);
     }
     SAM3_PROFILE_CPU_END(prop_memory_slot_read);
     sam3_add_propagate_timing(&sam3_propagate_timing::memory_slot_read_ms,
@@ -22853,7 +22949,7 @@ static sam3_prop_output sam3_propagate_single(
     sam3_add_propagate_timing(&sam3_propagate_timing::prompt_build_ms, prop_prompt_build_t0);
     std::vector<const sam3_memory_slot*> precomputed_spatial_kv_slots;
     std::vector<int> precomputed_spatial_tpos;
-    if (!use_perceiver && sam3_static_mem_ca_kv_cache_enabled()) {
+    if (!use_device_prompt_staging && !use_perceiver && sam3_static_mem_ca_kv_cache_enabled()) {
         precomputed_spatial_kv_slots.reserve(static_cast<size_t>(n_sel));
         precomputed_spatial_tpos.reserve(static_cast<size_t>(n_sel));
         bool can_use_all_selected_slots = pd.M_spatial == n_sel * N;
@@ -22888,29 +22984,35 @@ static sam3_prop_output sam3_propagate_single(
             precomputed_spatial_tpos.clear();
         }
     }
+    const int spatial_prompt_tokens = use_device_prompt_staging ? n_sel * N : pd.M_spatial;
+    const int graph_prompt_tokens = spatial_prompt_tokens + pd.num_obj_ptr_tokens;
+    if (sam3_getenv("SAM3_PROFILE_PROP_PROMPT_DEVICE_STAGING").has_value()) {
+        std::println(stderr,
+                     "SAM3_PROFILE_PROP_PROMPT_DEVICE_STAGING selected={} slots={} "
+                     "spatial_tokens={} pointer_tokens={} host_prompt_bytes={}",
+                     use_device_prompt_staging ? "device" : "host",
+                     n_sel,
+                     spatial_prompt_tokens,
+                     pd.num_obj_ptr_tokens,
+                     pd.prompt.size() * 2 * sizeof(float));
+    }
 
     // ── RoPE frequencies (cached) ──────────────────────────────────────
-    SAM3_PROFILE_CPU_START(prop_rope_cache);
-    const int64_t prop_rope_cache_t0 = ggml_time_us();
-    sam3_ensure_tracker_pe_caches(tracker, hp, H);
-    sam3_ensure_tracker_pe_backend_caches(tracker, model, H);
-    SAM3_PROFILE_CPU_END(prop_rope_cache);
-    sam3_add_propagate_timing(&sam3_propagate_timing::rope_cache_ms, prop_rope_cache_t0);
     const int half_d = D / 2;  // 128
     const auto& rope_q_reord = sam3_tracker_axial_cis_reord(tracker);
     const bool use_cached_rope_k =
-        sam3_prop_rope_k_backend_cache_enabled() && pd.M_spatial > 0 &&
+        sam3_prop_rope_k_backend_cache_enabled() && spatial_prompt_tokens > 0 &&
         tracker.cached_rope_k_tensor != nullptr &&
         tracker.cached_rope_k_tokens_per_slot == N_per_slot &&
         tracker.cached_rope_k_slots >= n_sel &&
-        pd.M_spatial <=
+        spatial_prompt_tokens <=
             sam3_count_mul(tracker.cached_rope_k_tokens_per_slot, tracker.cached_rope_k_slots);
     // For cross-attn K: build rope_k_data for all M_spatial tokens
     std::vector<float> rope_k_data;
     SAM3_PROFILE_CPU_START(prop_rope_k_build);
     const int64_t prop_rope_k_build_t0 = ggml_time_us();
-    if (pd.M_spatial > 0 && !use_cached_rope_k) {
-        rope_k_data.resize(sam3_count_mul(2, half_d, pd.M_spatial));
+    if (spatial_prompt_tokens > 0 && !use_cached_rope_k) {
+        rope_k_data.resize(sam3_count_mul(2, half_d, spatial_prompt_tokens));
         if (use_perceiver) {
             // EdgeTAM perceiver: each frame has N_per_slot=512 tokens.
             // First 256 (1D latents): identity RoPE (cos=1, sin=0).
@@ -22935,7 +23037,7 @@ static sam3_prop_output sam3_propagate_single(
             }
         } else {
             // Standard: repeat HxH axial CIS for each memory frame
-            for (int s = 0; s < pd.M_spatial / N; ++s) {
+            for (int s = 0; s < spatial_prompt_tokens / N; ++s) {
                 std::copy_n(rope_q_reord.data(),
                             sam3_count_mul(D, N),
                             rope_k_data.data() + static_cast<ptrdiff_t>(sam3_count_mul(s, D, N)));
@@ -23029,31 +23131,79 @@ static sam3_prop_output sam3_propagate_single(
         alias_3d(tracker.cached_src_pos_tensor, "src_pos", alias_prop_constants, D, N, 1);
     const bool upload_src_pos = make_input_3d(src_pos_t, "src_pos", D, N, 1);
 
-    // Prompt and prompt_pos
-    auto* prompt_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, pd.M_total, 1);
+    // Prompt and prompt_pos. The device-staging path keeps the exact full prompt shape, but
+    // fills each spatial slice from its already-resident memory slot instead of rebuilding and
+    // uploading the concatenation through host memory.
+    auto* prompt_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, graph_prompt_tokens, 1);
     ggml_set_name(prompt_t, "prompt");
     ggml_set_input(prompt_t);
-    auto* prompt_pos_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, pd.M_total, 1);
+    auto* prompt_pos_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, graph_prompt_tokens, 1);
     ggml_set_name(prompt_pos_t, "prompt_pos");
     ggml_set_input(prompt_pos_t);
+
+    struct prompt_device_copy {
+        ggml_tensor* src = nullptr;
+        ggml_tensor* dst = nullptr;
+    };
+    std::vector<prompt_device_copy> prompt_device_copies;
+    if (use_device_prompt_staging) {
+        prompt_device_copies.reserve(static_cast<size_t>(n_sel) * 2);
+        const size_t spatial_slice_bytes = sam3_count_mul(MD, N, sizeof(float));
+        const size_t contiguous_slice_nb2 = spatial_slice_bytes;
+        for (int s = 0; s < n_sel; ++s) {
+            const auto& slot = mem_bank[sel[static_cast<size_t>(s)]];
+            auto* feature_src = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, N, 1);
+            feature_src->buffer = slot.spatial_feats->buffer;
+            feature_src->data = slot.spatial_feats->data;
+            sam3_set_name(feature_src, std::format("prompt_feature_src{}", s));
+            auto* feature_dst = ggml_view_3d(ctx0.get(),
+                                             prompt_t,
+                                             MD,
+                                             N,
+                                             1,
+                                             prompt_t->nb[1],
+                                             contiguous_slice_nb2,
+                                             (static_cast<size_t>(s) * spatial_slice_bytes));
+            sam3_set_name(feature_dst, std::format("prompt_feature_dst{}", s));
+            prompt_device_copies.push_back({.src = feature_src, .dst = feature_dst});
+
+            const int tpos_idx = spatial_tpos[static_cast<size_t>(s)];
+            auto* pos_src = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, MD, N, 1);
+            pos_src->buffer = tracker.cached_mem_prompt_pos_tensor->buffer;
+            pos_src->data = static_cast<char*>(tracker.cached_mem_prompt_pos_tensor->data) +
+                            (static_cast<size_t>(tpos_idx) * spatial_slice_bytes);
+            sam3_set_name(pos_src, std::format("prompt_pos_src{}", s));
+            auto* pos_dst = ggml_view_3d(ctx0.get(),
+                                         prompt_pos_t,
+                                         MD,
+                                         N,
+                                         1,
+                                         prompt_pos_t->nb[1],
+                                         contiguous_slice_nb2,
+                                         (static_cast<size_t>(s) * spatial_slice_bytes));
+            sam3_set_name(pos_dst, std::format("prompt_pos_dst{}", s));
+            prompt_device_copies.push_back({.src = pos_src, .dst = pos_dst});
+        }
+    }
 
     // RoPE frequencies
     auto* rope_q_t =
         alias_3d(tracker.cached_rope_q_tensor, "rope_q", alias_prop_constants, 2, half_d, N);
     const bool upload_rope_q = make_input_3d(rope_q_t, "rope_q", 2, half_d, N);
     struct ggml_tensor* rope_k_t = nullptr;
-    if (pd.M_spatial > 0) {
+    if (spatial_prompt_tokens > 0) {
         if (use_cached_rope_k) {
             rope_k_t = ggml_view_3d(ctx0.get(),
                                     tracker.cached_rope_k_tensor,
                                     2,
                                     half_d,
-                                    pd.M_spatial,
+                                    spatial_prompt_tokens,
                                     tracker.cached_rope_k_tensor->nb[1],
                                     tracker.cached_rope_k_tensor->nb[2],
                                     0);
         } else {
-            rope_k_t = ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_d, pd.M_spatial);
+            rope_k_t =
+                ggml_new_tensor_3d(ctx0.get(), GGML_TYPE_F32, 2, half_d, spatial_prompt_tokens);
             ggml_set_input(rope_k_t);
         }
         ggml_set_name(rope_k_t, "rope_k");
@@ -23159,19 +23309,43 @@ static sam3_prop_output sam3_propagate_single(
     if (!reserve_and_alloc_graph(galloc.get(), graph)) {
         return output;
     }
+    if (use_device_prompt_staging) {
+        for (const auto& copy : prompt_device_copies) {
+            if (ggml_backend_view_init(copy.dst) != GGML_STATUS_SUCCESS) {
+                return output;
+            }
+        }
+    }
     SAM3_PROFILE_CPU_END(prop_graph_alloc);
     sam3_add_propagate_timing(&sam3_propagate_timing::graph_alloc_ms, prop_graph_alloc_t0);
 
     // Upload prompt data
     SAM3_PROFILE_CPU_START(prop_input_upload);
     const int64_t prop_input_upload_t0 = ggml_time_us();
-    {
-        const int64_t upload_prompt_t0 = ggml_time_us();
+    const int64_t upload_prompt_t0 = ggml_time_us();
+    if (use_device_prompt_staging) {
+        for (const auto& copy : prompt_device_copies) {
+            sam3_backend_tensor_copy_async(model.backend, copy.src, copy.dst);
+        }
+        if (!pd.prompt.empty()) {
+            const size_t pointer_offset = sam3_count_mul(spatial_prompt_tokens, MD, sizeof(float));
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 prompt_t,
+                                                 pd.prompt.data(),
+                                                 pointer_offset,
+                                                 pd.prompt.size() * sizeof(float));
+            sam3_backend_tensor_set_prefer_async(model.backend,
+                                                 prompt_pos_t,
+                                                 pd.prompt_pos.data(),
+                                                 pointer_offset,
+                                                 pd.prompt_pos.size() * sizeof(float));
+        }
+    } else {
         ggml_backend_tensor_set(prompt_t, pd.prompt.data(), 0, pd.prompt.size() * sizeof(float));
         ggml_backend_tensor_set(
             prompt_pos_t, pd.prompt_pos.data(), 0, pd.prompt_pos.size() * sizeof(float));
-        sam3_add_propagate_timing(&sam3_propagate_timing::input_prompt_upload_ms, upload_prompt_t0);
     }
+    sam3_add_propagate_timing(&sam3_propagate_timing::input_prompt_upload_ms, upload_prompt_t0);
     if (upload_rope_q && tracker.cached_rope_q_tensor) {
         const int64_t upload_rope_t0 = ggml_time_us();
         sam3_backend_tensor_copy_async(model.backend, tracker.cached_rope_q_tensor, rope_q_t);
@@ -25435,6 +25609,8 @@ void sam3_tracker_reset(sam3_tracker& tracker) {
     sam3_reset_backend_buffer(tracker.pe_backend_buf);
     sam3_reset_context(tracker.pe_backend_ctx);
     tracker.cached_src_pos_tensor = nullptr;
+    tracker.cached_mem_prompt_pos_tensor = nullptr;
+    tracker.cached_mem_prompt_pos_model = nullptr;
     tracker.cached_rope_q_tensor = nullptr;
     tracker.cached_rope_head_q_tensor = nullptr;
     tracker.cached_rope_k_tensor = nullptr;

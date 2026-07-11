@@ -14825,6 +14825,23 @@ static struct ggml_tensor* sam3_compute_box_rpb(
     const int H = feat_hw;
     const auto& tensors = model.tensors;
     const bool dump_rpb = layer_idx >= 0 && sam3_getenv("SAM3_PCS_DUMP_DIR").has_value();
+    bool direct_layout = false;
+#ifdef GGML_USE_CUDA
+    direct_layout = ggml_backend_is_cuda(model.backend) &&
+                    !sam3_getenv("SAM3_DISABLE_DDEC_RPB_DIRECT_LAYOUT").has_value();
+#endif
+    const bool profile_direct_layout =
+        sam3_getenv("SAM3_PROFILE_DDEC_RPB_DIRECT_LAYOUT").has_value();
+    const bool name_profile_nodes =
+        profile_direct_layout || sam3_getenv("GGML_CUDA_PROFILE_NODES").has_value();
+    if (profile_direct_layout) {
+        fprintf(stderr,
+                "SAM3_PROFILE_DDEC_RPB_DIRECT_LAYOUT layer=%d selected=%s nq=%lld hw=%d\n",
+                layer_idx,
+                direct_layout ? "direct" : "legacy",
+                static_cast<long long>(NQ),
+                feat_hw);
+    }
 
     // ── 1. Convert cxcywh → xyxy ─────────────────────────────────────────
     // ggml_view_2d on strided data is non-contiguous — ggml_scale requires contiguous.
@@ -14951,29 +14968,56 @@ static struct ggml_tensor* sam3_compute_box_rpb(
     }
 
     // ── 5. Outer sum: B[nh, w, h, q] = rpb_y[nh, h, q] + rpb_x[nh, w, q] ─
-    // Reshape for broadcasting:
-    //   rpb_y → [NH, 1, H, NQ]
-    //   rpb_x → [NH, W, 1, NQ]
-    //
-    // Keep W in ne[1] so reshaping [NH, W, H, NQ] → [NH, H*W, NQ, 1]
-    // preserves Python's flatten(H, W) order where W is the fast spatial axis.
-    auto* rpb_y_4d = ggml_reshape_4d(ctx, rpb_y, NH, 1, H, NQ);
-    auto* rpb_x_4d = ggml_reshape_4d(ctx, rpb_x, NH, W, 1, NQ);
+    // The rollback branch materializes both axes in head-first layout. The direct branch
+    // materializes only y after moving W to the fast axis of the final attention layout.
+    struct ggml_tensor* rpb = nullptr;
+    if (!direct_layout) {
+        auto* rpb_y_4d = ggml_reshape_4d(ctx, rpb_y, NH, 1, H, NQ);
+        auto* rpb_x_4d = ggml_reshape_4d(ctx, rpb_x, NH, W, 1, NQ);
 
-    // ggml_add broadcasts: where one dim is 1, the other is used
-    auto* rpb_hw = ggml_repeat(ctx, rpb_y_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, NH, W, H, NQ));
-    auto* rpb_hw_x =
-        ggml_repeat(ctx, rpb_x_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, NH, W, H, NQ));
-    auto* rpb = ggml_add(ctx, rpb_hw, rpb_hw_x);  // [NH, W, H, NQ]
+        // ggml_add broadcasts: where one dim is 1, the other is used
+        auto* rpb_hw =
+            ggml_repeat(ctx, rpb_y_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, NH, W, H, NQ));
+        auto* rpb_hw_x =
+            ggml_repeat(ctx, rpb_x_4d, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, NH, W, H, NQ));
+        rpb = ggml_add(ctx, rpb_hw, rpb_hw_x);  // [NH, W, H, NQ]
 
-    // ── 6. Reshape to object-query mask [H*W, NQ, NH, 1] ────────────────
-    // Current: [NH, W, H, NQ]. Need: [N_kv=H*W, NQ, NH, B=1]
-    rpb = ggml_reshape_4d(ctx, rpb, NH, sam3_dim_mul(H, W), NQ, 1);
-    rpb = ggml_cont(ctx, ggml_permute(ctx, rpb, 2, 0, 1, 3));  // [H*W, NQ, NH, 1]
+        // ── 6. Reshape to object-query mask [H*W, NQ, NH, 1] ────────────────
+        // Current: [NH, W, H, NQ]. Need: [N_kv=H*W, NQ, NH, B=1]
+        rpb = ggml_reshape_4d(ctx, rpb, NH, sam3_dim_mul(H, W), NQ, 1);
+        rpb = ggml_cont(ctx, ggml_permute(ctx, rpb, 2, 0, 1, 3));  // [H*W, NQ, NH, 1]
+    } else {
+        // Put both compact axes in the final attention layout first:
+        //   y: [NH,H,NQ,1] -> [1,H,NQ,NH]
+        //   x: [NH,W,NQ,1] -> [W,1,NQ,NH]
+        // Keep y as a stride view; compacting x makes the broadcast loads coalesced.
+        // Repeating only y and adding x in-place preserves the exact y + x operand order,
+        // while eliminating one 31.6 MiB repeat and the final 31.6 MiB permutation copy.
+        auto* rpb_y_final =
+            ggml_permute(ctx, ggml_reshape_4d(ctx, rpb_y, NH, H, NQ, 1), 3, 1, 2, 0);
+        auto* rpb_x_final = ggml_cont(
+            ctx, ggml_permute(ctx, ggml_reshape_4d(ctx, rpb_x, NH, W, NQ, 1), 3, 0, 2, 1));
+        auto* rpb_y_full =
+            ggml_repeat(ctx, rpb_y_final, ggml_new_tensor_4d(ctx, GGML_TYPE_F32, W, H, NQ, NH));
+        rpb = ggml_add_inplace(ctx, rpb_y_full, rpb_x_final);  // [W, H, NQ, NH]
+        if (name_profile_nodes) {
+            sam3_set_name(rpb_y_final, std::format("ddec_rpb_y_final_{}", layer_idx));
+            sam3_set_name(rpb_x_final, std::format("ddec_rpb_x_final_{}", layer_idx));
+            sam3_set_name(rpb_y_full, std::format("ddec_rpb_y_repeat_{}", layer_idx));
+            sam3_set_name(rpb, std::format("ddec_rpb_outer_sum_{}", layer_idx));
+        }
+
+        // [W,H,NQ,NH] is already contiguous in flash-attention mask order.
+        rpb = ggml_reshape_4d(ctx, rpb, sam3_dim_mul(H, W), NQ, NH, 1);
+    }
     if (layer_idx >= 0) {
         sam3_set_name(rpb, std::format("ddec_rpb_mask_obj_{}", layer_idx));
         if (dump_rpb) {
             ggml_set_output(rpb);
+            // The direct-layout result is a reshape view of the in-place ADD buffer.
+            if (rpb->view_src != nullptr) {
+                ggml_set_output(rpb->view_src);
+            }
         }
     }
 

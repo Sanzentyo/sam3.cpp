@@ -24204,7 +24204,8 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
                                int mask_w,
                                int frame_idx,
                                bool is_cond,
-                               float obj_score) {
+                               float obj_score,
+                               std::span<float> mutable_owned_mask_logits = {}) {
     const auto& hp = model.hparams;
     if (hp.is_sam3_1()) {
         return sam31_encode_memory(tracker,
@@ -24253,13 +24254,68 @@ static bool sam3_encode_memory(sam3_tracker& tracker,
     const float* m_interp_data = nullptr;
     size_t m_interp_size = 0;
     if (direct_interpol_mask) {
-        m_interp.assign(mask_logits, mask_logits + sam3_count_mul(mask_w, mask_h));
-        for (auto& v : m_interp) {
+        const size_t direct_mask_count = sam3_count_mul(mask_w, mask_h);
+        const auto transform_mask_logit = [sig_scale, sig_bias](float& v) {
             const float s = 1.0f / (1.0f + expf(-v));
             v = (s * sig_scale) + sig_bias;
+        };
+        const bool use_inplace_mask =
+            !sam3_getenv("SAM3_DISABLE_INPLACE_INITIAL_MEM_MASK").has_value() &&
+            mutable_owned_mask_logits.data() == mask_logits &&
+            mutable_owned_mask_logits.size() >= direct_mask_count;
+        int inplace_mask_threads = 1;
+        if (use_inplace_mask) {
+            const bool disable_parallel =
+                sam3_getenv("SAM3_DISABLE_PARALLEL_INITIAL_MASK_PREP").has_value() ||
+                sam3_getenv("SAM3_DISABLE_PARALLEL_INITIAL_MEM_MASK").has_value();
+            inplace_mask_threads =
+                disable_parallel ? 1 : sam3_preprocess_thread_count(state.n_threads, INTERPOL);
+            std::vector<float> reference;
+            const bool verify_inplace =
+                sam3_getenv("SAM3_VERIFY_INPLACE_INITIAL_MEM_MASK").has_value();
+            if (verify_inplace) {
+                reference.assign(mask_logits, mask_logits + direct_mask_count);
+                for (auto& v : reference) {
+                    transform_mask_logit(v);
+                }
+            }
+            SAM3_PROFILE_CPU_START(initial_mem_mask_inplace_transform);
+            sam3_parallel_rows(INTERPOL, inplace_mask_threads, [&](int y_begin, int y_end) {
+                const size_t begin = sam3_count_mul(y_begin, INTERPOL);
+                const size_t end = sam3_count_mul(y_end, INTERPOL);
+                for (size_t i = begin; i < end; ++i) {
+                    transform_mask_logit(mutable_owned_mask_logits[i]);
+                }
+            });
+            SAM3_PROFILE_CPU_END(initial_mem_mask_inplace_transform);
+            if (verify_inplace) {
+                const bool equal = std::memcmp(mutable_owned_mask_logits.data(),
+                                               reference.data(),
+                                               direct_mask_count * sizeof(float)) == 0;
+                std::println(stderr,
+                             "SAM3_VERIFY_INPLACE_INITIAL_MEM_MASK equal={} threads={}",
+                             equal ? 1 : 0,
+                             inplace_mask_threads);
+                if (!equal) {
+                    return false;
+                }
+            }
+            m_interp_data = mutable_owned_mask_logits.data();
+            m_interp_size = direct_mask_count;
+        } else {
+            m_interp.assign(mask_logits, mask_logits + direct_mask_count);
+            for (auto& v : m_interp) {
+                transform_mask_logit(v);
+            }
+            m_interp_data = m_interp.data();
+            m_interp_size = m_interp.size();
         }
-        m_interp_data = m_interp.data();
-        m_interp_size = m_interp.size();
+        if (sam3_getenv("SAM3_PROFILE_INPLACE_INITIAL_MEM_MASK").has_value()) {
+            std::println(stderr,
+                         "SAM3_PROFILE_INPLACE_INITIAL_MEM_MASK selected={} threads={}",
+                         use_inplace_mask ? "inplace" : "copy",
+                         use_inplace_mask ? inplace_mask_threads : 1);
+        }
     } else {
         m_hires = sam3_bilinear_interpolate(mask_logits, mask_w, mask_h, HIGH_RES, HIGH_RES);
         const bool binarize_cond_mem =
@@ -25243,6 +25299,11 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     const float obj_score_logit =
         (std::isfinite(det.obj_score_logit) && det.obj_score_logit != 0.0f) ? det.obj_score_logit
                                                                             : 10.0f;
+    const std::span<float> mutable_owned_mask_logits =
+        model.hparams.model_type == SAM3_MODEL_SAM3 && !synth_logits.empty() &&
+                memory_mask_logits == synth_logits.data()
+            ? std::span<float>(synth_logits)
+            : std::span<float>{};
     SAM3_PROFILE_CPU_START(add_detection_encode_memory);
     const int64_t encode_memory_t0 = ggml_time_us();
     if (!sam3_encode_memory(tracker,
@@ -25254,7 +25315,8 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
                             memory_mask_w,
                             fi,
                             true,
-                            obj_score_logit)) {
+                            obj_score_logit,
+                            mutable_owned_mask_logits)) {
         g_sam3_last_tracker_add_timing.memory_encode_ms =
             (ggml_time_us() - encode_memory_t0) / 1000.0;
         SAM3_PROFILE_CPU_END(add_detection_encode_memory);

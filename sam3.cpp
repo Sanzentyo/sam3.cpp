@@ -1317,6 +1317,10 @@ struct sam3_model {
     mutable GgmlBackendBufferHandle sam3_neck_pe_buffer;
     mutable std::array<int, 4> sam3_neck_pe_size = {};
     mutable int sam3_neck_pe_dim = 0;
+    mutable std::mutex pcs_fenc_bridge_mutex;
+    mutable GgmlContextHandle pcs_fenc_bridge_ctx;
+    mutable GgmlBackendBufferHandle pcs_fenc_bridge_buffer;
+    mutable struct ggml_tensor* pcs_fenc_bridge_tensor = nullptr;
     mutable std::mutex tracker_pe_cpu_cache_mutex;
     mutable std::shared_ptr<const sam3_tracker_pe_cpu_cache> tracker_pe_cpu_cache;
     mutable bool prompt_pe_cache_valid = false;
@@ -6506,6 +6510,9 @@ std::shared_ptr<sam3_model> sam3_load_model(const sam3_params& params) {
 
 void sam3_free_model(sam3_model& model) {
     model.sam31_interactive_obj_ptr_cache.reset();
+    model.pcs_fenc_bridge_tensor = nullptr;
+    model.pcs_fenc_bridge_buffer.reset();
+    model.pcs_fenc_bridge_ctx.reset();
     model.sam3_neck_pe_buffer.reset();
     model.sam3_neck_pe_ctx.reset();
     model.sam31_fused_mem_attn_sa_qkv_buffer.reset();
@@ -17585,6 +17592,18 @@ static bool sam3_pcs_direct_pixel_decoder_whcb_enabled() {
 #endif
 }
 
+[[nodiscard]] static bool sam3_should_use_pcs_fenc_gpu_bridge(ggml_backend_t backend) {
+    if (sam3_getenv("SAM3_DISABLE_PCS_FENC_GPU_BRIDGE").has_value()) {
+        return false;
+    }
+#ifdef GGML_USE_CUDA
+    return ggml_backend_is_cuda(backend);
+#else
+    GGML_UNUSED(backend);
+    return false;
+#endif
+}
+
 [[nodiscard]] static bool sam3_should_alias_pvs_inputs(ggml_backend_t backend) {
     if (sam3_getenv("SAM3_DISABLE_PVS_ALIAS_INPUTS").has_value()) {
         return false;
@@ -17607,6 +17626,39 @@ static bool sam3_pcs_direct_pixel_decoder_whcb_enabled() {
     return tensor != nullptr && tensor->type == GGML_TYPE_F32 && tensor->ne[0] == ne0 &&
            tensor->ne[1] == ne1 && tensor->ne[2] == ne2 && tensor->ne[3] == 1 &&
            tensor->data != nullptr && tensor->buffer != nullptr && ggml_is_contiguous(tensor);
+}
+
+[[nodiscard]] static bool sam3_ensure_pcs_fenc_gpu_bridge(const sam3_model& model,
+                                                          int64_t dim,
+                                                          int64_t spatial_tokens) {
+    if (sam3_is_contiguous_f32_4d(model.pcs_fenc_bridge_tensor, dim, spatial_tokens, 1)) {
+        return true;
+    }
+
+    model.pcs_fenc_bridge_tensor = nullptr;
+    model.pcs_fenc_bridge_buffer.reset();
+    model.pcs_fenc_bridge_ctx.reset();
+    const ggml_init_params params = {
+        .mem_size = ggml_tensor_overhead() * 2,
+        .mem_buffer = nullptr,
+        .no_alloc = true,
+    };
+    model.pcs_fenc_bridge_ctx = make_ggml_context(params);
+    if (!model.pcs_fenc_bridge_ctx) {
+        return false;
+    }
+
+    model.pcs_fenc_bridge_tensor =
+        ggml_new_tensor_3d(model.pcs_fenc_bridge_ctx.get(), GGML_TYPE_F32, dim, spatial_tokens, 1);
+    ggml_set_name(model.pcs_fenc_bridge_tensor, "pcs_fenc_gpu_bridge");
+    model.pcs_fenc_bridge_buffer = GgmlBackendBufferHandle{
+        ggml_backend_alloc_ctx_tensors(model.pcs_fenc_bridge_ctx.get(), model.backend)};
+    if (!model.pcs_fenc_bridge_buffer) {
+        model.pcs_fenc_bridge_tensor = nullptr;
+        model.pcs_fenc_bridge_ctx.reset();
+        return false;
+    }
+    return true;
 }
 
 // Bilinear interpolation of a flat mask [H_in * W_in] to [H_out * W_out].
@@ -18276,8 +18328,12 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         sam3_getenv("SAM3_ENABLE_PCS_FENC_DDEC_GPU_COPY").has_value();
     const bool use_pcs_fenc_seg_gpu_copy =
         sam3_getenv("SAM3_ENABLE_PCS_FENC_SEG_GPU_COPY").has_value();
+    const auto fenc_output_ref = sam3_getenv("SAM3_PCS_FENC_OUTPUT_REF");
+    const bool use_pcs_fenc_gpu_bridge =
+        !pcs_dump_dir && !fenc_output_ref && !use_pcs_fenc_ddec_gpu_copy &&
+        !use_pcs_fenc_seg_gpu_copy && sam3_should_use_pcs_fenc_gpu_bridge(model.backend);
     std::vector<float> fenc_output_cpu;
-    if (const auto fenc_output_ref = sam3_getenv("SAM3_PCS_FENC_OUTPUT_REF")) {
+    if (fenc_output_ref) {
         fenc_output_cpu.resize(image_feature_count);
         const std::array<int64_t, 4> expected_shape = {D, H, H, 1};
         if (!sam3_load_debug_f32(*fenc_output_ref, fenc_output_cpu, expected_shape)) {
@@ -18289,31 +18345,62 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                  static_cast<int>(fenc_output_ref->size()),
                  fenc_output_ref->data());
     }
+    std::unique_lock<std::mutex> fenc_bridge_lock;
+    ggml_tensor* fenc_bridge_tensor = nullptr;
+    size_t fenc_bridge_bytes = 0;
     GgmlContextHandle fenc_ctx;
     GgmlGallocrHandle fenc_alloc;
     ggml_tensor* fenc_output_tensor = nullptr;
-    auto ensure_fenc_output_cpu = [&]() {
+    auto ensure_fenc_output_cpu = [&]() -> bool {
         if (fenc_output_cpu.empty()) {
+            auto* source = fenc_output_tensor != nullptr ? fenc_output_tensor : fenc_bridge_tensor;
+            if (source == nullptr) {
+                return false;
+            }
             fenc_output_cpu.resize(image_feature_count);
-            ggml_backend_tensor_get(
-                fenc_output_tensor, fenc_output_cpu.data(), 0, image_feature_bytes);
+            ggml_backend_tensor_get(source, fenc_output_cpu.data(), 0, image_feature_bytes);
         }
+        return true;
     };
     auto release_fenc_backend = [&]() {
         fenc_output_tensor = nullptr;
         fenc_alloc.reset();
         fenc_ctx.reset();
     };
-    auto upload_fenc_output = [&](ggml_tensor* dst, bool use_gpu_copy) {
-        if (!dst->buffer) {
-            return;
+    auto release_fenc_bridge = [&]() {
+        fenc_bridge_tensor = nullptr;
+        if (fenc_bridge_lock.owns_lock()) {
+            fenc_bridge_lock.unlock();
         }
-        if (use_gpu_copy && fenc_output_tensor) {
+    };
+    auto upload_fenc_output = [&](ggml_tensor* dst, bool use_gpu_copy) -> bool {
+        if (!dst->buffer) {
+            return false;
+        }
+        if (fenc_bridge_tensor != nullptr) {
+            sam3_backend_tensor_copy_async(model.backend, fenc_bridge_tensor, dst);
+        } else if (use_gpu_copy && fenc_output_tensor) {
             sam3_backend_tensor_copy_async(model.backend, fenc_output_tensor, dst);
         } else {
-            ensure_fenc_output_cpu();
+            if (!ensure_fenc_output_cpu()) {
+                return false;
+            }
             ggml_backend_tensor_set(dst, fenc_output_cpu.data(), 0, image_feature_bytes);
         }
+        return true;
+    };
+    auto make_fenc_stage_input = [&](ggml_context* ctx,
+                                     std::string_view name) -> std::pair<ggml_tensor*, bool> {
+        if (fenc_bridge_tensor != nullptr) {
+            if (auto* alias = sam3_alias_tensor(ctx, fenc_bridge_tensor, name)) {
+                ggml_set_input(alias);
+                return {alias, false};
+            }
+        }
+        auto* input = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, N_spatial, 1);
+        sam3_set_name(input, name);
+        ggml_set_input(input);
+        return {input, true};
     };
     if (fenc_output_cpu.empty()) {
         const size_t sz = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
@@ -18366,8 +18453,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        if (sam3_should_log(2)) {
-            ensure_fenc_output_cpu();
+        if (sam3_should_log(2) && ensure_fenc_output_cpu()) {
             SAM3_LOG(2,
                      "%s: fenc_out[0..4] = [%.6f, %.6f, %.6f, %.6f, %.6f]\n",
                      __func__,
@@ -18419,13 +18505,38 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             }
         }
     }
+    if (use_pcs_fenc_gpu_bridge && sam3_is_contiguous_f32_4d(fenc_output_tensor, D, N_spatial, 1)) {
+        fenc_bridge_lock = std::unique_lock{model.pcs_fenc_bridge_mutex};
+        if (sam3_ensure_pcs_fenc_gpu_bridge(model, D, N_spatial)) {
+            fenc_bridge_tensor = model.pcs_fenc_bridge_tensor;
+            fenc_bridge_bytes = ggml_backend_buffer_get_size(model.pcs_fenc_bridge_buffer.get());
+            // The synchronous copy makes the compact bridge independent of
+            // the much larger fusion-encoder graph allocation.
+            ggml_backend_tensor_copy(fenc_output_tensor, fenc_bridge_tensor);
+            release_fenc_backend();
+        } else {
+            release_fenc_bridge();
+        }
+    }
+    if (sam3_getenv("SAM3_PROFILE_PCS_FENC_GPU_BRIDGE").has_value()) {
+        fprintf(stderr,
+                "SAM3_PROFILE_PCS_FENC_GPU_BRIDGE requested=%d active=%d bytes=%zu\n",
+                use_pcs_fenc_gpu_bridge ? 1 : 0,
+                fenc_bridge_tensor != nullptr ? 1 : 0,
+                fenc_bridge_bytes);
+    }
     if (pcs_dump_dir) {
-        ensure_fenc_output_cpu();
+        if (!ensure_fenc_output_cpu()) {
+            return result;
+        }
         const std::array<int64_t, 4> shape = {D, H, H, 1};
         (void) sam3_dump_debug_f32(*pcs_dump_dir, "fenc_output", fenc_output_cpu, shape);
     }
-    if (!use_pcs_fenc_ddec_gpu_copy && !use_pcs_fenc_seg_gpu_copy) {
-        ensure_fenc_output_cpu();
+    if (fenc_bridge_tensor == nullptr && !use_pcs_fenc_ddec_gpu_copy &&
+        !use_pcs_fenc_seg_gpu_copy) {
+        if (!ensure_fenc_output_cpu()) {
+            return result;
+        }
         release_fenc_backend();
     }
 
@@ -18450,9 +18561,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        auto* enc = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(enc, "ddec_enc");
-        ggml_set_input(enc);
+        auto [enc, upload_enc] = make_fenc_stage_input(ctx.get(), "ddec_enc");
         auto* pe_raw = ggml_new_tensor_4d(ctx.get(), GGML_TYPE_F32, D, H, H, 1);
         ggml_set_name(pe_raw, "ddec_pe");
         ggml_set_input(pe_raw);
@@ -18490,10 +18599,21 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             fprintf(stderr, "%s: DETR decoder alloc failed\n", __func__);
             return result;
         }
+        if (sam3_getenv("SAM3_PROFILE_PCS_FENC_GPU_BRIDGE").has_value()) {
+            fprintf(stderr,
+                    "SAM3_PROFILE_PCS_FENC_GPU_BRIDGE stage=ddec aliased=%d "
+                    "buffer_bytes=%zu\n",
+                    upload_enc ? 0 : 1,
+                    ggml_gallocr_get_buffer_size(alloc.get(), 0));
+        }
 
-        upload_fenc_output(enc, use_pcs_fenc_ddec_gpu_copy);
-        if (!use_pcs_fenc_seg_gpu_copy) {
-            ensure_fenc_output_cpu();
+        if (upload_enc && !upload_fenc_output(enc, use_pcs_fenc_ddec_gpu_copy)) {
+            return result;
+        }
+        if (fenc_bridge_tensor == nullptr && !use_pcs_fenc_seg_gpu_copy) {
+            if (!ensure_fenc_output_cpu()) {
+                return result;
+            }
             release_fenc_backend();
         }
         upload_img_pe(pe_raw);
@@ -18642,9 +18762,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             return result;
         }
 
-        auto* enc_h = ggml_new_tensor_3d(ctx.get(), GGML_TYPE_F32, D, N_spatial, 1);
-        ggml_set_name(enc_h, "seg_enc");
-        ggml_set_input(enc_h);
+        auto [enc_h, upload_enc_h] = make_fenc_stage_input(ctx.get(), "seg_enc");
 
         // FPN features at 3 scales. The two live high-resolution inputs can use
         // fresh leaf metadata over the immutable state buffers.
@@ -18704,8 +18822,17 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             fprintf(stderr, "%s: segmentation head alloc failed\n", __func__);
             return result;
         }
+        if (sam3_getenv("SAM3_PROFILE_PCS_FENC_GPU_BRIDGE").has_value()) {
+            fprintf(stderr,
+                    "SAM3_PROFILE_PCS_FENC_GPU_BRIDGE stage=seg aliased=%d "
+                    "buffer_bytes=%zu\n",
+                    upload_enc_h ? 0 : 1,
+                    ggml_gallocr_get_buffer_size(alloc.get(), 0));
+        }
 
-        upload_fenc_output(enc_h, use_pcs_fenc_seg_gpu_copy);
+        if (upload_enc_h && !upload_fenc_output(enc_h, use_pcs_fenc_seg_gpu_copy)) {
+            return result;
+        }
 
         const auto upload_fpn_cpu = [](ggml_tensor* src, ggml_tensor* dst, size_t bytes) {
             if (!dst->buffer) {
@@ -18814,6 +18941,8 @@ sam3_result sam3_segment_pcs(sam3_state& state,
             ggml_backend_tensor_get(out, all_masks.data(), 0, all_masks.size() * sizeof(float));
         }
     }
+    // Stage aliases are gone after the segmentation graph/context scope.
+    release_fenc_bridge();
     if (pcs_dump_dir) {
         const std::array<int64_t, 3> masks_shape = {mask_hw, mask_hw, NQ};
         (void) sam3_dump_debug_f32(*pcs_dump_dir, "seg_mask_logits", all_masks, masks_shape);

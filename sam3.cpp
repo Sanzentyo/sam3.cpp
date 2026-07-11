@@ -17585,6 +17585,30 @@ static bool sam3_pcs_direct_pixel_decoder_whcb_enabled() {
 #endif
 }
 
+[[nodiscard]] static bool sam3_should_alias_pvs_inputs(ggml_backend_t backend) {
+    if (sam3_getenv("SAM3_DISABLE_PVS_ALIAS_INPUTS").has_value()) {
+        return false;
+    }
+    if (sam3_getenv("SAM3_ENABLE_PVS_ALIAS_INPUTS").has_value()) {
+        return true;
+    }
+#ifdef GGML_USE_CUDA
+    return ggml_backend_is_cuda(backend);
+#else
+    GGML_UNUSED(backend);
+    return false;
+#endif
+}
+
+[[nodiscard]] static bool sam3_is_contiguous_f32_4d(const ggml_tensor* tensor,
+                                                    int64_t ne0,
+                                                    int64_t ne1,
+                                                    int64_t ne2) {
+    return tensor != nullptr && tensor->type == GGML_TYPE_F32 && tensor->ne[0] == ne0 &&
+           tensor->ne[1] == ne1 && tensor->ne[2] == ne2 && tensor->ne[3] == 1 &&
+           tensor->data != nullptr && tensor->buffer != nullptr && ggml_is_contiguous(tensor);
+}
+
 // Bilinear interpolation of a flat mask [H_in * W_in] to [H_out * W_out].
 // Uses double for coordinate math to match PyTorch F.interpolate precision.
 static std::vector<float> sam3_bilinear_interpolate(
@@ -19180,9 +19204,8 @@ static void sam3_use_model_prompt_pe_cache(sam3_state& state, const sam3_model& 
 static void sam3_populate_pe_cache(sam3_state& state, const sam3_model& model) {
     const int D = model.hparams.sam_embed_dim;  // 256
     const int H = sam3_eff_feat_size(state, model.hparams);
-    if (state.pe_cache_valid && state.dense_pe_tensor != nullptr &&
-        state.dense_pe_tensor->ne[0] == D && state.dense_pe_tensor->ne[1] == H &&
-        state.dense_pe_tensor->ne[2] == H) {
+    if (state.pe_cache_valid && sam3_is_contiguous_f32_4d(state.dense_pe_tensor, D, H, H) &&
+        sam3_is_contiguous_f32_4d(state.dense_nomask_tensor, D, H, H)) {
         return;
     }
     if (sam3_model_prompt_pe_cache_enabled() && sam3_ensure_model_prompt_pe_cache(model, D, H)) {
@@ -19354,7 +19377,9 @@ struct sam3_pe_result {
 static sam3_pe_result sam3_build_sam_pe(struct ggml_context* ctx,
                                         const sam3_pvs_params& params,
                                         int embed_dim,
-                                        int feat_size) {
+                                        int feat_size,
+                                        struct ggml_tensor* image_pe_override = nullptr,
+                                        struct ggml_tensor* dense_override = nullptr) {
     const int D = embed_dim;  // 256
     const int H = feat_size;  // 72
 
@@ -19366,13 +19391,19 @@ static sam3_pe_result sam3_build_sam_pe(struct ggml_context* ctx,
     ggml_set_name(sparse, "sam_pe_sparse");
     ggml_set_input(sparse);
 
-    auto* image_pe = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, D, H, H, 1);
+    auto* image_pe = image_pe_override;
+    if (image_pe == nullptr) {
+        image_pe = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_input(image_pe);
+    }
     ggml_set_name(image_pe, "sam_pe_image_pe");
-    ggml_set_input(image_pe);
 
-    auto* dense = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, D, H, H, 1);
+    auto* dense = dense_override;
+    if (dense == nullptr) {
+        dense = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, D, H, H, 1);
+        ggml_set_input(dense);
+    }
     ggml_set_name(dense, "sam_pe_dense");
-    ggml_set_input(dense);
 
     return sam3_pe_result{
         .sparse = sparse,
@@ -20575,13 +20606,23 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     const auto& hp = model.hparams;
     const int D = hp.sam_embed_dim;  // 256
     const int H = sam3_eff_feat_size(state, hp);
+    const int H0 = H * 4;                                // 288
+    const int H1 = H * 2;                                // 144
     const int num_mask_tokens = hp.sam_n_multimask + 1;  // 4
     const int eff_img_size = sam3_eff_img_size(state, hp);
     sam3_result result;
 
     // ── Validate ─────────────────────────────────────────────────────────
-    if (!state.neck_trk[0]) {
+    if (!state.neck_trk[0] || !state.neck_trk[1] || !state.neck_trk[2]) {
         fprintf(stderr, "%s: image not encoded — call sam3_encode_image first\n", __func__);
+        return result;
+    }
+    if (!sam3_is_contiguous_f32_4d(state.neck_trk[0], D, H0, H0) ||
+        !sam3_is_contiguous_f32_4d(state.neck_trk[1], D, H1, H1) ||
+        !sam3_is_contiguous_f32_4d(state.neck_trk[2], D, H, H)) {
+        fprintf(stderr,
+                "%s: encoded tracker features have incompatible type, shape, or storage\n",
+                __func__);
         return result;
     }
     if (params.pos_points.empty() && !params.use_box) {
@@ -20597,6 +20638,15 @@ sam3_result sam3_segment_pvs(sam3_state& state,
              params.use_box ? "yes" : "no",
              params.multimask ? "yes" : "no");
 
+    const bool use_pvs_input_aliases =
+        state.backend == model.backend && sam3_should_alias_pvs_inputs(model.backend);
+    if (use_pvs_input_aliases) {
+        // Aliasing immutable prompt constants requires their backend cache
+        // before graph construction. The copy fallback keeps the historical
+        // post-allocation initialization order when aliases are disabled.
+        sam3_populate_pe_cache(state, model);
+    }
+
     // ── Build computation graph ──────────────────────────────────────────
     const size_t buf_size = (ggml_tensor_overhead() * 8192) + (ggml_graph_overhead() * 2);
     ggml_init_params gparams = {
@@ -20611,31 +20661,61 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     }
 
     // ── SAM prompt encoder (CPU pre-compute + input tensors) ─────────────
-    auto pe_out = sam3_build_sam_pe(ctx0.get(), params, D, H);
+    auto alias_4d = [&](bool enabled,
+                        const ggml_tensor* src,
+                        std::string_view name,
+                        int64_t ne0,
+                        int64_t ne1,
+                        int64_t ne2) -> ggml_tensor* {
+        if (!enabled || !sam3_is_contiguous_f32_4d(src, ne0, ne1, ne2)) {
+            return nullptr;
+        }
+        auto* alias = sam3_alias_tensor(ctx0.get(), src, name);
+        if (alias != nullptr) {
+            ggml_set_input(alias);
+        }
+        return alias;
+    };
+    auto make_input_4d =
+        [&](ggml_tensor*& tensor, std::string_view name, int64_t ne0, int64_t ne1, int64_t ne2) {
+            if (tensor != nullptr) {
+                return false;
+            }
+            tensor = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, ne0, ne1, ne2, 1);
+            sam3_set_name(tensor, name);
+            ggml_set_input(tensor);
+            return true;
+        };
+
+    auto* image_pe =
+        alias_4d(use_pvs_input_aliases, state.dense_pe_tensor, "sam_pe_image_pe", D, H, H);
+    const bool upload_image_pe = image_pe == nullptr;
+    auto* dense =
+        alias_4d(use_pvs_input_aliases, state.dense_nomask_tensor, "sam_pe_dense", D, H, H);
+    const bool upload_dense = dense == nullptr;
+    auto pe_out = sam3_build_sam_pe(ctx0.get(), params, D, H, image_pe, dense);
 
     // ── Create fresh input tensors for tracker features ──────────────────
     // CRITICAL: Do NOT use state.neck_trk[*] directly in graph operations
     // (like ggml_add). They are tensors from a previous graph, and
     // ggml_build_forward_expand traces all ancestors — which would pull in
     // the ENTIRE ViT + neck recomputation (2500+ nodes, ~37 seconds).
-    // Instead: create fresh input tensors and copy data from state on CPU.
-    const int H0 = H * 4;  // 288
-    const int H1 = H * 2;  // 144
+    // Borrow the two high-resolution immutable buffers. Keep the low-resolution
+    // feature as a copied input: removing all three copies changes the F16
+    // cross-graph dependency contract on CUDA.
 
-    auto* image_feats_raw = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H, H, 1);
-    ggml_set_name(image_feats_raw, "sam_dec_image_feats_raw");
-    ggml_set_input(image_feats_raw);
+    ggml_tensor* image_feats_raw = nullptr;
+    const bool upload_image_feats_raw =
+        make_input_4d(image_feats_raw, "sam_dec_image_feats_raw", D, H, H);
     auto* no_mem = ggml_reshape_4d(ctx0.get(), model.tensors.at("no_mem_embed"), D, 1, 1, 1);
     auto* image_feats = ggml_add(ctx0.get(), image_feats_raw, no_mem);
     ggml_set_name(image_feats, "sam_dec_image_feats");
 
-    auto* feat_s0 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H0, H0, 1);
-    ggml_set_name(feat_s0, "pvs_feat_s0");
-    ggml_set_input(feat_s0);
+    auto* feat_s0 = alias_4d(use_pvs_input_aliases, state.neck_trk[0], "pvs_feat_s0", D, H0, H0);
+    const bool upload_feat_s0 = make_input_4d(feat_s0, "pvs_feat_s0", D, H0, H0);
 
-    auto* feat_s1 = ggml_new_tensor_4d(ctx0.get(), GGML_TYPE_F32, D, H1, H1, 1);
-    ggml_set_name(feat_s1, "pvs_feat_s1");
-    ggml_set_input(feat_s1);
+    auto* feat_s1 = alias_4d(use_pvs_input_aliases, state.neck_trk[1], "pvs_feat_s1", D, H1, H1);
+    const bool upload_feat_s1 = make_input_4d(feat_s1, "pvs_feat_s1", D, H1, H1);
 
     // ── SAM mask decoder graph ───────────────────────────────────────────
     auto dec_out = sam3_build_sam_dec_graph(ctx0.get(),
@@ -20674,6 +20754,17 @@ sam3_result sam3_segment_pvs(sam3_state& state,
         fprintf(stderr, "%s: failed to allocate graph\n", __func__);
         return result;
     }
+    if (sam3_getenv("SAM3_PROFILE_PVS_ALIAS_INPUTS").has_value()) {
+        const int aliased_input_count =
+            static_cast<int>(!upload_image_pe) + static_cast<int>(!upload_dense) +
+            static_cast<int>(!upload_feat_s0) + static_cast<int>(!upload_feat_s1);
+        fprintf(stderr,
+                "SAM3_PROFILE_PVS_ALIAS_INPUTS policy_enabled=%d aliased=%d/4 "
+                "buffer_bytes=%zu\n",
+                use_pvs_input_aliases ? 1 : 0,
+                aliased_input_count,
+                ggml_gallocr_get_buffer_size(galloc.get(), 0));
+    }
 
     SAM3_LOG(2, "%s: graph allocated, %d nodes\n", __func__, ggml_graph_n_nodes(graph));
 
@@ -20687,8 +20778,10 @@ sam3_result sam3_segment_pvs(sam3_state& state,
     }
 
     // ── Upload input data (using cached embeddings) ────────────────────
-    // Populate PE cache on first call (reads model weights from GPU once)
-    sam3_populate_pe_cache(state, model);
+    // Populate PE cache on first call (reads model weights from GPU once).
+    if (!use_pvs_input_aliases) {
+        sam3_populate_pe_cache(state, model);
+    }
 
     {
         const int N_pts = pe_out.n_tokens;
@@ -20745,32 +20838,44 @@ sam3_result sam3_segment_pvs(sam3_state& state,
         }
 
         // Dense PE grid and optional mask/no-mask embedding.
-        if (state.dense_pe_tensor) {
-            sam3_backend_tensor_copy_async(model.backend, state.dense_pe_tensor, pe_out.image_pe);
-        } else {
-            ggml_backend_tensor_set(pe_out.image_pe,
-                                    state.dense_pe_cache.data(),
-                                    0,
-                                    state.dense_pe_cache.size() * sizeof(float));
+        if (upload_image_pe) {
+            if (sam3_is_contiguous_f32_4d(state.dense_pe_tensor, D, H, H)) {
+                sam3_backend_tensor_copy_async(
+                    model.backend, state.dense_pe_tensor, pe_out.image_pe);
+            } else {
+                ggml_backend_tensor_set(pe_out.image_pe,
+                                        state.dense_pe_cache.data(),
+                                        0,
+                                        state.dense_pe_cache.size() * sizeof(float));
+            }
         }
-        if (state.dense_nomask_tensor) {
-            sam3_backend_tensor_copy_async(model.backend, state.dense_nomask_tensor, pe_out.dense);
-        } else {
-            ggml_backend_tensor_set(pe_out.dense,
-                                    state.dense_nomask_cache.data(),
-                                    0,
-                                    state.dense_nomask_cache.size() * sizeof(float));
+        if (upload_dense) {
+            if (sam3_is_contiguous_f32_4d(state.dense_nomask_tensor, D, H, H)) {
+                sam3_backend_tensor_copy_async(
+                    model.backend, state.dense_nomask_tensor, pe_out.dense);
+            } else {
+                ggml_backend_tensor_set(pe_out.dense,
+                                        state.dense_nomask_cache.data(),
+                                        0,
+                                        state.dense_nomask_cache.size() * sizeof(float));
+            }
         }
     }
 
     // ── Copy tracker features from state to fresh input tensors ─────────
     // Keep tracker features on the backend; no_mem_embed is added in-graph.
     {
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], image_feats_raw);
+        if (upload_image_feats_raw) {
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[2], image_feats_raw);
+        }
 
         // feat_s0 = neck_trk[0], feat_s1 = neck_trk[1]
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], feat_s0);
-        sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], feat_s1);
+        if (upload_feat_s0) {
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[0], feat_s0);
+        }
+        if (upload_feat_s1) {
+            sam3_backend_tensor_copy_async(model.backend, state.neck_trk[1], feat_s1);
+        }
     }
 
     // ── Compute ──────────────────────────────────────────────────────────

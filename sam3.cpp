@@ -17845,6 +17845,9 @@ static bool sam3_should_use_pcs_direct_instance_conv1x1(const sam3_model& model)
 // Uses double for coordinate math to match PyTorch F.interpolate precision.
 static std::vector<float> sam3_bilinear_interpolate(
     const float* src, int src_w, int src_h, int dst_w, int dst_h) {
+    if (src == nullptr || src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
+        return {};
+    }
     std::vector<float> dst(sam3_count_mul(dst_w, dst_h));
     const double sx = static_cast<double>(src_w) / dst_w;
     const double sy = static_cast<double>(src_h) / dst_h;
@@ -17853,18 +17856,28 @@ static std::vector<float> sam3_bilinear_interpolate(
     };
 
     for (int y = 0; y < dst_h; ++y) {
-        double fy = ((static_cast<double>(y) + 0.5) * sy) - 0.5;
-        fy = std::max(0.0, std::min(fy, static_cast<double>(src_h - 1)));
-        const int y0 = std::min(static_cast<int>(fy), src_h - 2);
-        const int y1 = y0 + 1;
-        const float wy = static_cast<float>(fy - y0);
+        int y0 = 0;
+        int y1 = 0;
+        float wy = 0.0f;
+        if (src_h > 1) {
+            double fy = ((static_cast<double>(y) + 0.5) * sy) - 0.5;
+            fy = std::max(0.0, std::min(fy, static_cast<double>(src_h - 1)));
+            y0 = std::min(static_cast<int>(fy), src_h - 2);
+            y1 = y0 + 1;
+            wy = static_cast<float>(fy - y0);
+        }
 
         for (int x = 0; x < dst_w; ++x) {
-            double fx = ((static_cast<double>(x) + 0.5) * sx) - 0.5;
-            fx = std::max(0.0, std::min(fx, static_cast<double>(src_w - 1)));
-            const int x0 = std::min(static_cast<int>(fx), src_w - 2);
-            const int x1 = x0 + 1;
-            const float wx = static_cast<float>(fx - x0);
+            int x0 = 0;
+            int x1 = 0;
+            float wx = 0.0f;
+            if (src_w > 1) {
+                double fx = ((static_cast<double>(x) + 0.5) * sx) - 0.5;
+                fx = std::max(0.0, std::min(fx, static_cast<double>(src_w - 1)));
+                x0 = std::min(static_cast<int>(fx), src_w - 2);
+                x1 = x0 + 1;
+                wx = static_cast<float>(fx - x0);
+            }
 
             const float v =
                 ((1.0f - wy) *
@@ -25022,6 +25035,15 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     }
     if (det.mask.width <= 0 || det.mask.height <= 0) {
         std::println(stderr, "{}: detection mask shape is invalid", __func__);
+        return -1;
+    }
+    const size_t expected_mask_size = sam3_count_mul(det.mask.width, det.mask.height);
+    if (det.mask.data.size() < expected_mask_size) {
+        std::println(stderr,
+                     "{}: detection mask storage is too small: expected at least {}, got {}",
+                     __func__,
+                     expected_mask_size,
+                     det.mask.data.size());
         return -1;
     }
 

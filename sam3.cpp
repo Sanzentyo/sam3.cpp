@@ -23152,9 +23152,8 @@ static std::vector<float> sam3_prepare_initial_mask_prompt_input(const sam3_dete
         mask01.data(), width, height, input_mask_size, input_mask_size);
 }
 
-static std::vector<float> sam3_prepare_initial_mask_memory_logits(const sam3_detection& det,
-                                                                  int input_mask_size) {
-    auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+static std::vector<float> sam3_prepare_initial_mask_memory_logits(
+    std::span<const float> input_mask) {
     if (input_mask.empty()) {
         return {};
     }
@@ -23214,6 +23213,7 @@ static std::vector<float> sam3_prepare_tracker_mask_prompt(const sam3_model& mod
 static bool sam3_compute_mask_input_obj_ptr(sam3_state& state,
                                             const sam3_model& model,
                                             const sam3_detection& det,
+                                            std::span<const float> prepared_mask_prompt,
                                             std::vector<float>& out_ptr) {
     const auto& hp = model.hparams;
     if (hp.model_type != SAM3_MODEL_SAM3) {
@@ -23228,12 +23228,14 @@ static bool sam3_compute_mask_input_obj_ptr(sam3_state& state,
         return false;
     }
 
-    auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
-    if (input_mask.empty()) {
-        return false;
+    std::vector<float> owned_mask_prompt;
+    if (prepared_mask_prompt.empty()) {
+        const auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+        owned_mask_prompt =
+            sam3_prepare_tracker_mask_prompt(model, input_mask, input_mask_size, H4);
+        prepared_mask_prompt = owned_mask_prompt;
     }
-    auto mask_prompt = sam3_prepare_tracker_mask_prompt(model, input_mask, input_mask_size, H4);
-    if (mask_prompt.empty()) {
+    if (prepared_mask_prompt.empty()) {
         return false;
     }
 
@@ -23326,7 +23328,7 @@ static bool sam3_compute_mask_input_obj_ptr(sam3_state& state,
     }
 
     ggml_backend_tensor_set(
-        cache.mask_prompt, mask_prompt.data(), 0, mask_prompt.size() * sizeof(float));
+        cache.mask_prompt, prepared_mask_prompt.data(), 0, prepared_mask_prompt.size_bytes());
     if (!sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[2], cache.image_feats) ||
         !sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[0], cache.feat_s0) ||
         !sam31_stage_tensor_to_f32_input(model.backend, state.neck_trk[1], cache.feat_s1)) {
@@ -24580,6 +24582,7 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     SAM3_PROFILE_CPU_START(add_detection_mask_logits_prepare);
     const int64_t mask_prepare_t0 = ggml_time_us();
     std::vector<float> synth_logits;
+    std::vector<float> shared_initial_mask_prompt;
     const float* memory_mask_logits = det.raw_mask_logits.data();
     int memory_mask_w = det.raw_mask_width;
     int memory_mask_h = det.raw_mask_height;
@@ -24599,9 +24602,16 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
         }
     } else {
         const int H = sam3_eff_feat_size(state, model.hparams);
-        synth_logits = sam3_prepare_initial_mask_memory_logits(det, H * 16);
-        memory_mask_w = H * 16;
-        memory_mask_h = H * 16;
+        const int input_mask_size = H * 16;
+        auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+        synth_logits = sam3_prepare_initial_mask_memory_logits(input_mask);
+        if (!sam3_getenv("SAM3_DISABLE_SHARED_INITIAL_MASK_PREP").has_value() &&
+            det.sam_token.empty()) {
+            shared_initial_mask_prompt =
+                sam3_prepare_tracker_mask_prompt(model, input_mask, input_mask_size, H * 4);
+        }
+        memory_mask_w = input_mask_size;
+        memory_mask_h = input_mask_size;
         memory_mask_logits = synth_logits.data();
     }
     g_sam3_last_tracker_add_timing.mask_prepare_ms = (ggml_time_us() - mask_prepare_t0) / 1000.0;
@@ -24651,7 +24661,8 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
         }
         SAM3_PROFILE_CPU_END(add_detection_interactive_obj_ptr);
     } else if (!model.hparams.is_sam3_1()) {
-        if (!sam3_compute_mask_input_obj_ptr(state, model, det, obj_ptr)) {
+        if (!sam3_compute_mask_input_obj_ptr(
+                state, model, det, shared_initial_mask_prompt, obj_ptr)) {
             auto nop_it = model.tensors.find("no_obj_ptr");
             if (nop_it == model.tensors.end()) {
                 std::println(stderr, "{}: no_obj_ptr tensor is missing", __func__);

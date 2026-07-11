@@ -3543,7 +3543,20 @@ static bool sam3_prop_rope_k_backend_cache_enabled() {
 
 static bool sam3_vit_contiguous_attention_v_enabled(const sam3_hparams& hp,
                                                     ggml_type qkv_weight_type,
-                                                    bool direct_qkv_views) {
+                                                    bool direct_qkv_views,
+                                                    int block_idx) {
+    static const auto disabled_blocks =
+        sam3_getenv_block_selector("SAM3_DISABLE_VIT_CONTIGUOUS_ATTENTION_V_BLOCKS");
+    static const auto enabled_blocks =
+        sam3_getenv_block_selector("SAM3_ENABLE_VIT_CONTIGUOUS_ATTENTION_V_BLOCKS");
+    if (block_idx >= 0) {
+        if (disabled_blocks.has_value() && disabled_blocks->contains(block_idx)) {
+            return false;
+        }
+        if (enabled_blocks.has_value()) {
+            return enabled_blocks->contains(block_idx);
+        }
+    }
     static const std::optional<bool> env_override = [] -> std::optional<bool> {
         const char* disable_env = std::getenv("SAM3_DISABLE_VIT_CONTIGUOUS_ATTENTION_V");
         if (disable_env != nullptr && disable_env[0] != '0') {
@@ -3555,10 +3568,10 @@ static bool sam3_vit_contiguous_attention_v_enabled(const sam3_hparams& hp,
         }
         return std::nullopt;
     }();
-    const bool sam3_non_low_precision_default =
-        direct_qkv_views && hp.model_type == SAM3_MODEL_SAM3 && qkv_weight_type != GGML_TYPE_F16 &&
-        qkv_weight_type != GGML_TYPE_BF16;
-    return env_override.value_or(sam3_non_low_precision_default);
+    const bool sam3_non_low_precision_block0_default =
+        direct_qkv_views && hp.model_type == SAM3_MODEL_SAM3 && block_idx == 0 &&
+        qkv_weight_type != GGML_TYPE_F16 && qkv_weight_type != GGML_TYPE_BF16;
+    return env_override.value_or(sam3_non_low_precision_block0_default);
 }
 
 static bool sam3_bf16_vit_attn_proj_input_enabled() {
@@ -7559,7 +7572,8 @@ static struct ggml_tensor* sam3_vit_block_forward(struct ggml_context* ctx,
 
         V = ggml_permute(
             ctx, V, 0, 2, 1, 3);  // [HD, N, NH, B_cur] non-contiguous view; flash_attn uses strides
-        if (sam3_vit_contiguous_attention_v_enabled(hp, blk.qkv_w->type, direct_qkv_views)) {
+        if (sam3_vit_contiguous_attention_v_enabled(
+                hp, blk.qkv_w->type, direct_qkv_views, block_idx)) {
             V = ggml_cont(ctx, V);
             sam3_set_name(
                 V,
@@ -12465,7 +12479,7 @@ static struct ggml_tensor* sam3_build_vit_qkv_attn_from_qkv(struct ggml_context*
     K = ggml_reshape_3d(ctx, K, HD, W_cur * H_cur, NH * B_cur);
 
     V = ggml_permute(ctx, V, 0, 2, 1, 3);
-    if (sam3_vit_contiguous_attention_v_enabled(hp, blk.qkv_w->type, direct_qkv_views)) {
+    if (sam3_vit_contiguous_attention_v_enabled(hp, blk.qkv_w->type, direct_qkv_views, block_idx)) {
         V = ggml_cont(ctx, V);
     }
 

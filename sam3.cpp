@@ -14659,41 +14659,97 @@ static struct ggml_tensor* sam3_bbox_mlp(struct ggml_context* ctx,
 // Returns: [512, NQ, B] sinusoidal embedding matching Python gen_sineembed_for_position
 static struct ggml_tensor* sam3_build_sine_pos_embed_4d(
     struct ggml_context* ctx,
-    struct ggml_tensor* ref_boxes,     // [4, NQ, B]
-    struct ggml_tensor* sine_dim_t) {  // [1, 64]
+    struct ggml_tensor* ref_boxes,   // [4, NQ, B]
+    struct ggml_tensor* sine_dim_t,  // [1, 64]
+    int layer_idx) {
+    GGML_ASSERT(ref_boxes->type == GGML_TYPE_F32);
+    GGML_ASSERT(ref_boxes->ne[0] == 4 && ref_boxes->ne[2] == 1 && ref_boxes->ne[3] == 1);
+    GGML_ASSERT(sine_dim_t->type == GGML_TYPE_F32);
+    GGML_ASSERT(sine_dim_t->ne[0] == 1 && sine_dim_t->ne[1] == 64 && sine_dim_t->ne[2] == 1 &&
+                sine_dim_t->ne[3] == 1);
+
     const int64_t NQ = ref_boxes->ne[1];
+    const bool broadcast = !sam3_getenv("SAM3_DISABLE_DDEC_SINE_BROADCAST").has_value();
+    const bool profile_broadcast = sam3_getenv("SAM3_PROFILE_DDEC_SINE_BROADCAST").has_value();
+    const bool name_profile_nodes =
+        profile_broadcast || sam3_getenv("GGML_CUDA_PROFILE_NODES").has_value();
+    if (profile_broadcast) {
+        fprintf(stderr,
+                "SAM3_PROFILE_DDEC_SINE_BROADCAST layer=%d selected=%s nq=%lld\n",
+                layer_idx,
+                broadcast ? "broadcast" : "legacy",
+                static_cast<long long>(NQ));
+    }
 
     // Python output order: [cy, cx, w, h] → coord indices from boxes [cx(0),cy(1),w(2),h(3)]
     const int coord_order[4] = {1, 0, 2, 3};
 
-    struct ggml_tensor* coord_embeds[4];
+    if (!broadcast) {
+        struct ggml_tensor* coord_embeds[4];
 
-    for (int c = 0; c < 4; ++c) {
-        int ci = coord_order[c];
-        // Extract one coordinate: view into ref_boxes [4, NQ, 1] at element ci
-        auto* coord =
-            ggml_view_2d(ctx, ref_boxes, 1, NQ, ref_boxes->nb[1], ci * sizeof(float));  // [1, NQ]
+        for (int c = 0; c < 4; ++c) {
+            int ci = coord_order[c];
+            // Extract one coordinate: view into ref_boxes [4, NQ, 1] at element ci
+            auto* coord = ggml_view_2d(
+                ctx, ref_boxes, 1, NQ, ref_boxes->nb[1], ci * sizeof(float));  // [1, NQ]
 
-        // Outer product: angles[i, q] = dim_t[i] * coord[q]
-        // ggml_mul_mat(A=[1,64], B=[1,NQ]) = A^T @ B = [64,1]@[1,NQ] = [64, NQ]
-        auto* angles = ggml_mul_mat(ctx, sine_dim_t, coord);  // [64, NQ]
+            // Outer product: angles[i, q] = dim_t[i] * coord[q]
+            // ggml_mul_mat(A=[1,64], B=[1,NQ]) = A^T @ B = [64,1]@[1,NQ] = [64, NQ]
+            auto* angles = ggml_mul_mat(ctx, sine_dim_t, coord);  // [64, NQ]
 
-        auto* sin_vals = ggml_sin(ctx, angles);  // [64, NQ]
-        auto* cos_vals = ggml_cos(ctx, angles);  // [64, NQ]
+            auto* sin_vals = ggml_sin(ctx, angles);  // [64, NQ]
+            auto* cos_vals = ggml_cos(ctx, angles);  // [64, NQ]
 
-        // Interleave: [sin_0, cos_0, sin_1, cos_1, ...]
-        auto* sin_r = ggml_reshape_3d(ctx, sin_vals, 1, 64, NQ);
-        auto* cos_r = ggml_reshape_3d(ctx, cos_vals, 1, 64, NQ);
-        auto* interleaved = ggml_concat(ctx, sin_r, cos_r, 0);  // [2, 64, NQ]
-        coord_embeds[c] = ggml_reshape_2d(ctx, interleaved, 128, NQ);
+            // Interleave: [sin_0, cos_0, sin_1, cos_1, ...]
+            auto* sin_r = ggml_reshape_3d(ctx, sin_vals, 1, 64, NQ);
+            auto* cos_r = ggml_reshape_3d(ctx, cos_vals, 1, 64, NQ);
+            auto* interleaved = ggml_concat(ctx, sin_r, cos_r, 0);  // [2, 64, NQ]
+            coord_embeds[c] = ggml_reshape_2d(ctx, interleaved, 128, NQ);
+        }
+
+        // Concatenate all 4 coordinates → [512, NQ]
+        auto* embed = ggml_concat(ctx, coord_embeds[0], coord_embeds[1], 0);  // [256, NQ]
+        embed = ggml_concat(ctx, embed, coord_embeds[2], 0);                  // [384, NQ]
+        embed = ggml_concat(ctx, embed, coord_embeds[3], 0);                  // [512, NQ]
+
+        return embed;
     }
 
-    // Concatenate all 4 coordinates → [512, NQ]
-    auto* embed = ggml_concat(ctx, coord_embeds[0], coord_embeds[1], 0);  // [256, NQ]
-    embed = ggml_concat(ctx, embed, coord_embeds[2], 0);                  // [384, NQ]
-    embed = ggml_concat(ctx, embed, coord_embeds[3], 0);                  // [512, NQ]
+    struct ggml_tensor* coords[4];
+    for (int c = 0; c < 4; ++c) {
+        coords[c] =
+            ggml_view_2d(ctx, ref_boxes, 1, NQ, ref_boxes->nb[1], coord_order[c] * sizeof(float));
+    }
 
-    return embed;
+    auto* coords_packed = ggml_concat(ctx, coords[0], coords[1], 0);  // [2, NQ]
+    coords_packed = ggml_concat(ctx, coords_packed, coords[2], 0);    // [3, NQ]
+    coords_packed = ggml_concat(ctx, coords_packed, coords[3], 0);    // [4, NQ]
+    if (name_profile_nodes) {
+        sam3_set_name(coords_packed, std::format("ddec_sine_coords_{}", layer_idx));
+    }
+
+    auto* coords_flat = ggml_reshape_2d(ctx, coords_packed, 1, 4 * NQ);
+    auto* angles = ggml_mul_mat(ctx, sine_dim_t, coords_flat);  // [64, 4*NQ]
+    if (name_profile_nodes) {
+        sam3_set_name(angles, std::format("ddec_sine_angles_{}", layer_idx));
+    }
+    angles = ggml_reshape_3d(ctx, angles, 64, 4, NQ);
+
+    auto* sin_vals = ggml_sin(ctx, angles);  // [64, 4, NQ]
+    auto* cos_vals = ggml_cos(ctx, angles);  // [64, 4, NQ]
+    if (name_profile_nodes) {
+        sam3_set_name(sin_vals, std::format("ddec_sine_sin_{}", layer_idx));
+        sam3_set_name(cos_vals, std::format("ddec_sine_cos_{}", layer_idx));
+    }
+
+    auto* sin_r = ggml_reshape_3d(ctx, sin_vals, 1, 256, NQ);
+    auto* cos_r = ggml_reshape_3d(ctx, cos_vals, 1, 256, NQ);
+    auto* interleaved = ggml_concat(ctx, sin_r, cos_r, 0);  // [2, 256, NQ]
+    if (name_profile_nodes) {
+        sam3_set_name(interleaved, std::format("ddec_sine_interleaved_{}", layer_idx));
+    }
+
+    return ggml_reshape_2d(ctx, interleaved, 512, NQ);
 }
 
 // Build query positional encoding from reference boxes via sine embed + ref_point_head MLP.
@@ -14710,9 +14766,16 @@ static struct ggml_tensor* sam3_build_query_pos(struct ggml_context* ctx,
     const int D = model.hparams.neck_dim;  // 256
 
     // 1. Sine positional embedding: [512, NQ]
-    auto* sine_embed = sam3_build_sine_pos_embed_4d(ctx, ref_boxes, sine_dim_t);
+    auto* sine_embed = sam3_build_sine_pos_embed_4d(ctx, ref_boxes, sine_dim_t, layer_idx);
     if (layer_idx == 0) {
         ggml_set_name(sine_embed, "ddec_query_sine_0");
+    }
+    if (layer_idx == 0 && sam3_getenv("SAM3_PCS_DUMP_DIR").has_value()) {
+        ggml_set_output(sine_embed);
+        // Reshape outputs are views; retain the backing concat buffer for the post-compute dump.
+        if (sine_embed->view_src != nullptr) {
+            ggml_set_output(sine_embed->view_src);
+        }
     }
 
     // 2. ref_point_head MLP: 512 → 256 → 256
@@ -18674,6 +18737,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                         tensor, name_owned, std::format("{}/{}", *pcs_dump_dir, name_owned));
                 }
             };
+            dump_ddec_tensor("ddec_query_sine_0");
             for (const auto& name : {
                      "ddec_rpb_cw_rep_0",
                      "ddec_rpb_x0_rep_0",

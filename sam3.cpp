@@ -17502,6 +17502,10 @@ static std::vector<int> sam3_nms(const std::vector<sam3_detection>& dets, float 
     return keep;
 }
 
+static bool sam3_pcs_premask_nms_enabled() {
+    return !sam3_getenv("SAM3_DISABLE_PCS_PREMASK_NMS").has_value();
+}
+
 // Bilinear interpolation of a flat mask [H_in * W_in] to [H_out * W_out].
 // Uses double for coordinate math to match PyTorch F.interpolate precision.
 static std::vector<float> sam3_bilinear_interpolate(
@@ -18508,7 +18512,13 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     ** ── SUB-GRAPH 5: Segmentation Head ───────────────────────────────
     */
     const int mask_hw = H * 4;  // 288 for SAM3
-    std::vector<float> all_masks(sam3_count_mul(NQ, mask_hw, mask_hw));
+    const size_t mask_elements = sam3_count_mul(mask_hw, mask_hw);
+    const size_t mask_bytes = mask_elements * sizeof(float);
+    const bool use_pcs_premask_nms = sam3_pcs_premask_nms_enabled() && !pcs_dump_dir;
+    std::vector<float> all_masks(use_pcs_premask_nms ? 0 : sam3_count_mul(NQ, mask_elements));
+    std::vector<sam3_detection> premask_dets;
+    std::vector<int> premask_query_indices;
+    std::vector<int> premask_keep;
     {
         const size_t sz = (ggml_tensor_overhead() * 16384) + (ggml_graph_overhead() * 2);
         ggml_init_params gp = {
@@ -18627,7 +18637,49 @@ sam3_result sam3_segment_pcs(sam3_state& state,
                 }
             }
         }
-        ggml_backend_tensor_get(out, all_masks.data(), 0, all_masks.size() * sizeof(float));
+        if (use_pcs_premask_nms) {
+            premask_dets.reserve(NQ);
+            premask_query_indices.reserve(NQ);
+            for (int q = 0; q < NQ; ++q) {
+                const float class_prob = 1.0f / (1.0f + expf(-scores_data[q]));
+                const float score = class_prob * presence_prob;
+                if (score < params.score_threshold) {
+                    continue;
+                }
+
+                sam3_detection det{};
+                const size_t box_offset = sam3_count_mul(q, 4);
+                const float cx = boxes_data[box_offset + 0];
+                const float cy = boxes_data[box_offset + 1];
+                const float bw = boxes_data[box_offset + 2];
+                const float bh = boxes_data[box_offset + 3];
+
+                det.box = sam3_cxcywh_to_xyxy(cx, cy, bw, bh, state.orig_width, state.orig_height);
+                det.score = score;
+                det.iou_score = score;
+                premask_dets.push_back(std::move(det));
+                premask_query_indices.push_back(q);
+            }
+            premask_keep = sam3_nms(premask_dets, params.nms_threshold);
+            all_masks.resize(sam3_count_mul(premask_keep.size(), mask_elements));
+
+            GGML_ASSERT(out->type == GGML_TYPE_F32);
+            GGML_ASSERT(out->ne[0] == static_cast<int64_t>(mask_elements));
+            GGML_ASSERT(out->ne[1] == NQ);
+            GGML_ASSERT(ggml_is_contiguous(out));
+            GGML_ASSERT(out->nb[1] == mask_bytes);
+            for (size_t i = 0; i < premask_keep.size(); ++i) {
+                const int det_index = premask_keep[i];
+                const int query_index = premask_query_indices[det_index];
+                ggml_backend_tensor_get(
+                    out,
+                    all_masks.data() + static_cast<ptrdiff_t>(i * mask_elements),
+                    static_cast<size_t>(query_index) * out->nb[1],
+                    mask_bytes);
+            }
+        } else {
+            ggml_backend_tensor_get(out, all_masks.data(), 0, all_masks.size() * sizeof(float));
+        }
     }
     if (pcs_dump_dir) {
         const std::array<int64_t, 3> masks_shape = {mask_hw, mask_hw, NQ};
@@ -18637,55 +18689,83 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     /*
     ** ── Post-processing: thresholding + NMS + mask resize ────────────
     */
-    std::vector<sam3_detection> dets;
-    for (int q = 0; q < NQ; ++q) {
-        const float class_prob = 1.0f / (1.0f + expf(-scores_data[q]));
-        const float score = class_prob * presence_prob;
-        if (score < params.score_threshold) {
-            continue;
+    if (use_pcs_premask_nms) {
+        SAM3_LOG(2,
+                 "%s: %zu detections above threshold %.2f (presence=%.3f, logit=%.3f)\n",
+                 __func__,
+                 premask_dets.size(),
+                 params.score_threshold,
+                 presence_prob,
+                 presence_logit);
+        for (size_t i = 0; i < premask_keep.size(); ++i) {
+            auto& det = premask_dets[premask_keep[i]];
+            const float* mask_ptr = all_masks.data() + static_cast<ptrdiff_t>(i * mask_elements);
+            auto mask_resized = sam3_bilinear_interpolate(
+                mask_ptr, mask_hw, mask_hw, state.orig_width, state.orig_height);
+            det.mask.width = state.orig_width;
+            det.mask.height = state.orig_height;
+            det.mask.data.resize(sam3_count_mul(state.orig_width, state.orig_height));
+            for (size_t pixel = 0; pixel < mask_resized.size(); ++pixel) {
+                det.mask.data[pixel] = (mask_resized[pixel] > 0.0f) ? 255 : 0;
+            }
+            det.mask.iou_score = det.score;
+            det.raw_mask_logits.assign(mask_ptr, mask_ptr + mask_elements);
+            det.raw_mask_width = mask_hw;
+            det.raw_mask_height = mask_hw;
+            det.instance_id = static_cast<int>(i) + 1;
+            result.detections.push_back(std::move(det));
+        }
+    } else {
+        std::vector<sam3_detection> dets;
+        for (int q = 0; q < NQ; ++q) {
+            const float class_prob = 1.0f / (1.0f + expf(-scores_data[q]));
+            const float score = class_prob * presence_prob;
+            if (score < params.score_threshold) {
+                continue;
+            }
+
+            sam3_detection det{};
+            const size_t box_offset = sam3_count_mul(q, 4);
+            const float cx = boxes_data[box_offset + 0];
+            const float cy = boxes_data[box_offset + 1];
+            const float bw = boxes_data[box_offset + 2];
+            const float bh = boxes_data[box_offset + 3];
+
+            det.box = sam3_cxcywh_to_xyxy(cx, cy, bw, bh, state.orig_width, state.orig_height);
+            det.score = score;
+            det.iou_score = score;
+
+            const float* mask_ptr =
+                all_masks.data() + static_cast<ptrdiff_t>(sam3_count_mul(q, mask_elements));
+            auto mask_resized = sam3_bilinear_interpolate(
+                mask_ptr, mask_hw, mask_hw, state.orig_width, state.orig_height);
+            det.mask.width = state.orig_width;
+            det.mask.height = state.orig_height;
+            det.mask.data.resize(sam3_count_mul(state.orig_width, state.orig_height));
+            for (size_t i = 0; i < mask_resized.size(); ++i) {
+                det.mask.data[i] = (mask_resized[i] > 0.0f) ? 255 : 0;
+            }
+            det.mask.iou_score = score;
+            det.raw_mask_logits.assign(mask_ptr, mask_ptr + mask_elements);
+            det.raw_mask_width = mask_hw;
+            det.raw_mask_height = mask_hw;
+
+            dets.push_back(std::move(det));
         }
 
-        sam3_detection det{};
-        const size_t box_offset = sam3_count_mul(q, 4);
-        const float cx = boxes_data[box_offset + 0];
-        const float cy = boxes_data[box_offset + 1];
-        const float bw = boxes_data[box_offset + 2];
-        const float bh = boxes_data[box_offset + 3];
+        SAM3_LOG(2,
+                 "%s: %zu detections above threshold %.2f (presence=%.3f, logit=%.3f)\n",
+                 __func__,
+                 dets.size(),
+                 params.score_threshold,
+                 presence_prob,
+                 presence_logit);
 
-        det.box = sam3_cxcywh_to_xyxy(cx, cy, bw, bh, state.orig_width, state.orig_height);
-        det.score = score;
-        det.iou_score = score;
-
-        const float* mask_ptr =
-            all_masks.data() + static_cast<ptrdiff_t>(sam3_count_mul(q, mask_hw, mask_hw));
-        auto mask_resized = sam3_bilinear_interpolate(
-            mask_ptr, mask_hw, mask_hw, state.orig_width, state.orig_height);
-        det.mask.width = state.orig_width;
-        det.mask.height = state.orig_height;
-        det.mask.data.resize(sam3_count_mul(state.orig_width, state.orig_height));
-        for (size_t i = 0; i < mask_resized.size(); ++i) {
-            det.mask.data[i] = (mask_resized[i] > 0.0f) ? 255 : 0;
+        auto keep = sam3_nms(dets, params.nms_threshold);
+        for (size_t i = 0; i < keep.size(); ++i) {
+            dets[keep[i]].instance_id = static_cast<int>(i) + 1;
+            result.detections.push_back(std::move(dets[keep[i]]));
         }
-        det.mask.iou_score = score;
-        det.raw_mask_logits.assign(mask_ptr, mask_ptr + sam3_count_mul(mask_hw, mask_hw));
-        det.raw_mask_width = mask_hw;
-        det.raw_mask_height = mask_hw;
-
-        dets.push_back(std::move(det));
-    }
-
-    SAM3_LOG(2,
-             "%s: %zu detections above threshold %.2f (presence=%.3f, logit=%.3f)\n",
-             __func__,
-             dets.size(),
-             params.score_threshold,
-             presence_prob,
-             presence_logit);
-
-    auto keep = sam3_nms(dets, params.nms_threshold);
-    for (size_t i = 0; i < keep.size(); ++i) {
-        dets[keep[i]].instance_id = static_cast<int>(i) + 1;
-        result.detections.push_back(std::move(dets[keep[i]]));
     }
 
     SAM3_LOG(2, "%s: %zu detections after NMS\n", __func__, result.detections.size());

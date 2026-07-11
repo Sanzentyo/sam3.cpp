@@ -23673,6 +23673,96 @@ static std::vector<float> sam3_prepare_tracker_mask_prompt(const sam3_model& mod
     return prompt;
 }
 
+static bool sam3_prepare_initial_mask_inputs_fused(const sam3_model& model,
+                                                   const sam3_detection& det,
+                                                   int input_mask_size,
+                                                   int mask_prompt_size,
+                                                   int n_threads,
+                                                   bool prepare_prompt,
+                                                   std::vector<float>& memory_logits,
+                                                   std::vector<float>& prompt) {
+    constexpr int kernel = 4;
+    constexpr int stride = 4;
+    if (det.mask.width <= 0 || det.mask.height <= 0 || input_mask_size <= 0 ||
+        mask_prompt_size <= 0 || input_mask_size != mask_prompt_size * stride ||
+        det.mask.data.size() < sam3_count_mul(det.mask.width, det.mask.height)) {
+        return false;
+    }
+
+    std::array<float, 16> weights{};
+    float bias = 0.0f;
+    if (prepare_prompt) {
+        auto* weight = model.tensors.contains("trk_mask_ds.weight")
+                           ? model.tensors.at("trk_mask_ds.weight")
+                           : nullptr;
+        auto* bias_tensor = model.tensors.contains("trk_mask_ds.bias")
+                                ? model.tensors.at("trk_mask_ds.bias")
+                                : nullptr;
+        if (weight == nullptr || bias_tensor == nullptr) {
+            return false;
+        }
+        sam3_read_f32(weight, weights.data(), static_cast<int64_t>(weights.size()));
+        sam3_read_f32(bias_tensor, &bias, 1);
+    }
+
+    sam3_bilinear_axis_map x_axis;
+    sam3_bilinear_axis_map y_axis;
+    sam3_prepare_bilinear_axis_map(x_axis, det.mask.width, input_mask_size);
+    sam3_prepare_bilinear_axis_map(y_axis, det.mask.height, input_mask_size);
+
+    memory_logits.resize(sam3_count_mul(input_mask_size, input_mask_size));
+    if (prepare_prompt) {
+        prompt.resize(sam3_count_mul(mask_prompt_size, mask_prompt_size));
+    } else {
+        prompt.clear();
+    }
+
+    const auto src_value = [&](int row, int col) {
+        return det.mask.data[sam3_count_mul(row, det.mask.width) + static_cast<size_t>(col)] > 127
+                   ? 1.0f
+                   : 0.0f;
+    };
+    const auto interpolate = [&](int y, int x) {
+        const auto yi = static_cast<size_t>(y);
+        const auto xi = static_cast<size_t>(x);
+        const int y0 = y_axis.lo[yi];
+        const int y1 = y_axis.hi[yi];
+        const int x0 = x_axis.lo[xi];
+        const int x1 = x_axis.hi[xi];
+        const float wy = y_axis.w[yi];
+        const float wx = x_axis.w[xi];
+        return ((1.0f - wy) * (((1.0f - wx) * src_value(y0, x0)) + (wx * src_value(y0, x1)))) +
+               (wy * (((1.0f - wx) * src_value(y1, x0)) + (wx * src_value(y1, x1))));
+    };
+
+    sam3_parallel_rows(mask_prompt_size, n_threads, [&](int y_begin, int y_end) {
+        for (int oy = y_begin; oy < y_end; ++oy) {
+            for (int ox = 0; ox < mask_prompt_size; ++ox) {
+                float sum = bias;
+                for (int ky = 0; ky < kernel; ++ky) {
+                    const int iy = (oy * stride) + ky;
+                    for (int kx = 0; kx < kernel; ++kx) {
+                        const int ix = (ox * stride) + kx;
+                        const float value = interpolate(iy, ix);
+                        const size_t input_index =
+                            sam3_count_mul(iy, input_mask_size) + static_cast<size_t>(ix);
+                        const float clamped = std::clamp(value, 0.0f, 1.0f);
+                        memory_logits[input_index] = (clamped * 20.0f) - 10.0f;
+                        if (prepare_prompt) {
+                            sum += weights[static_cast<size_t>(kx) + sam3_count_mul(ky, kernel)] *
+                                   value;
+                        }
+                    }
+                }
+                if (prepare_prompt) {
+                    prompt[sam3_count_mul(oy, mask_prompt_size) + static_cast<size_t>(ox)] = sum;
+                }
+            }
+        }
+    });
+    return true;
+}
+
 static bool sam3_compute_mask_input_obj_ptr(sam3_state& state,
                                             const sam3_model& model,
                                             const sam3_detection& det,
@@ -25075,12 +25165,73 @@ int sam3_tracker_add_detection(sam3_tracker& tracker,
     } else {
         const int H = sam3_eff_feat_size(state, model.hparams);
         const int input_mask_size = H * 16;
-        auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
-        synth_logits = sam3_prepare_initial_mask_memory_logits(input_mask);
-        if (!sam3_getenv("SAM3_DISABLE_SHARED_INITIAL_MASK_PREP").has_value() &&
-            det.sam_token.empty()) {
-            shared_initial_mask_prompt =
-                sam3_prepare_tracker_mask_prompt(model, input_mask, input_mask_size, H * 4);
+        const int mask_prompt_size = H * 4;
+        const bool prepare_shared_prompt =
+            !sam3_getenv("SAM3_DISABLE_SHARED_INITIAL_MASK_PREP").has_value() &&
+            det.sam_token.empty();
+        int mask_prepare_threads = 1;
+        bool used_fused_mask_prepare = false;
+        if (model.hparams.model_type == SAM3_MODEL_SAM3 &&
+            !sam3_getenv("SAM3_DISABLE_FUSED_INITIAL_MASK_PREP").has_value()) {
+            mask_prepare_threads =
+                sam3_getenv("SAM3_DISABLE_PARALLEL_INITIAL_MASK_PREP").has_value()
+                    ? 1
+                    : sam3_preprocess_thread_count(state.n_threads, input_mask_size);
+            SAM3_PROFILE_CPU_START(initial_mask_fused_prepare);
+            used_fused_mask_prepare =
+                sam3_prepare_initial_mask_inputs_fused(model,
+                                                       det,
+                                                       input_mask_size,
+                                                       mask_prompt_size,
+                                                       mask_prepare_threads,
+                                                       prepare_shared_prompt,
+                                                       synth_logits,
+                                                       shared_initial_mask_prompt);
+            SAM3_PROFILE_CPU_END(initial_mask_fused_prepare);
+        }
+        if (!used_fused_mask_prepare) {
+            SAM3_PROFILE_CPU_START(initial_mask_legacy_prepare);
+            auto input_mask = sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+            synth_logits = sam3_prepare_initial_mask_memory_logits(input_mask);
+            if (prepare_shared_prompt) {
+                shared_initial_mask_prompt = sam3_prepare_tracker_mask_prompt(
+                    model, input_mask, input_mask_size, mask_prompt_size);
+            }
+            SAM3_PROFILE_CPU_END(initial_mask_legacy_prepare);
+        }
+        if (sam3_getenv("SAM3_PROFILE_FUSED_INITIAL_MASK_PREP").has_value()) {
+            std::println(stderr,
+                         "SAM3_PROFILE_FUSED_INITIAL_MASK_PREP selected={} threads={} "
+                         "shared_prompt={}",
+                         used_fused_mask_prepare ? "fused" : "legacy",
+                         used_fused_mask_prepare ? mask_prepare_threads : 1,
+                         prepare_shared_prompt ? 1 : 0);
+        }
+        if (used_fused_mask_prepare &&
+            sam3_getenv("SAM3_VERIFY_FUSED_INITIAL_MASK_PREP").has_value()) {
+            const auto reference_input =
+                sam3_prepare_initial_mask_prompt_input(det, input_mask_size);
+            const auto reference_logits = sam3_prepare_initial_mask_memory_logits(reference_input);
+            const auto reference_prompt =
+                prepare_shared_prompt
+                    ? sam3_prepare_tracker_mask_prompt(
+                          model, reference_input, input_mask_size, mask_prompt_size)
+                    : std::vector<float>{};
+            const auto bit_equal = [](const std::vector<float>& lhs,
+                                      const std::vector<float>& rhs) {
+                return lhs.size() == rhs.size() &&
+                       (lhs.empty() ||
+                        std::memcmp(lhs.data(), rhs.data(), lhs.size() * sizeof(float)) == 0);
+            };
+            const bool logits_equal = bit_equal(synth_logits, reference_logits);
+            const bool prompt_equal = bit_equal(shared_initial_mask_prompt, reference_prompt);
+            std::println(stderr,
+                         "SAM3_VERIFY_FUSED_INITIAL_MASK_PREP logits_equal={} prompt_equal={}",
+                         logits_equal ? 1 : 0,
+                         prompt_equal ? 1 : 0);
+            if (!logits_equal || !prompt_equal) {
+                return -1;
+            }
         }
         memory_mask_w = input_mask_size;
         memory_mask_h = input_mask_size;

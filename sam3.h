@@ -106,6 +106,20 @@ struct sam3_detection {
     std::vector<float> sam_token;  // raw SAM decoder output token (for obj_ptr)
 };
 
+struct sam3_memory_stats {
+    uint64_t backend_free_bytes = 0;
+    uint64_t backend_total_bytes = 0;
+    uint64_t cuda_pool_current_reserved_bytes = 0;
+    uint64_t cuda_pool_peak_reserved_bytes = 0;
+    uint64_t cuda_pool_current_used_bytes = 0;
+    uint64_t cuda_pool_peak_used_bytes = 0;
+    uint64_t cuda_pool_largest_request_bytes = 0;
+    uint64_t cuda_pool_allocation_count = 0;
+    uint64_t cuda_pool_reuse_count = 0;
+    int cuda_pool_kind = 0;
+    bool cuda_pool_tracking_enabled = false;
+};
+
 struct sam3_result {
     std::vector<sam3_detection> detections;
 };
@@ -336,6 +350,12 @@ int sam3_model_image_size(const sam3_model& model);
 
 /* Returns the active ggml backend name, e.g. "CUDA0", "Metal", or "CPU". */
 const char* sam3_backend_name(const sam3_model& model);
+
+/* Returns a current backend memory snapshot and optional CUDA scratch-pool high-water stats. */
+std::optional<sam3_memory_stats> sam3_get_memory_stats(const sam3_model& model);
+
+/* Resets CUDA pool high-water/counter fields without freeing or reallocating memory. */
+bool sam3_reset_memory_stats(const sam3_model& model);
 
 /*
 ** ── Inference State ──────────────────────────────────────────────────────

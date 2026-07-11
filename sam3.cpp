@@ -6507,6 +6507,47 @@ const char* sam3_backend_name(const sam3_model& model) {
     return model.backend ? ggml_backend_name(model.backend) : "none";
 }
 
+std::optional<sam3_memory_stats> sam3_get_memory_stats(const sam3_model& model) {
+    if (!model.backend) {
+        return std::nullopt;
+    }
+
+    size_t free_bytes = 0;
+    size_t total_bytes = 0;
+    ggml_backend_dev_memory(ggml_backend_get_device(model.backend), &free_bytes, &total_bytes);
+    sam3_memory_stats result{
+        .backend_free_bytes = free_bytes,
+        .backend_total_bytes = total_bytes,
+    };
+#ifdef GGML_USE_CUDA
+    if (ggml_backend_is_cuda(model.backend)) {
+        ggml_backend_cuda_pool_stats pool_stats{};
+        if (ggml_backend_cuda_get_pool_stats(model.backend, &pool_stats)) {
+            result.cuda_pool_current_reserved_bytes = pool_stats.current_reserved_bytes;
+            result.cuda_pool_peak_reserved_bytes = pool_stats.peak_reserved_bytes;
+            result.cuda_pool_current_used_bytes = pool_stats.current_used_bytes;
+            result.cuda_pool_peak_used_bytes = pool_stats.peak_used_bytes;
+            result.cuda_pool_largest_request_bytes = pool_stats.largest_request_bytes;
+            result.cuda_pool_allocation_count = pool_stats.allocation_count;
+            result.cuda_pool_reuse_count = pool_stats.reuse_count;
+            result.cuda_pool_kind = pool_stats.pool_kind;
+            result.cuda_pool_tracking_enabled = pool_stats.tracking_enabled;
+        }
+    }
+#endif
+    return result;
+}
+
+bool sam3_reset_memory_stats(const sam3_model& model) {
+#ifdef GGML_USE_CUDA
+    return model.backend && ggml_backend_is_cuda(model.backend) &&
+           ggml_backend_cuda_reset_pool_stats(model.backend);
+#else
+    (void) model;
+    return false;
+#endif
+}
+
 /*****************************************************************************
 ** Inference state
 *****************************************************************************/

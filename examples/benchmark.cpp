@@ -176,6 +176,22 @@ struct BenchWire {
     int input_from_frame_dir;
     int text_init_selected_only;
     long max_rss_kib;
+    uint64_t host_rss_current_after_warmups_bytes;
+    uint64_t host_rss_current_final_bytes;
+    uint64_t host_rss_peak_after_warmups_bytes;
+    uint64_t host_rss_peak_final_bytes;
+    uint64_t backend_device_used_after_model_load_bytes;
+    uint64_t backend_device_used_after_warmups_bytes;
+    uint64_t backend_device_used_final_bytes;
+    uint64_t cuda_pool_current_reserved_bytes;
+    uint64_t cuda_pool_peak_reserved_bytes;
+    uint64_t cuda_pool_current_used_bytes;
+    uint64_t cuda_pool_peak_used_bytes;
+    uint64_t cuda_pool_largest_request_bytes;
+    uint64_t cuda_pool_allocation_count;
+    uint64_t cuda_pool_reuse_count;
+    int cuda_pool_kind;
+    int cuda_pool_tracking_enabled;
     int n_detections;
     int ok;  // 1 = success, 0 = failure
     std::array<char, 32> backend;
@@ -282,6 +298,22 @@ struct BenchResult {
     int input_from_frame_dir = 0;
     int text_init_selected_only = 0;
     long max_rss_kib = 0;
+    uint64_t host_rss_current_after_warmups_bytes = 0;
+    uint64_t host_rss_current_final_bytes = 0;
+    uint64_t host_rss_peak_after_warmups_bytes = 0;
+    uint64_t host_rss_peak_final_bytes = 0;
+    uint64_t backend_device_used_after_model_load_bytes = 0;
+    uint64_t backend_device_used_after_warmups_bytes = 0;
+    uint64_t backend_device_used_final_bytes = 0;
+    uint64_t cuda_pool_current_reserved_bytes = 0;
+    uint64_t cuda_pool_peak_reserved_bytes = 0;
+    uint64_t cuda_pool_current_used_bytes = 0;
+    uint64_t cuda_pool_peak_used_bytes = 0;
+    uint64_t cuda_pool_largest_request_bytes = 0;
+    uint64_t cuda_pool_allocation_count = 0;
+    uint64_t cuda_pool_reuse_count = 0;
+    int cuda_pool_kind = 0;
+    bool cuda_pool_tracking_enabled = false;
     int n_detections = 0;
     bool success = false;
     std::string error;
@@ -347,6 +379,35 @@ static long max_rss_to_kib(long ru_maxrss) {
 #else
     return ru_maxrss;
 #endif
+}
+
+static uint64_t current_rss_bytes() {
+#if defined(__linux__)
+    std::ifstream statm{"/proc/self/statm"};
+    uint64_t virtual_pages = 0;
+    uint64_t resident_pages = 0;
+    if (statm >> virtual_pages >> resident_pages) {
+        const long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size > 0 && resident_pages <= std::numeric_limits<uint64_t>::max() /
+                                                   static_cast<uint64_t>(page_size)) {
+            return resident_pages * static_cast<uint64_t>(page_size);
+        }
+    }
+#else
+    struct rusage usage = {};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return static_cast<uint64_t>(max_rss_to_kib(usage.ru_maxrss)) * 1024;
+    }
+#endif
+    return 0;
+}
+
+static uint64_t peak_rss_bytes() {
+    struct rusage usage = {};
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+        return static_cast<uint64_t>(max_rss_to_kib(usage.ru_maxrss)) * 1024;
+    }
+    return 0;
 }
 
 class DirHandle {
@@ -473,6 +534,16 @@ static bool read_full(int fd, std::span<std::byte> bytes) {
         done += (size_t) n;
     }
     return true;
+}
+#endif
+
+#ifdef _WIN32
+static uint64_t current_rss_bytes() {
+    return 0;
+}
+
+static uint64_t peak_rss_bytes() {
+    return 0;
 }
 #endif
 
@@ -687,6 +758,23 @@ static void apply_successful_wire(BenchResult& res, const BenchWire& wire, bool 
     res.input_from_frame_dir = wire.input_from_frame_dir;
     res.text_init_selected_only = wire.text_init_selected_only;
     res.max_rss_kib = wire.max_rss_kib;
+    res.host_rss_current_after_warmups_bytes = wire.host_rss_current_after_warmups_bytes;
+    res.host_rss_current_final_bytes = wire.host_rss_current_final_bytes;
+    res.host_rss_peak_after_warmups_bytes = wire.host_rss_peak_after_warmups_bytes;
+    res.host_rss_peak_final_bytes = wire.host_rss_peak_final_bytes;
+    res.backend_device_used_after_model_load_bytes =
+        wire.backend_device_used_after_model_load_bytes;
+    res.backend_device_used_after_warmups_bytes = wire.backend_device_used_after_warmups_bytes;
+    res.backend_device_used_final_bytes = wire.backend_device_used_final_bytes;
+    res.cuda_pool_current_reserved_bytes = wire.cuda_pool_current_reserved_bytes;
+    res.cuda_pool_peak_reserved_bytes = wire.cuda_pool_peak_reserved_bytes;
+    res.cuda_pool_current_used_bytes = wire.cuda_pool_current_used_bytes;
+    res.cuda_pool_peak_used_bytes = wire.cuda_pool_peak_used_bytes;
+    res.cuda_pool_largest_request_bytes = wire.cuda_pool_largest_request_bytes;
+    res.cuda_pool_allocation_count = wire.cuda_pool_allocation_count;
+    res.cuda_pool_reuse_count = wire.cuda_pool_reuse_count;
+    res.cuda_pool_kind = wire.cuda_pool_kind;
+    res.cuda_pool_tracking_enabled = wire.cuda_pool_tracking_enabled != 0;
     res.n_detections = wire.n_detections;
     res.backend = display_backend_name(wire.backend.data(), use_gpu);
     res.success = true;
@@ -811,6 +899,22 @@ static void print_result_json(size_t index, const BenchResult& r) {
         "\"frame0_added_instances\":{},"
         "\"text_init_selected_only\":{},"
         "\"rss_mib\":{:.6f},"
+        "\"host_rss_current_after_warmups_bytes\":{},"
+        "\"host_rss_current_final_bytes\":{},"
+        "\"host_rss_peak_after_warmups_bytes\":{},"
+        "\"host_rss_peak_final_bytes\":{},"
+        "\"backend_device_used_after_model_load_bytes\":{},"
+        "\"backend_device_used_after_warmups_bytes\":{},"
+        "\"backend_device_used_final_bytes\":{},"
+        "\"cuda_pool_current_reserved_bytes\":{},"
+        "\"cuda_pool_peak_reserved_bytes\":{},"
+        "\"cuda_pool_current_used_bytes\":{},"
+        "\"cuda_pool_peak_used_bytes\":{},"
+        "\"cuda_pool_largest_request_bytes\":{},"
+        "\"cuda_pool_allocation_count\":{},"
+        "\"cuda_pool_reuse_count\":{},"
+        "\"cuda_pool_kind\":{},"
+        "\"cuda_pool_tracking_enabled\":{},"
         "\"detections\":{}}}",
         index,
         model_json,
@@ -913,6 +1017,22 @@ static void print_result_json(size_t index, const BenchResult& r) {
         r.n_frame0_added_instances,
         r.text_init_selected_only != 0,
         r.max_rss_kib / 1024.0,
+        r.host_rss_current_after_warmups_bytes,
+        r.host_rss_current_final_bytes,
+        r.host_rss_peak_after_warmups_bytes,
+        r.host_rss_peak_final_bytes,
+        r.backend_device_used_after_model_load_bytes,
+        r.backend_device_used_after_warmups_bytes,
+        r.backend_device_used_final_bytes,
+        r.cuda_pool_current_reserved_bytes,
+        r.cuda_pool_peak_reserved_bytes,
+        r.cuda_pool_current_used_bytes,
+        r.cuda_pool_peak_used_bytes,
+        r.cuda_pool_largest_request_bytes,
+        r.cuda_pool_allocation_count,
+        r.cuda_pool_reuse_count,
+        r.cuda_pool_kind,
+        r.cuda_pool_tracking_enabled,
         r.n_detections);
 }
 
@@ -1826,6 +1946,12 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     }
 
     wire.t_load_ms = (ggml_time_us() - t0) / 1000.0;
+    if (const auto memory = sam3_get_memory_stats(*model)) {
+        wire.backend_device_used_after_model_load_bytes =
+            memory->backend_total_bytes >= memory->backend_free_bytes
+                ? memory->backend_total_bytes - memory->backend_free_bytes
+                : 0;
+    }
 
     const auto run_session = [&](bool write_outputs,
                                  bool session_quiet,
@@ -2317,6 +2443,23 @@ static BenchWire run_single_benchmark(const std::string& model_path,
                 ? session.t_tail_encode_graph_compute_ms / tail_encode_required_total_ms
                 : 0.0;
         session.n_detections = static_cast<int>(last_result.detections.size());
+        session.host_rss_current_final_bytes = current_rss_bytes();
+        session.host_rss_peak_final_bytes = peak_rss_bytes();
+        if (const auto memory = sam3_get_memory_stats(*model)) {
+            session.backend_device_used_final_bytes =
+                memory->backend_total_bytes >= memory->backend_free_bytes
+                    ? memory->backend_total_bytes - memory->backend_free_bytes
+                    : 0;
+            session.cuda_pool_current_reserved_bytes = memory->cuda_pool_current_reserved_bytes;
+            session.cuda_pool_peak_reserved_bytes = memory->cuda_pool_peak_reserved_bytes;
+            session.cuda_pool_current_used_bytes = memory->cuda_pool_current_used_bytes;
+            session.cuda_pool_peak_used_bytes = memory->cuda_pool_peak_used_bytes;
+            session.cuda_pool_largest_request_bytes = memory->cuda_pool_largest_request_bytes;
+            session.cuda_pool_allocation_count = memory->cuda_pool_allocation_count;
+            session.cuda_pool_reuse_count = memory->cuda_pool_reuse_count;
+            session.cuda_pool_kind = memory->cuda_pool_kind;
+            session.cuda_pool_tracking_enabled = memory->cuda_pool_tracking_enabled ? 1 : 0;
+        }
         session.ok = 1;
         return session;
     };
@@ -2326,6 +2469,17 @@ static BenchWire run_single_benchmark(const std::string& model_path,
         if (!warmup.ok) {
             fail(std::format("warmup {} failed: {}", i + 1, warmup.error.data()));
             return wire;
+        }
+    }
+    wire.host_rss_current_after_warmups_bytes = current_rss_bytes();
+    wire.host_rss_peak_after_warmups_bytes = peak_rss_bytes();
+    if (const auto memory = sam3_get_memory_stats(*model)) {
+        wire.backend_device_used_after_warmups_bytes =
+            memory->backend_total_bytes >= memory->backend_free_bytes
+                ? memory->backend_total_bytes - memory->backend_free_bytes
+                : 0;
+        if (memory->cuda_pool_tracking_enabled) {
+            sam3_reset_memory_stats(*model);
         }
     }
 
@@ -2425,6 +2579,18 @@ static BenchWire run_single_benchmark(const std::string& model_path,
     wire.n_frame0_candidates = measured.n_frame0_candidates;
     wire.n_frame0_added_instances = measured.n_frame0_added_instances;
     wire.text_init_selected_only = text_init_selected_only ? 1 : 0;
+    wire.host_rss_current_final_bytes = measured.host_rss_current_final_bytes;
+    wire.host_rss_peak_final_bytes = measured.host_rss_peak_final_bytes;
+    wire.backend_device_used_final_bytes = measured.backend_device_used_final_bytes;
+    wire.cuda_pool_current_reserved_bytes = measured.cuda_pool_current_reserved_bytes;
+    wire.cuda_pool_peak_reserved_bytes = measured.cuda_pool_peak_reserved_bytes;
+    wire.cuda_pool_current_used_bytes = measured.cuda_pool_current_used_bytes;
+    wire.cuda_pool_peak_used_bytes = measured.cuda_pool_peak_used_bytes;
+    wire.cuda_pool_largest_request_bytes = measured.cuda_pool_largest_request_bytes;
+    wire.cuda_pool_allocation_count = measured.cuda_pool_allocation_count;
+    wire.cuda_pool_reuse_count = measured.cuda_pool_reuse_count;
+    wire.cuda_pool_kind = measured.cuda_pool_kind;
+    wire.cuda_pool_tracking_enabled = measured.cuda_pool_tracking_enabled;
     wire.n_detections = measured.n_detections;
     if (!write_frame_timing_rows(output_frame_timing_jsonl,
                                  model_path,

@@ -433,6 +433,11 @@ def main() -> int:
     parser.add_argument("--point-x", type=float, default=315.0)
     parser.add_argument("--point-y", type=float, default=250.0)
     parser.add_argument("--text-prompt", default="person")
+    parser.add_argument(
+        "--no-preencode-cached-tail-frames",
+        action="store_true",
+        help="run point-init/other modes without the text-init cached-tail benchmark flag",
+    )
     parser.add_argument("--common-env", action="append", default=[])
     parser.add_argument("--baseline-env", action="append", default=[])
     parser.add_argument("--candidate-env", action="append", default=[])
@@ -608,10 +613,15 @@ def main() -> int:
         str(args.warmup_runs),
         "--timed-start-frame",
         "1",
-        "--preencode-cached-tail-frames",
-        "--text-init-selected-only",
-        "--no-output-artifacts",
     ]
+    if not args.no_preencode_cached_tail_frames:
+        command.extend(
+            [
+                "--preencode-cached-tail-frames",
+                "--text-init-selected-only",
+            ]
+        )
+    command.append("--no-output-artifacts")
 
     rows: dict[str, dict[str, dict[str, Any]]] = {
         "baseline": {},

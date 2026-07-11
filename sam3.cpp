@@ -15710,7 +15710,8 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
     struct ggml_tensor* query_outputs,  // [D, N, B]
     struct ggml_tensor* text_features,  // [D, T, B] (for cross-attn, can be nullptr)
     struct ggml_tensor* text_attn_bias = nullptr,
-    bool direct_pixel_decoder_whcb = false) {
+    bool direct_pixel_decoder_whcb = false,
+    bool direct_instance_conv1x1 = false) {
     const auto& seg = model.seg_head;
     const auto& tensors = model.tensors;
     const int64_t D = enc_hidden->ne[0];  // 256
@@ -15787,7 +15788,29 @@ static struct ggml_tensor* sam3_build_seg_head_graph(
 #endif
         pf_conv = ggml_cont(ctx, ggml_permute(ctx, pixel_feats, 2, 0, 1, 3));
     }
-    pf_conv = ggml_conv_2d_sk_p0(ctx, tensors.at("seg.instance_seg_head.weight"), pf_conv);
+    auto* instance_weight = tensors.at("seg.instance_seg_head.weight");
+    const bool use_direct_instance_conv1x1 =
+        direct_instance_conv1x1 && instance_weight->type == GGML_TYPE_F32 &&
+        pf_conv->type == GGML_TYPE_F32 && ggml_is_contiguous(instance_weight) &&
+        ggml_is_contiguous(pf_conv) && instance_weight->ne[0] == 1 && instance_weight->ne[1] == 1 &&
+        instance_weight->ne[2] == D && instance_weight->ne[3] == D && pf_conv->ne[0] == W &&
+        pf_conv->ne[1] == H && pf_conv->ne[2] == D && pf_conv->ne[3] == B;
+    if (sam3_getenv("SAM3_PROFILE_PCS_DIRECT_INSTANCE_CONV1X1").has_value()) {
+        fprintf(stderr,
+                "SAM3_PROFILE_PCS_DIRECT_INSTANCE_CONV1X1 selected=%s weight=%s "
+                "input=%s shape=[%lld,%lld,%lld,%lld]\n",
+                use_direct_instance_conv1x1 ? "direct" : "legacy",
+                ggml_type_name(instance_weight->type),
+                ggml_type_name(pf_conv->type),
+                static_cast<long long>(pf_conv->ne[0]),
+                static_cast<long long>(pf_conv->ne[1]),
+                static_cast<long long>(pf_conv->ne[2]),
+                static_cast<long long>(pf_conv->ne[3]));
+    }
+    pf_conv = use_direct_instance_conv1x1
+                  ? ggml_conv_2d_direct(ctx, instance_weight, pf_conv, 1, 1, 0, 0, 1, 1)
+                  : ggml_conv_2d_sk_p0(ctx, instance_weight, pf_conv);
+    ggml_set_name(pf_conv, "seg_instance_conv");
     {
         auto* b3d = ggml_reshape_3d(ctx,
                                     tensors.at("seg.instance_seg_head.bias"),
@@ -17705,6 +17728,25 @@ static bool sam3_pcs_direct_pixel_decoder_whcb_enabled() {
     return !sam3_getenv("SAM3_DISABLE_PCS_DIRECT_PIXEL_DECODER_WHCB").has_value();
 }
 
+static bool sam3_should_use_pcs_direct_instance_conv1x1(const sam3_model& model) {
+    if (sam3_getenv("SAM3_DISABLE_PCS_DIRECT_INSTANCE_CONV1X1").has_value()) {
+        return false;
+    }
+#ifdef GGML_USE_CUDA
+    const auto* weight = model.tensors.at("seg.instance_seg_head.weight");
+    return ggml_backend_is_cuda(model.backend) && ggml_backend_cuda_has_cudnn(model.backend) &&
+           !sam3_getenv("GGML_CUDA_DISABLE_CUDNN_CONV2D").has_value() &&
+           !sam3_getenv("GGML_CUDA_CUDNN_CONV2D_ALGO").has_value() &&
+           !sam3_getenv("GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F").has_value() &&
+           !sam3_getenv("GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F").has_value() &&
+           weight->type == GGML_TYPE_F32 && ggml_is_contiguous(weight) && weight->ne[0] == 1 &&
+           weight->ne[1] == 1 && weight->ne[2] == 256 && weight->ne[3] == 256;
+#else
+    GGML_UNUSED(model);
+    return false;
+#endif
+}
+
 [[nodiscard]] static bool sam3_should_alias_pcs_fpn_inputs(ggml_backend_t backend) {
     if (sam3_getenv("SAM3_DISABLE_PCS_FPN_ALIAS_INPUTS").has_value()) {
         return false;
@@ -18870,6 +18912,7 @@ sam3_result sam3_segment_pcs(sam3_state& state,
     const bool use_pcs_premask_nms = sam3_pcs_premask_nms_enabled() && !pcs_dump_dir;
     const bool use_pcs_direct_pixel_decoder_whcb =
         sam3_pcs_direct_pixel_decoder_whcb_enabled() && !pcs_dump_dir;
+    const bool use_pcs_direct_instance_conv1x1 = sam3_should_use_pcs_direct_instance_conv1x1(model);
     const bool use_pcs_fpn_cpu_copy = sam3_getenv("SAM3_DISABLE_PCS_FPN_GPU_COPY").has_value();
     const bool use_pcs_fpn_alias = !pcs_dump_dir && !use_pcs_fpn_cpu_copy &&
                                    state.backend == model.backend &&
@@ -18937,8 +18980,15 @@ sam3_result sam3_segment_pcs(sam3_state& state,
         ggml_set_name(tab, "seg_bias");
         ggml_set_input(tab);
 
-        auto* out = sam3_build_seg_head_graph(
-            ctx.get(), model, enc_h, fpn_feats, oq, txt, tab, use_pcs_direct_pixel_decoder_whcb);
+        auto* out = sam3_build_seg_head_graph(ctx.get(),
+                                              model,
+                                              enc_h,
+                                              fpn_feats,
+                                              oq,
+                                              txt,
+                                              tab,
+                                              use_pcs_direct_pixel_decoder_whcb,
+                                              use_pcs_direct_instance_conv1x1);
         ggml_set_output(out);
 
         auto* graph = ggml_new_graph_custom(ctx.get(), 32768, false);
@@ -26461,6 +26511,7 @@ bool sam3_test_dump_phase5(const sam3_model& model,
                                                   obj_queries,
                                                   text_features,
                                                   text_attn_bias,
+                                                  false,
                                                   false);
     ggml_set_name(mask_logits, "seg_mask_logits");
 
@@ -26767,6 +26818,7 @@ bool sam3_test_dump_phase5_from_ref_inputs(const sam3_model& model,
                                                   obj_queries,
                                                   text_features,
                                                   text_attn_bias,
+                                                  false,
                                                   false);
     ggml_set_name(mask_logits, "seg_mask_logits");
 
